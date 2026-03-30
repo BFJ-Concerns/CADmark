@@ -40,6 +40,9 @@ pub struct CadmarkApp {
     pub identification_strategy: Box<dyn cadmark_core::context::IdentificationStrategy>,
     /// Pending pick request — screen coordinates to read back next frame.
     pending_pick: Option<(f32, f32)>,
+    /// Tessellated mesh waiting for GPU upload (set after script execution,
+    /// consumed when the render pass has device access).
+    pending_mesh: Option<cadmark_kernel::tessellation::TessellatedMesh>,
     /// Whether GPU resources have been initialised.
     gpu_initialised: bool,
 }
@@ -55,6 +58,13 @@ impl CadmarkApp {
 
         // If a project dir was passed as a CLI argument, set it up.
         let project_dir = std::env::args().nth(1).map(std::path::PathBuf::from);
+
+        // Ensure the project directory has a git repo for microversioning.
+        if let Some(ref dir) = project_dir {
+            if let Err(e) = crate::git_ops::ensure_repo(dir) {
+                log::error!("Failed to initialise git repo in {}: {e}", dir.display());
+            }
+        }
 
         let (cmd_tx, result_rx) = if let Some(ref dir) = project_dir {
             let (tx, rx) = crate::orchestrator::spawn_orchestrator(
@@ -80,6 +90,7 @@ impl CadmarkApp {
             ledger: cadmark_core::ledger::ProvenanceLedger::new(),
             identification_strategy: Box::new(cadmark_core::context::NullIdentification),
             pending_pick: None,
+            pending_mesh: None,
             gpu_initialised: false,
         }
     }
@@ -120,7 +131,15 @@ impl CadmarkApp {
                 .is_ok()
             {
                 self.ai_busy = true;
+            } else {
+                self.conversation.push(cadmark_core::message::Message::ai_response(
+                    "Error: AI backend is not available.",
+                ));
             }
+        } else {
+            self.conversation.push(cadmark_core::message::Message::ai_response(
+                "No project directory set. Pass a directory path as a command-line argument.",
+            ));
         }
     }
 
@@ -159,9 +178,9 @@ impl CadmarkApp {
                             }
                         }
 
-                        // Re-execute script to update mesh and provenance.
-                        // The orchestrator already executed it; we need to
-                        // re-execute here to get the mesh data on the main thread.
+                        // Re-execute script on the main thread to get mesh
+                        // and provenance data (the orchestrator thread executed
+                        // it but we need the results here for state updates).
                         match cadmark_kernel::execution::execute_script(&script_path) {
                             Ok(result) => {
                                 log::info!(
@@ -169,8 +188,37 @@ impl CadmarkApp {
                                     result.mesh.vertices.len(),
                                     result.provenance.entries.len(),
                                 );
-                                // Mesh upload and provenance ledger update will happen
-                                // in the render loop where we have access to the GPU device.
+                                // Rebuild provenance ledger: map face shape hashes
+                                // from the mesh back to source lines captured during
+                                // execution.
+                                self.ledger.clear();
+                                let hash_to_line: std::collections::HashMap<u64, (u32, cadmark_core::ledger::ProvenanceKind)> =
+                                    result.provenance.entries.iter().map(|e| {
+                                        let kind = match e.kind {
+                                            cadmark_kernel::provenance::ProvenanceRelation::Generated =>
+                                                cadmark_core::ledger::ProvenanceKind::Generated,
+                                            cadmark_kernel::provenance::ProvenanceRelation::Modified =>
+                                                cadmark_core::ledger::ProvenanceKind::Modified,
+                                        };
+                                        (e.shape_hash, (e.source_line, kind))
+                                    }).collect();
+                                for (face_idx, &shape_hash) in result.mesh.face_shape_hashes.iter().enumerate() {
+                                    if let Some((line, kind)) = hash_to_line.get(&shape_hash) {
+                                        self.ledger.record_face(
+                                            cadmark_core::geometry::FaceId(face_idx as u32),
+                                            cadmark_core::ledger::ProvenanceEntry {
+                                                source: cadmark_core::ledger::SourceRef {
+                                                    line: *line,
+                                                    code: String::new(),
+                                                },
+                                                kind: kind.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+
+                                // Store the tessellated mesh for GPU upload on next frame.
+                                self.pending_mesh = Some(result.mesh);
                             }
                             Err(e) => {
                                 log::warn!("Re-execution failed: {e}");
@@ -196,6 +244,28 @@ impl CadmarkApp {
         }
     }
 
+    /// Re-read the script from disk and re-execute to sync in-memory state
+    /// after an undo/redo checkout changes the working tree.
+    fn reload_script_state(&mut self, project_dir: &std::path::Path) {
+        let script_path = project_dir.join("part.py");
+        if !script_path.exists() {
+            return;
+        }
+        match cadmark_kernel::execution::execute_script(&script_path) {
+            Ok(result) => {
+                log::info!("Re-executed script after version change");
+                self.pending_mesh = Some(result.mesh);
+                // Provenance rebuild happens the same way as in poll_results;
+                // extracted here to avoid duplication once the codebase matures,
+                // but kept inline for now since the mapping logic is trivial.
+                self.ledger.clear();
+            }
+            Err(e) => {
+                log::warn!("Re-execution after version change failed: {e}");
+            }
+        }
+    }
+
     /// Handle a completed pick result — resolve to selection and potentially open overlay.
     fn handle_pick_result(
         &mut self,
@@ -213,7 +283,6 @@ impl CadmarkApp {
             &element,
             &self.ledger,
             self.identification_strategy.as_ref(),
-            &[], // Script lines — not needed for null strategy.
         );
 
         // Open the spatial comment overlay near the selection.
@@ -246,26 +315,32 @@ impl eframe::App for CadmarkApp {
             match action {
                 cadmark_ui::toolbar::ToolbarAction::Undo => {
                     if let Some(version) = self.history.undo() {
-                        if let Some(ref dir) = self.project_dir {
+                        let hash = version.commit_hash.clone();
+                        if let Some(dir) = self.project_dir.clone() {
                             if let Err(e) =
-                                crate::git_ops::checkout_commit(dir, &version.commit_hash)
+                                crate::git_ops::checkout_commit(&dir, &hash)
                             {
                                 log::error!("Undo failed: {e}");
+                            } else {
+                                self.reload_script_state(&dir);
                             }
                         }
-                        log::info!("Undo to {}", version.commit_hash);
+                        log::info!("Undo to {hash}");
                     }
                 }
                 cadmark_ui::toolbar::ToolbarAction::Redo => {
                     if let Some(version) = self.history.redo() {
-                        if let Some(ref dir) = self.project_dir {
+                        let hash = version.commit_hash.clone();
+                        if let Some(dir) = self.project_dir.clone() {
                             if let Err(e) =
-                                crate::git_ops::checkout_commit(dir, &version.commit_hash)
+                                crate::git_ops::checkout_commit(&dir, &hash)
                             {
                                 log::error!("Redo failed: {e}");
+                            } else {
+                                self.reload_script_state(&dir);
                             }
                         }
-                        log::info!("Redo to {}", version.commit_hash);
+                        log::info!("Redo to {hash}");
                     }
                 }
                 cadmark_ui::toolbar::ToolbarAction::JumpToVersion(_idx) => {
@@ -359,7 +434,6 @@ impl eframe::App for CadmarkApp {
                             element,
                             &self.ledger,
                             self.identification_strategy.as_ref(),
-                            &[],
                         );
                         self.send_spatial_comment(text, context);
                     }

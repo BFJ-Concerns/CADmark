@@ -173,6 +173,73 @@ mod tests {
     }
 
     #[test]
+    fn build_prompt_chat_message() {
+        let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
+        let request = AiRequest::from_chat(
+            "box = Box(10, 10, 10)".to_string(),
+            "make the box bigger".to_string(),
+        );
+        let prompt = backend.build_prompt(&request);
+        assert!(prompt.contains("make the box bigger"));
+        assert!(prompt.contains("box = Box(10, 10, 10)"));
+        assert!(!prompt.contains("error"));
+    }
+
+    #[test]
+    fn build_prompt_retry_includes_traceback() {
+        let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
+        let request = AiRequest::from_chat(
+            "bad code".to_string(),
+            "fix it".to_string(),
+        ).retry_with_traceback("NameError: name 'x' is not defined".to_string());
+        let prompt = backend.build_prompt(&request);
+        assert!(prompt.contains("previous code failed"));
+        assert!(prompt.contains("NameError"));
+    }
+
+    #[test]
+    fn build_prompt_spatial_comment_includes_geometry() {
+        use cadmark_core::geometry::*;
+        let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
+        let context = GeometryContext {
+            element: TopologyElement::Face(FaceId(3)),
+            source_line: Some(5),
+            source_code: Some("box = Box(10, 10, 10)".to_string()),
+            identification: std::collections::HashMap::new(),
+        };
+        let request = AiRequest::from_spatial_comment(
+            "code".to_string(),
+            "round this edge".to_string(),
+            context,
+        );
+        let prompt = backend.build_prompt(&request);
+        assert!(prompt.contains("face #3"));
+        assert!(prompt.contains("line 5"));
+        assert!(prompt.contains("box = Box(10, 10, 10)"));
+    }
+
+    #[test]
+    fn build_prompt_with_identification_data() {
+        use cadmark_core::geometry::*;
+        let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
+        let mut identification = std::collections::HashMap::new();
+        identification.insert("position".to_string(), "top face".to_string());
+        let context = GeometryContext {
+            element: TopologyElement::Face(FaceId(0)),
+            source_line: None,
+            source_code: None,
+            identification,
+        };
+        let request = AiRequest::from_spatial_comment(
+            "code".to_string(),
+            "fillet this".to_string(),
+            context,
+        );
+        let prompt = backend.build_prompt(&request);
+        assert!(prompt.contains("position: top face"));
+    }
+
+    #[test]
     fn parse_response_extracts_code_and_summary() {
         let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
         let raw = "I've updated the code:\n```python\nbox = Box(20, 20, 20)\n```\nSummary: Doubled box dimensions";

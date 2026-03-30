@@ -56,3 +56,48 @@ impl AiRequest {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_chat_sets_fields_correctly() {
+        let req = AiRequest::from_chat("code".to_string(), "hello".to_string());
+        assert_eq!(req.current_code, "code");
+        assert_eq!(req.user_message, "hello");
+        assert!(req.geometry_context.is_none());
+        assert!(!req.is_retry);
+        assert!(req.traceback.is_none());
+    }
+
+    #[test]
+    fn from_spatial_comment_includes_context() {
+        let ctx = GeometryContext {
+            element: cadmark_core::geometry::TopologyElement::Face(
+                cadmark_core::geometry::FaceId(1),
+            ),
+            source_line: Some(10),
+            source_code: Some("box = Box(5,5,5)".to_string()),
+            identification: std::collections::HashMap::new(),
+        };
+        let req = AiRequest::from_spatial_comment(
+            "code".to_string(),
+            "round this".to_string(),
+            ctx,
+        );
+        assert!(req.geometry_context.is_some());
+        assert_eq!(req.geometry_context.unwrap().source_line, Some(10));
+    }
+
+    #[test]
+    fn retry_with_traceback_sets_retry_fields() {
+        let req = AiRequest::from_chat("code".to_string(), "msg".to_string())
+            .retry_with_traceback("NameError".to_string());
+        assert!(req.is_retry);
+        assert_eq!(req.traceback.as_deref(), Some("NameError"));
+        // Original fields preserved.
+        assert_eq!(req.current_code, "code");
+        assert_eq!(req.user_message, "msg");
+    }
+}

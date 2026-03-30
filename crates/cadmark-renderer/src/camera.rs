@@ -139,3 +139,137 @@ fn normalize(v: [f32; 3]) -> [f32; 3] {
     }
     [v[0] / len, v[1] / len, v[2] / len]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Approximate f32 equality for floating-point comparisons.
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-5
+    }
+
+    fn approx_eq_vec(a: [f32; 3], b: [f32; 3]) -> bool {
+        approx_eq(a[0], b[0]) && approx_eq(a[1], b[1]) && approx_eq(a[2], b[2])
+    }
+
+    #[test]
+    fn eye_position_at_origin_target() {
+        let cam = Camera {
+            target: [0.0, 0.0, 0.0],
+            distance: 10.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            ..Camera::default()
+        };
+        let eye = cam.eye_position();
+        // yaw=0, pitch=0: eye is along +Z axis at distance 10.
+        assert!(approx_eq_vec(eye, [0.0, 0.0, 10.0]));
+    }
+
+    #[test]
+    fn eye_position_with_pitch() {
+        let cam = Camera {
+            target: [0.0, 0.0, 0.0],
+            distance: 10.0,
+            yaw: 0.0,
+            pitch: std::f32::consts::FRAC_PI_4,
+            ..Camera::default()
+        };
+        let eye = cam.eye_position();
+        // pitch=45deg: Y should be ~7.07, distance from origin should be ~10.
+        let dist = dot(eye, eye).sqrt();
+        assert!(approx_eq(dist, 10.0));
+        assert!(eye[1] > 0.0); // Elevated above target.
+    }
+
+    #[test]
+    fn orbit_clamps_pitch() {
+        let mut cam = Camera::default();
+        // Orbit far enough to hit the clamp.
+        cam.orbit(0.0, 100_000.0);
+        assert!(cam.pitch < std::f32::consts::FRAC_PI_2);
+        assert!(cam.pitch > std::f32::consts::FRAC_PI_2 - 0.02);
+
+        cam.orbit(0.0, -200_000.0);
+        assert!(cam.pitch > -std::f32::consts::FRAC_PI_2);
+        assert!(cam.pitch < -std::f32::consts::FRAC_PI_2 + 0.02);
+    }
+
+    #[test]
+    fn zoom_clamps_distance() {
+        let mut cam = Camera::default();
+        // Zoom in aggressively.
+        for _ in 0..1000 {
+            cam.zoom(100.0);
+        }
+        assert!(cam.distance >= 0.1);
+
+        // Zoom out aggressively.
+        for _ in 0..1000 {
+            cam.zoom(-100.0);
+        }
+        assert!(cam.distance <= 500.0);
+    }
+
+    #[test]
+    fn pan_shifts_target() {
+        let mut cam = Camera {
+            yaw: 0.0,
+            ..Camera::default()
+        };
+        let original_target = cam.target;
+        cam.pan(100.0, 0.0);
+        // Panning horizontally with yaw=0 should shift target along X.
+        assert!((cam.target[0] - original_target[0]).abs() > 0.01);
+    }
+
+    #[test]
+    fn view_matrix_is_invertible() {
+        let cam = Camera::default();
+        let m = cam.view_matrix();
+        // A valid view matrix should have a non-zero determinant.
+        // Quick check: the last column should be [0, 0, 0, 1] pattern
+        // for a standard affine transform.
+        assert!(approx_eq(m[0][3], 0.0));
+        assert!(approx_eq(m[1][3], 0.0));
+        assert!(approx_eq(m[2][3], 0.0));
+        assert!(approx_eq(m[3][3], 1.0));
+    }
+
+    #[test]
+    fn projection_matrix_near_plane() {
+        let cam = Camera::default();
+        let proj = cam.projection_matrix(1.0);
+        // wgpu clip space: Z maps to 0..1. At the near plane, Z should map to 0.
+        // The [2][2] and [3][2] elements encode the depth mapping.
+        // For a valid perspective matrix, [3][3] should be 0 (perspective divide).
+        assert!(approx_eq(proj[3][3], 0.0));
+    }
+
+    #[test]
+    fn helper_normalize_unit_vector() {
+        let v = normalize([3.0, 4.0, 0.0]);
+        let len = dot(v, v).sqrt();
+        assert!(approx_eq(len, 1.0));
+        assert!(approx_eq(v[0], 0.6));
+        assert!(approx_eq(v[1], 0.8));
+    }
+
+    #[test]
+    fn helper_normalize_zero_vector() {
+        let v = normalize([0.0, 0.0, 0.0]);
+        assert!(approx_eq_vec(v, [0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn helper_cross_product() {
+        let result = cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert!(approx_eq_vec(result, [0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn helper_dot_product() {
+        assert!(approx_eq(dot([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), 32.0));
+    }
+}

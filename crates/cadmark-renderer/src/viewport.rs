@@ -3,7 +3,6 @@
 // Handles the wgpu render pass within eframe's paint callback,
 // issues the picking readback, and reports which element was hovered.
 
-use crate::camera::Camera;
 use crate::mesh::GpuMesh;
 use crate::picking::{self, PickingPass};
 use crate::pipeline::{MeshUniforms, RenderPipelines, SimpleUniforms};
@@ -19,10 +18,6 @@ pub struct ViewportRenderState {
     pub pick_request: Option<(u32, u32)>,
 }
 
-/// Result of a picking readback — which element is under the cursor.
-pub struct PickResult {
-    pub element: Option<cadmark_core::geometry::TopologyElement>,
-}
 
 /// Encode a render pass for the main shaded mesh + wireframe overlay.
 pub fn render_scene(
@@ -202,14 +197,12 @@ pub fn request_pick_readback(
 
 /// Read back the picking result from the staging buffer.
 /// Must be called after the GPU has finished the copy (map the buffer first).
-pub fn decode_pick_result(data: &[u8]) -> PickResult {
+pub fn decode_pick_result(data: &[u8]) -> Option<cadmark_core::geometry::TopologyElement> {
     if data.len() < 4 {
-        return PickResult { element: None };
+        return None;
     }
 
     let pixel = [data[0], data[1], data[2], data[3]];
     let id = picking::colour_to_id(pixel);
-    let element = picking::decode_picking_id(id);
-
-    PickResult { element }
+    picking::decode_picking_id(id)
 }

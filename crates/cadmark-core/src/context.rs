@@ -6,8 +6,8 @@
 // 2. Identification (experimental): which specific element was clicked.
 // 3. Output format (stable): packages the result for the AI bridge.
 
-use crate::geometry::{EdgeId, FaceId, GeometryContext, TopologyElement, VertexId};
-use crate::ledger::{ProvenanceLedger, SourceRef};
+use crate::geometry::{GeometryContext, TopologyElement};
+use crate::ledger::ProvenanceLedger;
 
 /// Strategy for identifying which specific element was clicked.
 /// ADR-0003 mandates this layer is modular and experimental.
@@ -48,7 +48,6 @@ pub fn resolve_context(
     element: &TopologyElement,
     ledger: &ProvenanceLedger,
     strategy: &dyn IdentificationStrategy,
-    script_lines: &[&str],
 ) -> GeometryContext {
     // Step 1: Provenance lookup.
     let provenance = match element {
@@ -57,14 +56,8 @@ pub fn resolve_context(
         TopologyElement::Vertex(id) => ledger.lookup_vertex(*id),
     };
 
-    let (source_line, source_code) = if let Some(entry) = provenance {
-        (
-            Some(entry.source.line),
-            Some(entry.source.code.clone()),
-        )
-    } else {
-        (None, None)
-    };
+    let source_line = provenance.map(|e| e.source.line);
+    let source_code = provenance.map(|e| e.source.code.clone());
 
     // Step 2: Identification strategy.
     let identification = strategy.identify(element);
@@ -81,7 +74,8 @@ pub fn resolve_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{ProvenanceEntry, ProvenanceKind};
+    use crate::geometry::{EdgeId, FaceId};
+    use crate::ledger::{ProvenanceEntry, ProvenanceKind, SourceRef};
 
     #[test]
     fn resolve_face_with_provenance() {
@@ -99,7 +93,7 @@ mod tests {
 
         let element = TopologyElement::Face(FaceId(3));
         let strategy = NullIdentification;
-        let context = resolve_context(&element, &ledger, &strategy, &[]);
+        let context = resolve_context(&element, &ledger, &strategy);
 
         assert_eq!(context.source_line, Some(5));
         assert_eq!(
@@ -114,7 +108,7 @@ mod tests {
         let ledger = ProvenanceLedger::new();
         let element = TopologyElement::Edge(EdgeId(99));
         let strategy = NullIdentification;
-        let context = resolve_context(&element, &ledger, &strategy, &[]);
+        let context = resolve_context(&element, &ledger, &strategy);
 
         assert_eq!(context.source_line, None);
         assert_eq!(context.source_code, None);
@@ -147,7 +141,7 @@ mod tests {
         let ledger = ProvenanceLedger::new();
         let element = TopologyElement::Face(FaceId(7));
         let strategy = TestStrategy;
-        let context = resolve_context(&element, &ledger, &strategy, &[]);
+        let context = resolve_context(&element, &ledger, &strategy);
 
         assert_eq!(context.identification.get("face_index").unwrap(), "7");
         assert_eq!(context.identification.get("method").unwrap(), "test");

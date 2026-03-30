@@ -61,8 +61,12 @@ def _cadmark_wrap_builder(original_cls, cls_name):
         def Build(self, *args, **kwargs):
             result = super().Build(*args, **kwargs)
             shape = self.Shape()
+            # Skip null shapes — they produced no geometry worth tracking,
+            # and hashing them would collide with real HashCode values.
+            if shape.IsNull():
+                return result
             _cadmark_provenance.append({
-                'shape_hash': hash(shape.IsNull()) if shape.IsNull() else shape.HashCode(2**31 - 1),
+                'shape_hash': shape.HashCode(2**31 - 1),
                 'source_line': self._cadmark_source_line,
                 'kind': 'generated',
                 'builder': cls_name,

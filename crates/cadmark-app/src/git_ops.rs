@@ -119,18 +119,20 @@ pub fn list_microversions(
     project_dir: &Path,
     count: usize,
 ) -> Result<Vec<Microversion>, GitError> {
+    // Use null byte as record separator — it cannot appear in commit text,
+    // unlike the old "---END---" delimiter which could collide with user input.
     let log_output = run_git(
         project_dir,
         &[
             "log",
             &format!("-{count}"),
-            "--format=%H%n%s%n%aI%n%b%n---END---",
+            "--format=%H%n%s%n%aI%n%b%x00",
         ],
     )?;
 
     let mut versions = Vec::new();
 
-    for entry in log_output.split("---END---") {
+    for entry in log_output.split('\0') {
         let entry = entry.trim();
         if entry.is_empty() {
             continue;
