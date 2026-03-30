@@ -31,6 +31,13 @@ pub fn ensure_repo(project_dir: &Path) -> Result<(), GitError> {
     }
 
     run_git(project_dir, &["init"])?;
+
+    // Set a local fallback identity so commits work even on machines
+    // without a global git config. Harmless if one already exists —
+    // local config just overrides for this repo.
+    run_git(project_dir, &["config", "user.name", "CADmark"])?;
+    run_git(project_dir, &["config", "user.email", "cadmark@local"])?;
+
     Ok(())
 }
 
@@ -50,6 +57,15 @@ pub fn create_microversion(
     trigger_message: &str,
     script_filename: &str,
 ) -> Result<Microversion, GitError> {
+    // If HEAD is detached (e.g. after undo navigation), create a branch
+    // so the new commit isn't orphaned. The branch name encodes the short
+    // hash we diverged from, making it discoverable and unique.
+    if is_head_detached(project_dir)? {
+        let base = run_git(project_dir, &["rev-parse", "--short", "HEAD"])?;
+        let branch_name = format!("cadmark-edit-{}", base.trim());
+        run_git(project_dir, &["checkout", "-b", &branch_name])?;
+    }
+
     // Stage the script file.
     run_git(project_dir, &["add", script_filename])?;
 
@@ -192,6 +208,17 @@ pub fn switch_branch(project_dir: &Path, name: &str) -> Result<(), GitError> {
     Ok(())
 }
 
+/// Check whether HEAD is detached (not on any branch).
+fn is_head_detached(project_dir: &Path) -> Result<bool, GitError> {
+    let output = run_git(project_dir, &["symbolic-ref", "-q", "HEAD"]);
+    match output {
+        Ok(_) => Ok(false),
+        // symbolic-ref exits non-zero when HEAD is detached — that's expected.
+        Err(GitError::CommandFailed(_)) => Ok(true),
+        Err(e) => Err(e),
+    }
+}
+
 /// Get the current branch name (or "HEAD" if detached).
 pub fn current_branch(project_dir: &Path) -> Result<String, GitError> {
     let output = run_git(project_dir, &["branch", "--show-current"])?;
@@ -244,6 +271,22 @@ mod tests {
     }
 
     #[test]
+    fn ensure_repo_sets_fallback_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_repo(dir.path()).unwrap();
+
+        let name = run_git(dir.path(), &["config", "user.name"]).unwrap();
+        let email = run_git(dir.path(), &["config", "user.email"]).unwrap();
+        assert_eq!(name.trim(), "CADmark");
+        assert_eq!(email.trim(), "cadmark@local");
+
+        // First commit should succeed without external identity.
+        fs::write(dir.path().join("test.txt"), "hello").unwrap();
+        run_git(dir.path(), &["add", "test.txt"]).unwrap();
+        run_git(dir.path(), &["commit", "-m", "initial"]).unwrap();
+    }
+
+    #[test]
     fn create_and_list_microversions() {
         let dir = test_repo();
         let script = "part.py";
@@ -278,6 +321,31 @@ mod tests {
 
         let versions = list_microversions(dir.path(), 10).unwrap();
         assert!(versions[0].snapshot.is_some());
+    }
+
+    #[test]
+    fn commit_from_detached_head_creates_branch() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let v1 =
+            create_microversion(dir.path(), "First version", "make a box", script).unwrap();
+
+        // Detach HEAD by checking out the commit directly.
+        checkout_commit(dir.path(), &v1.commit_hash).unwrap();
+        assert_eq!(current_branch(dir.path()).unwrap(), "HEAD");
+
+        // A new microversion from detached HEAD should create a branch.
+        fs::write(dir.path().join(script), "box = Box(30, 30, 30)").unwrap();
+        create_microversion(dir.path(), "Divergent edit", "change it", script).unwrap();
+
+        // HEAD should now be on a named branch, not detached.
+        let branch = current_branch(dir.path()).unwrap();
+        assert_ne!(branch, "HEAD", "should have re-attached to a branch");
+        assert!(
+            branch.starts_with("cadmark-edit-"),
+            "branch name should encode the base commit"
+        );
     }
 
     #[test]

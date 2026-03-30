@@ -1,5 +1,10 @@
 // Application state — the top-level struct that owns all subsystems
 // and implements the eframe::App trait.
+//
+// The 3D viewport is rendered via egui_wgpu paint callbacks. GPU
+// resources (pipelines, picking texture, mesh buffers) live in
+// egui_wgpu's callback_resources so the paint callback can access
+// them without lifetime gymnastics.
 
 use std::sync::mpsc;
 
@@ -12,6 +17,198 @@ use cadmark_ui::overlay::OverlayState;
 
 use crate::orchestrator::{OrchestratorCommand, OrchestratorResult};
 
+// ── Viewport GPU resources ──────────────────────────────────────────
+
+/// GPU resources for the 3D viewport, stored in egui_wgpu's
+/// `callback_resources` so both `prepare()` and `paint()` can reach them.
+struct ViewportResources {
+    pipelines: cadmark_renderer::pipeline::RenderPipelines,
+    picking: cadmark_renderer::picking::PickingPass,
+    mesh: Option<cadmark_renderer::mesh::GpuMesh>,
+    /// A pick readback was issued last frame and the staging buffer
+    /// is ready to map.
+    readback_pending: bool,
+    /// Decoded pick result from the most recent readback, waiting
+    /// for `update()` to consume it.
+    pick_result: Option<cadmark_core::geometry::TopologyElement>,
+    /// Last-known viewport size in physical pixels — triggers resize
+    /// of the picking texture and depth buffer when it changes.
+    viewport_size: (u32, u32),
+}
+
+/// Per-frame data passed into the egui_wgpu paint callback.
+/// Carries everything that changes frame-to-frame (uniforms,
+/// whether a pick was requested, viewport dimensions).
+struct ViewportCallback {
+    mesh_uniforms: cadmark_renderer::pipeline::MeshUniforms,
+    simple_uniforms: cadmark_renderer::pipeline::SimpleUniforms,
+    /// Pixel coordinates within the viewport to read back for
+    /// picking, if the user clicked this frame.
+    pick_request: Option<(u32, u32)>,
+    /// Viewport size in physical pixels (for resize detection).
+    viewport_size: (u32, u32),
+}
+
+impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen_descriptor: &eframe::egui_wgpu::ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut eframe::egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let Some(res) = callback_resources.get_mut::<ViewportResources>() else {
+            return Vec::new();
+        };
+
+        // ── Read back previous frame's pick result ──
+        if res.readback_pending {
+            res.readback_pending = false;
+            let slice = res.picking.staging_buffer.slice(..256);
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            slice.map_async(wgpu::MapMode::Read, move |v| {
+                let _ = tx.send(v);
+            });
+            device.poll(wgpu::Maintain::Wait);
+            if let Ok(Ok(())) = rx.recv() {
+                let data = slice.get_mapped_range();
+                res.pick_result =
+                    cadmark_renderer::viewport::decode_pick_result(&data);
+                drop(data);
+                res.picking.staging_buffer.unmap();
+            }
+        }
+
+        // ── Resize picking texture + depth if viewport changed ──
+        let (w, h) = self.viewport_size;
+        if w > 0 && h > 0 && (w, h) != res.viewport_size {
+            res.picking.resize(device, w, h);
+            res.pipelines.resize(device, w, h);
+            res.viewport_size = (w, h);
+        }
+
+        // ── Write per-frame uniforms ──
+        queue.write_buffer(
+            &res.pipelines.mesh_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.mesh_uniforms),
+        );
+        queue.write_buffer(
+            &res.pipelines.picking_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.simple_uniforms),
+        );
+        queue.write_buffer(
+            &res.pipelines.wireframe_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&self.simple_uniforms),
+        );
+
+        // ── Offscreen picking pass + optional readback ──
+        if let Some(mesh) = &res.mesh {
+            // Render colour-ID picking pass to offscreen texture.
+            {
+                let mut pass =
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("picking_pass"),
+                        color_attachments: &[Some(
+                            wgpu::RenderPassColorAttachment {
+                                view: &res.picking.texture_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(
+                                        wgpu::Color::BLACK,
+                                    ),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            },
+                        )],
+                        depth_stencil_attachment: Some(
+                            wgpu::RenderPassDepthStencilAttachment {
+                                view: &res.pipelines.depth_texture,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(1.0),
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            },
+                        ),
+                        ..Default::default()
+                    });
+
+                pass.set_pipeline(&res.pipelines.picking_pipeline);
+                pass.set_bind_group(
+                    0,
+                    &res.pipelines.picking_bind_group,
+                    &[],
+                );
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(
+                    mesh.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            }
+
+            // Copy a single pixel from the picking texture to the
+            // staging buffer so we can map it next frame.
+            if let Some((x, y)) = self.pick_request {
+                cadmark_renderer::viewport::request_pick_readback(
+                    encoder,
+                    &res.picking,
+                    x,
+                    y,
+                );
+                res.readback_pending = true;
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        callback_resources: &eframe::egui_wgpu::CallbackResources,
+    ) {
+        let Some(res) = callback_resources.get::<ViewportResources>() else {
+            return;
+        };
+        let Some(mesh) = &res.mesh else {
+            return;
+        };
+
+        // Shaded mesh pass.
+        render_pass.set_pipeline(&res.pipelines.mesh_pipeline);
+        render_pass.set_bind_group(0, &res.pipelines.mesh_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        render_pass.set_index_buffer(
+            mesh.index_buffer.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+
+        // Wireframe overlay.
+        if mesh.edge_vertex_count > 0 {
+            render_pass.set_pipeline(&res.pipelines.wireframe_pipeline);
+            render_pass.set_bind_group(
+                0,
+                &res.pipelines.wireframe_bind_group,
+                &[],
+            );
+            render_pass.set_vertex_buffer(
+                0,
+                mesh.edge_vertex_buffer.slice(..),
+            );
+            render_pass.draw(0..mesh.edge_vertex_count, 0..1);
+        }
+    }
+}
+
+// ── Application state ───────────────────────────────────────────────
+
 /// Top-level application state.
 pub struct CadmarkApp {
     /// Conversation history displayed in the chat pane.
@@ -22,7 +219,7 @@ pub struct CadmarkApp {
     pub overlay: OverlayState,
     /// Version history for undo/redo.
     pub history: VersionHistory,
-    /// 3D renderer state.
+    /// 3D renderer state (camera, selection IDs, style).
     pub renderer: Renderer,
     /// Current selection in the viewport.
     pub selection: SelectionState,
@@ -38,17 +235,27 @@ pub struct CadmarkApp {
     pub ledger: cadmark_core::ledger::ProvenanceLedger,
     /// Active identification strategy for geometry context.
     pub identification_strategy: Box<dyn cadmark_core::context::IdentificationStrategy>,
-    /// Pending pick request — screen coordinates to read back next frame.
-    pending_pick: Option<(f32, f32)>,
-    /// Tessellated mesh waiting for GPU upload (set after script execution,
-    /// consumed when the render pass has device access).
+    /// Tessellated mesh waiting for GPU upload (set after script
+    /// execution, consumed in `update()` when the render state is
+    /// accessible).
     pending_mesh: Option<cadmark_kernel::tessellation::TessellatedMesh>,
-    /// Whether GPU resources have been initialised.
-    gpu_initialised: bool,
+    /// Local click coordinates (relative to viewport rect) for the
+    /// pending pick request. Consumed in the same frame to build the
+    /// paint callback.
+    pending_pick: Option<(f32, f32)>,
+    /// Absolute screen position of the in-flight pick, preserved
+    /// across frames so `handle_pick_result` can position the overlay
+    /// correctly when the readback arrives.
+    pick_in_flight: Option<(f32, f32)>,
+    /// Whether a mesh has been uploaded to the GPU (for placeholder
+    /// text logic — avoids locking the renderer to check).
+    has_mesh: bool,
+    /// Cloned render state for GPU access from the UI thread.
+    wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
 }
 
 impl CadmarkApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         // On first launch, add an initial AI message.
         let mut conversation = Conversation::new();
         conversation.push(cadmark_core::message::Message::ai_response(
@@ -76,6 +283,32 @@ impl CadmarkApp {
             (None, None)
         };
 
+        // Initialise GPU resources and insert into callback_resources
+        // so the paint callback can reach them.
+        let wgpu_render_state = cc.wgpu_render_state.clone();
+        if let Some(ref rs) = wgpu_render_state {
+            let format = rs.target_format;
+            // Start with a reasonable default size — the first frame's
+            // prepare() will resize to the actual viewport.
+            let (w, h) = (800, 600);
+            let pipelines =
+                cadmark_renderer::pipeline::RenderPipelines::new(
+                    &rs.device, format, w, h,
+                );
+            let picking =
+                cadmark_renderer::picking::PickingPass::new(&rs.device, w, h);
+
+            let resources = ViewportResources {
+                pipelines,
+                picking,
+                mesh: None,
+                readback_pending: false,
+                pick_result: None,
+                viewport_size: (w, h),
+            };
+            rs.renderer.write().callback_resources.insert(resources);
+        }
+
         Self {
             conversation,
             chat: ChatPane::new(),
@@ -89,9 +322,11 @@ impl CadmarkApp {
             result_rx,
             ledger: cadmark_core::ledger::ProvenanceLedger::new(),
             identification_strategy: Box::new(cadmark_core::context::NullIdentification),
-            pending_pick: None,
             pending_mesh: None,
-            gpu_initialised: false,
+            pending_pick: None,
+            pick_in_flight: None,
+            has_mesh: false,
+            wgpu_render_state,
         }
     }
 
@@ -217,7 +452,9 @@ impl CadmarkApp {
                                     }
                                 }
 
-                                // Store the tessellated mesh for GPU upload on next frame.
+                                // Store the tessellated mesh for GPU upload on
+                                // the next frame (update() has access to the
+                                // wgpu device via the render state).
                                 self.pending_mesh = Some(result.mesh);
                             }
                             Err(e) => {
@@ -251,9 +488,19 @@ impl CadmarkApp {
         if !script_path.exists() {
             return;
         }
+        // Read the current script source to sync the orchestrator.
+        let script_source = std::fs::read_to_string(&script_path).ok();
+
         match cadmark_kernel::execution::execute_script(&script_path) {
             Ok(result) => {
                 log::info!("Re-executed script after version change");
+
+                // Sync the orchestrator's cached code so the next AI request
+                // sends the correct (post-undo/redo) source.
+                if let (Some(tx), Some(code)) = (&self.cmd_tx, script_source) {
+                    let _ = tx.send(OrchestratorCommand::UpdateCode(code));
+                }
+
                 self.pending_mesh = Some(result.mesh);
                 // Provenance rebuild happens the same way as in poll_results;
                 // extracted here to avoid duplication once the codebase matures,
@@ -266,7 +513,8 @@ impl CadmarkApp {
         }
     }
 
-    /// Handle a completed pick result — resolve to selection and potentially open overlay.
+    /// Handle a completed pick result — resolve to selection and
+    /// potentially open the spatial comment overlay.
     fn handle_pick_result(
         &mut self,
         element: cadmark_core::geometry::TopologyElement,
@@ -297,6 +545,51 @@ impl CadmarkApp {
             context.source_line
         );
     }
+
+    // ── GPU helpers called from update() ────────────────────────────
+
+    /// Upload a pending tessellated mesh to GPU buffers.
+    fn drain_pending_mesh(&mut self) {
+        let mesh = match self.pending_mesh.take() {
+            Some(m) => m,
+            None => return,
+        };
+        let Some(rs) = &self.wgpu_render_state else { return };
+
+        let gpu_mesh =
+            cadmark_renderer::pipeline::upload_mesh(&rs.device, &mesh);
+
+        let mut renderer = rs.renderer.write();
+        if let Some(res) =
+            renderer.callback_resources.get_mut::<ViewportResources>()
+        {
+            res.mesh = Some(gpu_mesh);
+        }
+        self.has_mesh = true;
+    }
+
+    /// Check callback_resources for a decoded pick result from the
+    /// previous frame's readback. If one exists, consume it.
+    fn consume_pick_result(&mut self) {
+        let Some(rs) = self.wgpu_render_state.clone() else { return };
+
+        // Extract the pick result from callback_resources.
+        let element = {
+            let mut renderer = rs.renderer.write();
+            let Some(res) =
+                renderer.callback_resources.get_mut::<ViewportResources>()
+            else {
+                return;
+            };
+            res.pick_result.take()
+        };
+
+        if let Some(element) = element {
+            if let Some(screen_pos) = self.pick_in_flight.take() {
+                self.handle_pick_result(element, screen_pos);
+            }
+        }
+    }
 }
 
 impl eframe::App for CadmarkApp {
@@ -304,8 +597,13 @@ impl eframe::App for CadmarkApp {
         // Poll for async results from the orchestrator.
         self.poll_results();
 
-        // Request continuous repaints while AI is busy (to poll results).
-        if self.ai_busy {
+        // Drain pending GPU work before building the frame.
+        self.consume_pick_result();
+        self.drain_pending_mesh();
+
+        // Request continuous repaints while AI is busy (to poll results)
+        // or when a pick readback is in flight.
+        if self.ai_busy || self.pick_in_flight.is_some() {
             ctx.request_repaint();
         }
 
@@ -386,8 +684,15 @@ impl eframe::App for CadmarkApp {
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
                     let local_pos = pos - rect.min;
+                    // Local coordinates feed the GPU picking texture.
                     self.pending_pick = Some((local_pos.x, local_pos.y));
-                    log::debug!("Pick requested at ({}, {})", local_pos.x, local_pos.y);
+                    // Absolute coordinates position the overlay on result.
+                    self.pick_in_flight = Some((pos.x, pos.y));
+                    log::debug!(
+                        "Pick requested at ({}, {})",
+                        local_pos.x,
+                        local_pos.y
+                    );
                 }
             }
 
@@ -407,18 +712,46 @@ impl eframe::App for CadmarkApp {
                 self.overlay.close();
             }
 
-            // Draw the viewport background.
+            // ── Viewport rendering ──────────────────────────────────
+
+            // Background rect — always drawn so the viewport has a
+            // consistent dark fill even before any mesh is loaded.
             ui.painter().rect_filled(
                 rect,
                 0.0,
                 egui::Color32::from_rgb(30, 30, 35),
             );
 
-            if self.renderer.mesh.is_none() {
+            // Build the paint callback that drives the wgpu renderer.
+            let ppp = ctx.pixels_per_point();
+            let viewport_size = (
+                (rect.width() * ppp) as u32,
+                (rect.height() * ppp) as u32,
+            );
+            let aspect = rect.width() / rect.height().max(1.0);
+
+            // Consume the pending pick (local coords → pixel coords).
+            let pick_request = self.pending_pick.take().map(|(x, y)| {
+                ((x * ppp) as u32, (y * ppp) as u32)
+            });
+
+            let callback = eframe::egui_wgpu::Callback::new_paint_callback(
+                rect,
+                ViewportCallback {
+                    mesh_uniforms: self.renderer.mesh_uniforms(aspect),
+                    simple_uniforms: self.renderer.simple_uniforms(aspect),
+                    pick_request,
+                    viewport_size,
+                },
+            );
+            ui.painter().add(callback);
+
+            // Placeholder text when no mesh is loaded yet.
+            if !self.has_mesh {
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "3D Viewport — describe a part to get started",
+                    "3D Viewport \u{2014} describe a part to get started",
                     egui::FontId::proportional(16.0),
                     egui::Color32::from_rgb(80, 80, 90),
                 );

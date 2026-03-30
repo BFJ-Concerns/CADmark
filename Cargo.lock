@@ -589,6 +589,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 name = "cadmark-app"
 version = "0.0.1"
 dependencies = [
+ "bytemuck",
  "cadmark-bridge",
  "cadmark-core",
  "cadmark-kernel",
@@ -602,6 +603,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "wgpu",
 ]
 
 [[package]]
