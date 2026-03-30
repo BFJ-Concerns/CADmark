@@ -1,0 +1,33 @@
+# Build artifacts
+/target/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local overrides
+*.local
+*.local.*
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors & IDEs
+*.swp
+*.swo
+*~
+.idea/
+*.iml
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
