@@ -122,4 +122,69 @@ impl Conversation {
             message.mark_applied();
         }
     }
+
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::{FaceId, GeometryContext, TopologyElement};
+
+    fn sample_geometry_context() -> GeometryContext {
+        GeometryContext {
+            element: TopologyElement::Face(FaceId(5)),
+            source_line: Some(10),
+            source_code: Some("box = Box(10, 10, 10)".to_string()),
+            identification: Default::default(),
+        }
+    }
+
+    #[test]
+    fn spatial_comment_lifecycle() {
+        let mut msg = Message::spatial_comment("Make this edge sharper", sample_geometry_context());
+        assert!(!msg.is_applied());
+
+        msg.mark_applied();
+        assert!(msg.is_applied());
+    }
+
+    #[test]
+    fn mark_applied_is_noop_on_non_spatial() {
+        let mut msg = Message::user_chat("hello");
+        msg.mark_applied(); // Should not panic.
+        assert!(!msg.is_applied());
+    }
+
+    #[test]
+    fn conversation_marks_all_spatial_applied() {
+        let mut conv = Conversation::new();
+        conv.push(Message::user_chat("make a box"));
+        conv.push(Message::spatial_comment("round this", sample_geometry_context()));
+        conv.push(Message::ai_response("Done."));
+        conv.push(Message::spatial_comment("and this", sample_geometry_context()));
+
+        conv.mark_all_spatial_applied();
+
+        // Both spatial comments should be applied.
+        let applied_count = conv.messages().iter().filter(|m| m.is_applied()).count();
+        assert_eq!(applied_count, 2);
+
+        // Non-spatial messages are unaffected.
+        assert!(!conv.messages()[0].is_applied());
+        assert!(!conv.messages()[2].is_applied());
+    }
+
+    #[test]
+    fn message_ids_are_unique() {
+        let a = Message::user_chat("one");
+        let b = Message::user_chat("two");
+        assert_ne!(a.id, b.id);
+    }
 }

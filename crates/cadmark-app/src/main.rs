@@ -5,6 +5,8 @@
 
 use eframe::egui;
 
+pub mod git_ops;
+pub mod orchestrator;
 mod state;
 
 fn main() -> eframe::Result<()> {

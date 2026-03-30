@@ -1,8 +1,6 @@
 // Tessellation extraction — converts OCP shapes to triangle meshes
 // for the wgpu renderer.
 
-use std::ffi::CString;
-
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;

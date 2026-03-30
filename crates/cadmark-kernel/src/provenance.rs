@@ -4,8 +4,6 @@
 // source lines generated which topological elements. Uses OCCT's
 // BRepBuilderAPI Modified/Generated/IsDeleted history interface.
 
-use std::ffi::CString;
-
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::IntoPyObjectExt;
