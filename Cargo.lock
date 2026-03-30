@@ -594,10 +594,13 @@ dependencies = [
  "cadmark-kernel",
  "cadmark-renderer",
  "cadmark-ui",
+ "chrono",
  "eframe",
  "egui",
  "env_logger",
  "log",
+ "tempfile",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -643,6 +646,7 @@ version = "0.0.1"
 dependencies = [
  "bytemuck",
  "cadmark-core",
+ "cadmark-kernel",
  "log",
  "pollster",
  "thiserror 2.0.18",

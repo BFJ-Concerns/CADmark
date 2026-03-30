@@ -10,7 +10,8 @@ pub struct GpuVertex {
     pub normal: [f32; 3],
     /// Face ID encoded as float for the picking pass.
     pub face_id: f32,
-    _padding: f32,
+    /// Alignment padding to 32 bytes.
+    pub _padding: f32,
 }
 
 /// Vertex layout for wireframe edge rendering.

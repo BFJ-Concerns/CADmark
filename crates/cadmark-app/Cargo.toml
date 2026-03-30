@@ -12,5 +12,10 @@ cadmark-bridge = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -109,3 +109,89 @@ impl Default for VersionHistory {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_version(hash: &str, summary: &str) -> Microversion {
+        Microversion {
+            commit_hash: hash.to_string(),
+            summary: summary.to_string(),
+            trigger_message: "test".to_string(),
+            timestamp: Utc::now(),
+            snapshot: None,
+        }
+    }
+
+    #[test]
+    fn empty_history_cannot_undo_or_redo() {
+        let history = VersionHistory::new();
+        assert!(!history.can_undo());
+        assert!(!history.can_redo());
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn push_and_undo() {
+        let mut history = VersionHistory::new();
+        history.push(make_version("aaa", "first"));
+        history.push(make_version("bbb", "second"));
+        history.push(make_version("ccc", "third"));
+
+        assert_eq!(history.current().unwrap().commit_hash, "ccc");
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
+
+        let undone = history.undo().unwrap();
+        assert_eq!(undone.commit_hash, "bbb");
+        assert!(history.can_redo());
+
+        let undone2 = history.undo().unwrap();
+        assert_eq!(undone2.commit_hash, "aaa");
+        assert!(!history.can_undo()); // At the oldest.
+    }
+
+    #[test]
+    fn redo_after_undo() {
+        let mut history = VersionHistory::new();
+        history.push(make_version("aaa", "first"));
+        history.push(make_version("bbb", "second"));
+
+        history.undo();
+        let redone = history.redo().unwrap();
+        assert_eq!(redone.commit_hash, "bbb");
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn push_after_undo_truncates_redo_history() {
+        let mut history = VersionHistory::new();
+        history.push(make_version("aaa", "first"));
+        history.push(make_version("bbb", "second"));
+        history.push(make_version("ccc", "third"));
+
+        // Undo back to "bbb".
+        history.undo();
+        assert_eq!(history.current().unwrap().commit_hash, "bbb");
+
+        // Push a new version — "ccc" should be gone.
+        history.push(make_version("ddd", "branch"));
+        assert_eq!(history.len(), 3); // ddd, bbb, aaa
+        assert_eq!(history.current().unwrap().commit_hash, "ddd");
+        assert!(!history.can_redo());
+    }
+
+    #[test]
+    fn recent_returns_correct_slice() {
+        let mut history = VersionHistory::new();
+        history.push(make_version("aaa", "first"));
+        history.push(make_version("bbb", "second"));
+        history.push(make_version("ccc", "third"));
+
+        let recent = history.recent(2);
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].commit_hash, "ccc");
+        assert_eq!(recent[1].commit_hash, "bbb");
+    }
+}
