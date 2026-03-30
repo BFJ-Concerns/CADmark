@@ -1,0 +1,13 @@
+[package]
+name = "cadmark-kernel"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+cadmark-core = { workspace = true }
+pyo3 = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

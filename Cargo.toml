@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "crates/cadmark-core",
+    "crates/cadmark-kernel",
+    "crates/cadmark-renderer",
+    "crates/cadmark-ui",
+    "crates/cadmark-bridge",
+    "crates/cadmark-app",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# Internal crates
+cadmark-core = { path = "crates/cadmark-core" }
+cadmark-kernel = { path = "crates/cadmark-kernel" }
+cadmark-renderer = { path = "crates/cadmark-renderer" }
+cadmark-ui = { path = "crates/cadmark-ui" }
+cadmark-bridge = { path = "crates/cadmark-bridge" }
+
+# Serialisation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Python embedding
+pyo3 = { version = "0.24", features = ["auto-initialize"] }
+
+# GPU rendering
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+
+# UI
+egui = "0.31"
+eframe = { version = "0.31", features = ["wgpu"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
