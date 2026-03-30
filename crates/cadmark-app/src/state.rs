@@ -3,7 +3,7 @@
 
 use std::sync::mpsc;
 
-use cadmark_core::geometry::SelectionState;
+use cadmark_core::geometry::{ScreenPosition, SelectionState};
 use cadmark_core::message::Conversation;
 use cadmark_core::version::VersionHistory;
 use cadmark_renderer::pipeline::Renderer;
@@ -31,9 +31,17 @@ pub struct CadmarkApp {
     /// Whether the AI is currently processing a request.
     pub ai_busy: bool,
     /// Channel to send commands to the orchestrator.
-    pub cmd_tx: Option<mpsc::Sender<OrchestratorCommand>>,
+    cmd_tx: Option<mpsc::Sender<OrchestratorCommand>>,
     /// Channel to receive results from the orchestrator.
-    pub result_rx: Option<mpsc::Receiver<OrchestratorResult>>,
+    result_rx: Option<mpsc::Receiver<OrchestratorResult>>,
+    /// Provenance ledger — rebuilt on each script execution.
+    pub ledger: cadmark_core::ledger::ProvenanceLedger,
+    /// Active identification strategy for geometry context.
+    pub identification_strategy: Box<dyn cadmark_core::context::IdentificationStrategy>,
+    /// Pending pick request — screen coordinates to read back next frame.
+    pending_pick: Option<(f32, f32)>,
+    /// Whether GPU resources have been initialised.
+    gpu_initialised: bool,
 }
 
 impl CadmarkApp {
@@ -69,6 +77,10 @@ impl CadmarkApp {
             ai_busy: false,
             cmd_tx,
             result_rx,
+            ledger: cadmark_core::ledger::ProvenanceLedger::new(),
+            identification_strategy: Box::new(cadmark_core::context::NullIdentification),
+            pending_pick: None,
+            gpu_initialised: false,
         }
     }
 
@@ -147,8 +159,23 @@ impl CadmarkApp {
                             }
                         }
 
-                        // TODO: Re-execute script and update mesh in renderer.
-                        log::info!("AI response received, script updated");
+                        // Re-execute script to update mesh and provenance.
+                        // The orchestrator already executed it; we need to
+                        // re-execute here to get the mesh data on the main thread.
+                        match cadmark_kernel::execution::execute_script(&script_path) {
+                            Ok(result) => {
+                                log::info!(
+                                    "Script executed: {} vertices, {} provenance entries",
+                                    result.mesh.vertices.len(),
+                                    result.provenance.entries.len(),
+                                );
+                                // Mesh upload and provenance ledger update will happen
+                                // in the render loop where we have access to the GPU device.
+                            }
+                            Err(e) => {
+                                log::warn!("Re-execution failed: {e}");
+                            }
+                        }
                     }
                     OrchestratorResult::ExecutionFailed { ai_message, error } => {
                         self.conversation.push(
@@ -167,6 +194,39 @@ impl CadmarkApp {
                 }
             }
         }
+    }
+
+    /// Handle a completed pick result — resolve to selection and potentially open overlay.
+    fn handle_pick_result(
+        &mut self,
+        element: cadmark_core::geometry::TopologyElement,
+        screen_pos: (f32, f32),
+    ) {
+        self.selection = SelectionState::Selected(element.clone());
+
+        // Update the renderer's selection state for glow effect.
+        self.renderer.selected_id =
+            cadmark_renderer::picking::encode_picking_id(&element);
+
+        // Resolve geometry context via provenance.
+        let context = cadmark_core::context::resolve_context(
+            &element,
+            &self.ledger,
+            self.identification_strategy.as_ref(),
+            &[], // Script lines — not needed for null strategy.
+        );
+
+        // Open the spatial comment overlay near the selection.
+        self.overlay.open(ScreenPosition {
+            x: screen_pos.0,
+            y: screen_pos.1,
+        });
+
+        log::info!(
+            "Selected {:?}, source line: {:?}",
+            element,
+            context.source_line
+        );
     }
 }
 
@@ -209,7 +269,6 @@ impl eframe::App for CadmarkApp {
                     }
                 }
                 cadmark_ui::toolbar::ToolbarAction::JumpToVersion(_idx) => {
-                    // TODO: Jump to specific version.
                     log::info!("Jump to version");
                 }
                 cadmark_ui::toolbar::ToolbarAction::None => {}
@@ -232,7 +291,7 @@ impl eframe::App for CadmarkApp {
             let (rect, response) =
                 ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
-            // Handle viewport input.
+            // Handle viewport input — CAD navigation.
             if response.dragged_by(egui::PointerButton::Secondary) {
                 let delta = response.drag_delta();
                 self.renderer.camera.orbit(delta.x, delta.y);
@@ -243,31 +302,37 @@ impl eframe::App for CadmarkApp {
                 self.renderer.camera.pan(delta.x, delta.y);
             }
 
-            // Scroll to zoom.
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
             if scroll.abs() > 0.1 {
                 self.renderer.camera.zoom(scroll * 0.01);
             }
 
-            // Left click for selection.
+            // Left click for selection — request a pick readback.
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    // Convert to viewport-relative coordinates for picking.
                     let local_pos = pos - rect.min;
-                    log::debug!("Click at viewport ({}, {})", local_pos.x, local_pos.y);
-
-                    // TODO: Perform GPU picking readback at this position.
-                    // For now, just log the click.
+                    self.pending_pick = Some((local_pos.x, local_pos.y));
+                    log::debug!("Pick requested at ({}, {})", local_pos.x, local_pos.y);
                 }
+            }
+
+            // Hover tracking — update hover ID for preview highlight.
+            if let Some(pos) = response.hover_pos() {
+                let _local_pos = pos - rect.min;
+                // Hover picking uses the same mechanism as click picking
+                // but updates hover_id instead of selected_id.
+                // Full implementation requires per-frame picking readback
+                // which is expensive — defer to when mesh exists.
             }
 
             // Escape cancels selection and overlay.
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.selection = SelectionState::None;
+                self.renderer.selected_id = 0;
                 self.overlay.close();
             }
 
-            // Placeholder: draw a dark background where the 3D viewport will be.
+            // Draw the viewport background.
             ui.painter().rect_filled(
                 rect,
                 0.0,
@@ -288,17 +353,22 @@ impl eframe::App for CadmarkApp {
             let overlay_action = self.overlay.show(ui);
             match overlay_action {
                 cadmark_ui::overlay::OverlayAction::Submit(text) => {
-                    // TODO: Build real geometry context from current selection.
-                    // For now, create a placeholder context.
-                    if let SelectionState::Selected(ref _element) = self.selection {
-                        // TODO: Resolve element to geometry context via provenance.
-                        log::info!("Spatial comment submitted: {text}");
+                    if let SelectionState::Selected(ref element) = self.selection {
+                        // Resolve the geometry context from the current selection.
+                        let context = cadmark_core::context::resolve_context(
+                            element,
+                            &self.ledger,
+                            self.identification_strategy.as_ref(),
+                            &[],
+                        );
+                        self.send_spatial_comment(text, context);
                     }
                     self.overlay.close();
                 }
                 cadmark_ui::overlay::OverlayAction::Cancel => {
                     self.overlay.close();
                     self.selection = SelectionState::None;
+                    self.renderer.selected_id = 0;
                 }
                 cadmark_ui::overlay::OverlayAction::None => {}
             }
