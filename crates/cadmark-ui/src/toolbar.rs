@@ -61,10 +61,42 @@ pub fn show_toolbar(
     action
 }
 
+/// Truncate a string to at most `max` characters, appending "..." if shortened.
+/// Operates on char boundaries to avoid panicking on multi-byte UTF-8.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let char_count = s.chars().count();
+    if char_count <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max.min(s.len())])
+        let end = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
+        format!("{}...", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_short_string_unchanged() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_long_ascii() {
+        assert_eq!(truncate("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_multibyte_characters() {
+        // Each emoji is 4 bytes — byte-level slicing would panic.
+        let emoji = "\u{1F600}\u{1F601}\u{1F602}";
+        let result = truncate(emoji, 2);
+        assert_eq!(result, "\u{1F600}\u{1F601}...");
+    }
+
+    #[test]
+    fn truncate_exact_length() {
+        assert_eq!(truncate("abcde", 5), "abcde");
     }
 }

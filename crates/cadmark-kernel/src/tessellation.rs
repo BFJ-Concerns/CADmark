@@ -128,7 +128,9 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
                     'shape_hash': edge.HashCode(2**31 - 1),
                 })
         except Exception:
-            pass
+            # Some edges (seam edges, degenerate edges from boolean ops)
+            # cannot be tessellated. Skip them — the mesh renders without
+            # those wireframe segments, which is acceptable.
         edge_explorer.Next()
 
     return {

@@ -39,7 +39,7 @@ pub fn decode_picking_id(id: u32) -> Option<TopologyElement> {
 }
 
 /// Encode a picking ID as RGBA bytes for the colour attachment.
-/// Uses R and G channels for the 32-bit ID (little-endian).
+/// Splits the 32-bit ID across all four channels in little-endian order.
 pub fn id_to_colour(id: u32) -> [u8; 4] {
     [
         (id & 0xFF) as u8,

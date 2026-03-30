@@ -9,10 +9,10 @@
 // 6. On success: updates the mesh, creates a microversion commit, updates chat.
 // 7. On failure: reports the error in chat.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 
-use cadmark_bridge::backend::{AiBackend, AiResponse, BackendError};
+use cadmark_bridge::backend::{AiBackend, AiResponse};
 use cadmark_bridge::context::AiRequest;
 use cadmark_core::geometry::GeometryContext;
 
@@ -157,7 +157,12 @@ impl Orchestrator {
                             }
                             Err(retry_error) => {
                                 // Restore the original code on double failure.
-                                let _ = std::fs::write(&script_path, &self.current_code);
+                                if let Err(restore_err) = std::fs::write(&script_path, &self.current_code) {
+                                    log::error!(
+                                        "Failed to restore script after execution error: {restore_err}. \
+                                         File may contain broken AI-generated code."
+                                    );
+                                }
                                 OrchestratorResult::ExecutionFailed {
                                     ai_message: retry_response.message,
                                     error: format!(
@@ -169,7 +174,12 @@ impl Orchestrator {
                     }
                     Err(e) => {
                         // Restore the original code.
-                        let _ = std::fs::write(&script_path, &self.current_code);
+                        if let Err(restore_err) = std::fs::write(&script_path, &self.current_code) {
+                            log::error!(
+                                "Failed to restore script after backend error: {restore_err}. \
+                                 File may contain broken AI-generated code."
+                            );
+                        }
                         OrchestratorResult::BackendError(format!(
                             "Retry failed: {e}\n\nOriginal error:\n{traceback}"
                         ))
@@ -205,7 +215,12 @@ pub fn spawn_orchestrator(
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async {
             let mut orchestrator = Orchestrator::new(project_dir.clone(), script_filename);
-            let _ = orchestrator.load_current_code();
+            if let Err(e) = orchestrator.load_current_code() {
+                log::error!("Failed to load existing script: {e}");
+                let _ = result_tx.send(OrchestratorResult::BackendError(
+                    format!("Could not read project script: {e}"),
+                ));
+            }
 
             let backend =
                 cadmark_bridge::claude_code::ClaudeCodeBackend::new(project_dir);

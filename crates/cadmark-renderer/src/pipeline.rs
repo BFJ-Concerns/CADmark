@@ -55,14 +55,16 @@ pub struct RenderPipelines {
     pub mesh_bind_group: wgpu::BindGroup,
 
     pub picking_pipeline: wgpu::RenderPipeline,
-    pub picking_bind_group_layout: wgpu::BindGroupLayout,
     pub picking_uniform_buffer: wgpu::Buffer,
     pub picking_bind_group: wgpu::BindGroup,
 
     pub wireframe_pipeline: wgpu::RenderPipeline,
-    pub wireframe_bind_group_layout: wgpu::BindGroupLayout,
     pub wireframe_uniform_buffer: wgpu::Buffer,
     pub wireframe_bind_group: wgpu::BindGroup,
+
+    /// Shared bind group layout for picking and wireframe passes
+    /// (single uniform buffer at binding 0, vertex-stage visibility).
+    pub simple_bind_group_layout: wgpu::BindGroupLayout,
 
     pub depth_texture: wgpu::TextureView,
 }
@@ -167,18 +169,11 @@ impl RenderPipelines {
                 cache: None,
             });
 
-        // -- Picking pipeline (Rgba8Uint target) --
-        let picking_shader =
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("picking_shader"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("shaders/picking.wgsl").into(),
-                ),
-            });
-
-        let picking_bind_group_layout =
+        // Shared layout for picking and wireframe — both need a single
+        // uniform buffer at binding 0 with vertex-stage visibility.
+        let simple_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("picking_bind_group_layout"),
+                label: Some("simple_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX,
@@ -191,6 +186,15 @@ impl RenderPipelines {
                 }],
             });
 
+        // -- Picking pipeline (Rgba8Uint target) --
+        let picking_shader =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("picking_shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/picking.wgsl").into(),
+                ),
+            });
+
         let picking_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("picking_uniforms"),
             size: std::mem::size_of::<SimpleUniforms>() as u64,
@@ -200,7 +204,7 @@ impl RenderPipelines {
 
         let picking_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("picking_bind_group"),
-            layout: &picking_bind_group_layout,
+            layout: &simple_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: picking_uniform_buffer.as_entire_binding(),
@@ -210,7 +214,7 @@ impl RenderPipelines {
         let picking_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("picking_pipeline_layout"),
-                bind_group_layouts: &[&picking_bind_group_layout],
+                bind_group_layouts: &[&simple_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -269,21 +273,6 @@ impl RenderPipelines {
                 ),
             });
 
-        let wireframe_bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("wireframe_bind_group_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
-
         let wireframe_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wireframe_uniforms"),
             size: std::mem::size_of::<SimpleUniforms>() as u64,
@@ -293,7 +282,7 @@ impl RenderPipelines {
 
         let wireframe_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("wireframe_bind_group"),
-            layout: &wireframe_bind_group_layout,
+            layout: &simple_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wireframe_uniform_buffer.as_entire_binding(),
@@ -303,7 +292,7 @@ impl RenderPipelines {
         let wireframe_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("wireframe_pipeline_layout"),
-                bind_group_layouts: &[&wireframe_bind_group_layout],
+                bind_group_layouts: &[&simple_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -359,13 +348,12 @@ impl RenderPipelines {
             mesh_uniform_buffer,
             mesh_bind_group,
             picking_pipeline,
-            picking_bind_group_layout,
             picking_uniform_buffer,
             picking_bind_group,
             wireframe_pipeline,
-            wireframe_bind_group_layout,
             wireframe_uniform_buffer,
             wireframe_bind_group,
+            simple_bind_group_layout,
             depth_texture,
         }
     }
