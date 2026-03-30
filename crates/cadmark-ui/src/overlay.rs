@@ -1,0 +1,119 @@
+// Comment overlay — appears near selected geometry with a connecting line.
+//
+// Positioned in screen space near the selection point. The user writes
+// free text and submits. Escape cancels and returns to default state.
+
+use cadmark_core::geometry::ScreenPosition;
+
+/// State for the spatial comment overlay.
+#[derive(Debug)]
+pub enum OverlayState {
+    /// No overlay visible.
+    Hidden,
+    /// Overlay is open at a screen position, user is writing.
+    Active {
+        /// Where the selected element is on screen.
+        anchor: ScreenPosition,
+        /// The text the user is writing.
+        text: String,
+    },
+}
+
+impl Default for OverlayState {
+    fn default() -> Self {
+        Self::Hidden
+    }
+}
+
+/// Result of showing the overlay — what action the user took.
+pub enum OverlayAction {
+    /// No action — overlay still open or hidden.
+    None,
+    /// User submitted a spatial comment.
+    Submit(String),
+    /// User cancelled (Escape).
+    Cancel,
+}
+
+impl OverlayState {
+    /// Open the overlay at the given screen position.
+    pub fn open(&mut self, anchor: ScreenPosition) {
+        *self = Self::Active {
+            anchor,
+            text: String::new(),
+        };
+    }
+
+    /// Close the overlay.
+    pub fn close(&mut self) {
+        *self = Self::Hidden;
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active { .. })
+    }
+
+    /// Render the overlay. Returns the action the user took.
+    pub fn show(&mut self, ui: &mut egui::Ui) -> OverlayAction {
+        match self {
+            Self::Hidden => OverlayAction::None,
+            Self::Active { anchor, text } => {
+                let mut action = OverlayAction::None;
+
+                // Position the overlay near the anchor with an offset.
+                let overlay_pos = egui::pos2(anchor.x + 20.0, anchor.y - 10.0);
+
+                egui::Area::new(egui::Id::new("spatial_comment_overlay"))
+                    .fixed_pos(overlay_pos)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            ui.label(
+                                egui::RichText::new("Spatial Comment")
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(100, 200, 255)),
+                            );
+
+                            let response = ui.text_edit_multiline(text);
+
+                            // Submit on Ctrl+Enter.
+                            if response.has_focus()
+                                && ui.input(|i| {
+                                    i.modifiers.ctrl && i.key_pressed(egui::Key::Enter)
+                                })
+                                && !text.trim().is_empty()
+                            {
+                                action = OverlayAction::Submit(text.trim().to_string());
+                            }
+
+                            ui.horizontal(|ui| {
+                                if ui.button("Submit").clicked() && !text.trim().is_empty() {
+                                    action = OverlayAction::Submit(text.trim().to_string());
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    action = OverlayAction::Cancel;
+                                }
+                            });
+
+                            // Escape cancels.
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                action = OverlayAction::Cancel;
+                            }
+                        });
+                    });
+
+                // Draw connecting line from overlay to anchor.
+                let painter = ui.painter();
+                painter.line_segment(
+                    [
+                        egui::pos2(anchor.x, anchor.y),
+                        overlay_pos,
+                    ],
+                    egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 200, 255)),
+                );
+
+                action
+            }
+        }
+    }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "cadmark-renderer"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+cadmark-core = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
+pollster = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "cadmark-app"
+version = "0.0.1"
+edition = "2024"
+
+[dependencies]
+cadmark-core = { workspace = true }
+cadmark-kernel = { workspace = true }
+cadmark-renderer = { workspace = true }
+cadmark-ui = { workspace = true }
+cadmark-bridge = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+tokio = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }

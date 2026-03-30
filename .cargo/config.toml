@@ -1,0 +1,6 @@
+[env]
+# Point PyO3 at the project's Python 3.12 venv.
+# cadquery-ocp requires 3.12 — system Python may be newer.
+# Relative paths don't work for build scripts — they run in a temp dir.
+# Using the uv-managed Python 3.12 directly.
+PYO3_PYTHON = "/home/user/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12"
