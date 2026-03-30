@@ -11,6 +11,8 @@ cadmark-ui = { workspace = true }
 cadmark-bridge = { workspace = true }
 eframe = { workspace = true }
 egui = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }

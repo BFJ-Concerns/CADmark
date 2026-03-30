@@ -25,6 +25,8 @@ pub enum OrchestratorCommand {
         text: String,
         context: GeometryContext,
     },
+    /// Undo/redo changed the working tree — sync the cached source code.
+    UpdateCode(String),
 }
 
 /// Results sent from the orchestrator back to the UI thread.
@@ -226,19 +228,29 @@ pub fn spawn_orchestrator(
                 cadmark_bridge::claude_code::ClaudeCodeBackend::new(project_dir);
 
             while let Ok(cmd) = cmd_rx.recv() {
-                let result = match cmd {
-                    OrchestratorCommand::ChatMessage(msg) => {
-                        orchestrator.handle_chat(&msg, &backend).await
+                match cmd {
+                    // Code sync from undo/redo — no result to send back.
+                    OrchestratorCommand::UpdateCode(code) => {
+                        orchestrator.set_current_code(code);
+                        continue;
                     }
-                    OrchestratorCommand::SpatialComment { text, context } => {
-                        orchestrator
-                            .handle_spatial_comment(&text, context, &backend)
-                            .await
-                    }
-                };
+                    cmd => {
+                        let result = match cmd {
+                            OrchestratorCommand::ChatMessage(msg) => {
+                                orchestrator.handle_chat(&msg, &backend).await
+                            }
+                            OrchestratorCommand::SpatialComment { text, context } => {
+                                orchestrator
+                                    .handle_spatial_comment(&text, context, &backend)
+                                    .await
+                            }
+                            OrchestratorCommand::UpdateCode(_) => unreachable!(),
+                        };
 
-                if result_tx.send(result).is_err() {
-                    break; // UI thread dropped the receiver.
+                        if result_tx.send(result).is_err() {
+                            break; // UI thread dropped the receiver.
+                        }
+                    }
                 }
             }
         });
