@@ -3,6 +3,7 @@
 // Provenance ledger, geometry context, spatial comments,
 // message types, and microversion metadata.
 
+pub mod context;
 pub mod geometry;
 pub mod ledger;
 pub mod message;
