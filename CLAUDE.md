@@ -23,7 +23,7 @@ Rust workspace with six crates:
 ```bash
 cargo check          # Type-check
 cargo test           # Run all tests
-cargo run -- <dir>   # Run with a project directory
+cargo run -- [dir]   # Run with a project directory (defaults to cwd)
 ```
 
 Requires Python 3.12 (cadquery-ocp). The `.cargo/config.toml` points PyO3

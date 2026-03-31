@@ -311,8 +311,14 @@ impl CadmarkApp {
              or open a project directory to continue working.",
         ));
 
-        // If a project dir was passed as a CLI argument, set it up.
-        let project_dir = std::env::args().nth(1).map(std::path::PathBuf::from);
+        // If a project dir was passed as a CLI argument, use it;
+        // otherwise default to the current working directory.
+        let project_dir = Some(
+            std::env::args()
+                .nth(1)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::current_dir().expect("failed to read current directory")),
+        );
 
         // Ensure the project directory has a git repo for microversioning.
         if let Some(ref dir) = project_dir {
