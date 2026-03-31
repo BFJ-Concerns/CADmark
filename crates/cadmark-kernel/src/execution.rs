@@ -78,14 +78,28 @@ pub fn activate_venv(venv_path: &Path) -> Result<(), ExecutionError> {
 ///
 /// Search order:
 /// 1. `VIRTUAL_ENV` environment variable
-/// 2. `.venv/` next to the running executable
-/// 3. `.venv/` in the current working directory
+/// 2. `.venv/` in the workspace root (baked in at compile time)
+/// 3. `.venv/` near the running executable (walk up 4 levels)
+/// 4. `.venv/` in the current working directory
 pub fn discover_and_activate_venv() -> Result<(), ExecutionError> {
     // VIRTUAL_ENV — set by shell activation or launch scripts.
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
         let path = Path::new(&venv);
         if path.is_dir() {
             return activate_venv(path);
+        }
+    }
+
+    // Compile-time workspace root: CARGO_MANIFEST_DIR points at
+    // crates/cadmark-kernel/, so the workspace root is two levels up.
+    // This survives installation — the path is baked into the binary.
+    {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
+            let candidate = workspace_root.join(".venv");
+            if candidate.is_dir() {
+                return activate_venv(&candidate);
+            }
         }
     }
 
