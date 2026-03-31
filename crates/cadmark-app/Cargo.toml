@@ -3,6 +3,10 @@ name = "cadmark-app"
 version.workspace = true
 edition = "2024"
 
+[[bin]]
+name = "cadmark"
+path = "src/main.rs"
+
 [dependencies]
 cadmark-core = { workspace = true }
 cadmark-kernel = { workspace = true }
