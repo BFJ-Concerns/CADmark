@@ -145,14 +145,33 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
 ";
 
 /// Code to find the result shape in the script namespace.
+///
+/// Checks for raw OCP shapes, build123d Shape subclasses, and Builder
+/// context managers (BuildPart, BuildSketch, BuildLine) which store
+/// their result in `.part`, `.sketch`, or `.line` respectively.
 const FIND_SHAPE_CODE: &std::ffi::CStr = c"
 _cadmark_result_shape = None
 for _name, _val in list(locals().items()):
     if _name.startswith('_cadmark'):
         continue
     _type_name = type(_val).__name__
-    if _type_name in ('Solid', 'Compound', 'Shell', 'Part'):
+
+    # Direct OCP/build123d shape types.
+    if _type_name in ('Solid', 'Compound', 'Shell', 'Part', 'Shape', 'Face'):
         _cadmark_result_shape = _val
+
+    # Builder context managers — extract their built result.
+    elif _type_name == 'BuildPart':
+        if hasattr(_val, 'part') and _val.part is not None:
+            _cadmark_result_shape = _val.part
+    elif _type_name == 'BuildSketch':
+        if hasattr(_val, 'sketch') and _val.sketch is not None:
+            _cadmark_result_shape = _val.sketch
+    elif _type_name == 'BuildLine':
+        if hasattr(_val, 'line') and _val.line is not None:
+            _cadmark_result_shape = _val.line
+
+    # Fallback: anything with an OCP .wrapped attribute and a .part accessor.
     elif hasattr(_val, 'wrapped') and hasattr(_val, 'part'):
         _cadmark_result_shape = _val.part
 ";
