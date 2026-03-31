@@ -131,6 +131,7 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
             # Some edges (seam edges, degenerate edges from boolean ops)
             # cannot be tessellated. Skip them — the mesh renders without
             # those wireframe segments, which is acceptable.
+            pass
         edge_explorer.Next()
 
     return {
