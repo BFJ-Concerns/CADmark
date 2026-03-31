@@ -34,10 +34,20 @@ impl ChatPane {
     ) -> Option<String> {
         let mut submitted = None;
 
+        // Reserve space for the input area at the bottom first,
+        // so the scroll area doesn't greedily consume everything.
+        let input_height = 28.0 + ui.spacing().item_spacing.y + 2.0;
+        let separator_height = ui.spacing().item_spacing.y * 2.0 + 1.0;
+        let bottom_reserve = input_height + separator_height;
+
+        let available = ui.available_height();
+        let scroll_height = (available - bottom_reserve).max(40.0);
+
         // Message list.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .stick_to_bottom(self.auto_scroll)
+            .max_height(scroll_height)
             .show(ui, |ui| {
                 for message in conversation.messages() {
                     match &message.kind {
