@@ -10,6 +10,10 @@ use std::pin::Pin;
 use crate::backend::{AiBackend, AiResponse, BackendError};
 use crate::context::AiRequest;
 
+/// System prompt giving the headless Claude build123d expertise and
+/// parametric modelling instructions. Baked in at compile time.
+const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
+
 /// Claude Code AI backend — invokes the CLI as a subprocess.
 pub struct ClaudeCodeBackend {
     /// Working directory for the Claude Code subprocess.
@@ -101,11 +105,14 @@ impl AiBackend for ClaudeCodeBackend {
         Box::pin(async move {
             let prompt = self.build_prompt(&request);
 
-            // Invoke Claude Code in headless/print mode.
+            // Invoke Claude Code in headless/print mode with build123d
+            // expertise via the system prompt.
             let output = tokio::process::Command::new("claude")
                 .arg("--print")
                 .arg("--output-format")
                 .arg("text")
+                .arg("--system-prompt")
+                .arg(SYSTEM_PROMPT)
                 .arg(&prompt)
                 .current_dir(&self.project_dir)
                 .output()
