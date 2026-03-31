@@ -303,6 +303,9 @@ pub struct CadmarkApp {
     /// Whether the initial script load has been attempted. Deferred to
     /// the first `update()` call so that `self` is fully constructed.
     initial_load_done: bool,
+    /// Last execution status — shown on the viewport and in the status
+    /// bar so the user can see what went wrong without checking logs.
+    status_message: Option<String>,
 }
 
 impl CadmarkApp {
@@ -391,6 +394,7 @@ impl CadmarkApp {
             has_mesh: false,
             wgpu_render_state,
             initial_load_done: false,
+            status_message: None,
         }
     }
 
@@ -545,25 +549,59 @@ impl CadmarkApp {
         }
     }
 
-    /// Re-read the script from disk and re-execute to sync in-memory state
-    /// after an undo/redo checkout changes the working tree.
+    /// Re-read the script from disk and re-execute to sync in-memory state.
+    /// Used on startup, after undo/redo, and from the Refresh button.
+    /// Surfaces errors to both the status bar and chat conversation.
     fn reload_script_state(&mut self, project_dir: &std::path::Path) {
         let script_path = project_dir.join("part.py");
         if !script_path.exists() {
+            let msg = format!("No script found at {}", script_path.display());
+            log::warn!("{msg}");
+            self.status_message = Some(msg);
             return;
         }
-        // Read the current script source to sync the orchestrator.
-        let script_source = std::fs::read_to_string(&script_path).ok();
 
+        // Read the current script source to sync the orchestrator.
+        let script_source = match std::fs::read_to_string(&script_path) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg = format!("Failed to read {}: {e}", script_path.display());
+                log::error!("{msg}");
+                self.status_message = Some(msg.clone());
+                self.conversation.push(
+                    cadmark_core::message::Message::ai_response(
+                        &format!("**Script load error:** {msg}"),
+                    ),
+                );
+                return;
+            }
+        };
+
+        log::info!(
+            "Executing script: {} ({} bytes)",
+            script_path.display(),
+            script_source.len(),
+        );
 
         match cadmark_kernel::execution::execute_script(&script_path) {
             Ok(result) => {
-                log::info!("Re-executed script after version change");
+                log::info!(
+                    "Script executed: {} vertices, {} faces, {} provenance entries",
+                    result.mesh.vertices.len(),
+                    result.mesh.face_shape_hashes.len(),
+                    result.provenance.entries.len(),
+                );
+
+                self.status_message = Some(format!(
+                    "Model loaded: {} vertices, {} faces",
+                    result.mesh.vertices.len(),
+                    result.mesh.face_shape_hashes.len(),
+                ));
 
                 // Sync the orchestrator's cached code so the next AI request
-                // sends the correct (post-undo/redo) source.
-                if let (Some(tx), Some(code)) = (&self.cmd_tx, script_source) {
-                    let _ = tx.send(OrchestratorCommand::UpdateCode(code));
+                // sends the correct source.
+                if let Some(tx) = &self.cmd_tx {
+                    let _ = tx.send(OrchestratorCommand::UpdateCode(script_source));
                 }
 
                 // Rebuild provenance ledger from the re-executed script
@@ -597,7 +635,14 @@ impl CadmarkApp {
                 self.pending_mesh = Some(result.mesh);
             }
             Err(e) => {
-                log::warn!("Re-execution after version change failed: {e}");
+                let msg = format!("{e}");
+                log::error!("Script execution failed: {msg}");
+                self.status_message = Some(format!("Execution error: {msg}"));
+                self.conversation.push(
+                    cadmark_core::message::Message::ai_response(
+                        &format!("**Script execution failed:**\n```\n{msg}\n```"),
+                    ),
+                );
             }
         }
     }
@@ -750,8 +795,37 @@ impl eframe::App for CadmarkApp {
                 cadmark_ui::toolbar::ToolbarAction::JumpToVersion(_idx) => {
                     log::info!("Jump to version");
                 }
+                cadmark_ui::toolbar::ToolbarAction::Refresh => {
+                    if let Some(dir) = self.project_dir.clone() {
+                        log::info!("Manual refresh requested");
+                        self.reload_script_state(&dir);
+                    }
+                }
                 cadmark_ui::toolbar::ToolbarAction::None => {}
             }
+        });
+
+        // Bottom status bar — shows last execution result or error.
+        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(ref status) = self.status_message {
+                    let is_error = status.starts_with("Execution error")
+                        || status.starts_with("Failed")
+                        || status.starts_with("No script")
+                        || status.starts_with("Script load");
+                    let colour = if is_error {
+                        egui::Color32::from_rgb(220, 80, 80)
+                    } else {
+                        egui::Color32::from_rgb(130, 180, 130)
+                    };
+                    ui.colored_label(colour, status);
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 100, 110),
+                        "No script loaded",
+                    );
+                }
+            });
         });
 
         // Right panel: chat pane.
@@ -852,14 +926,32 @@ impl eframe::App for CadmarkApp {
             );
             ui.painter().add(callback);
 
-            // Placeholder text when no mesh is loaded yet.
+            // Placeholder text when no mesh is loaded yet — show the
+            // status message (including errors) so issues are visible
+            // without checking logs.
             if !self.has_mesh {
+                let (text, colour) = if let Some(ref status) = self.status_message {
+                    let is_error = status.starts_with("Execution error")
+                        || status.starts_with("Failed")
+                        || status.starts_with("No script")
+                        || status.starts_with("Script load");
+                    if is_error {
+                        (status.clone(), egui::Color32::from_rgb(200, 80, 80))
+                    } else {
+                        (status.clone(), egui::Color32::from_rgb(80, 80, 90))
+                    }
+                } else {
+                    (
+                        "3D Viewport \u{2014} describe a part to get started".into(),
+                        egui::Color32::from_rgb(80, 80, 90),
+                    )
+                };
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "3D Viewport \u{2014} describe a part to get started",
+                    &text,
                     egui::FontId::proportional(16.0),
-                    egui::Color32::from_rgb(80, 80, 90),
+                    colour,
                 );
             }
 
