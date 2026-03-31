@@ -320,6 +320,12 @@ impl CadmarkApp {
                 .unwrap_or_else(|| std::env::current_dir().expect("failed to read current directory")),
         );
 
+        // Activate the Python venv so the embedded interpreter can
+        // find build123d and other dependencies.
+        if let Err(e) = cadmark_kernel::execution::discover_and_activate_venv() {
+            log::error!("Failed to activate Python venv: {e}");
+        }
+
         // Ensure the project directory has a git repo for microversioning.
         if let Some(ref dir) = project_dir {
             if let Err(e) = crate::git_ops::ensure_repo(dir) {
