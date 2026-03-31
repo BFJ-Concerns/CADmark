@@ -70,7 +70,10 @@ impl ClaudeCodeBackend {
         prompt.push_str("\n```\n\n");
         prompt.push_str(
             "Respond with the complete modified build123d code in a ```python code block, \
-             followed by a one-line summary of the change prefixed with 'Summary: '.",
+             followed by a one-line summary of the change prefixed with 'Summary: '. \
+             If you had any difficulty understanding the request, lacked context, or \
+             are uncertain about part of the code, add a line prefixed with 'Notes: ' \
+             explaining the issue.",
         );
 
         prompt
@@ -89,10 +92,23 @@ impl ClaudeCodeBackend {
             .map(|l| l.trim_start_matches("Summary: ").to_string())
             .unwrap_or_else(|| "AI modification".to_string());
 
+        // Extract optional notes about issues the AI encountered.
+        let notes = raw
+            .lines()
+            .find(|l| l.starts_with("Notes: "))
+            .map(|l| l.trim_start_matches("Notes: ").to_string());
+
+        // Build the chat message — include notes when present so the
+        // user can see any concerns the AI flagged.
+        let message = match &notes {
+            Some(n) => format!("{raw}\n\n**AI notes:** {n}"),
+            None => raw.to_string(),
+        };
+
         Ok(AiResponse {
             code,
             summary,
-            message: raw.to_string(),
+            message,
         })
     }
 }
