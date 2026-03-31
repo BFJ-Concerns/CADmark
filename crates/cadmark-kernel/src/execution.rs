@@ -155,7 +155,14 @@ pub fn execute_script(script_path: &Path) -> Result<ExecutionResult, ExecutionEr
 
 /// Execute build123d source code directly (for testing and AI-generated code).
 pub fn execute_script_source(source: &str) -> Result<ExecutionResult, ExecutionError> {
-    log::debug!("Executing script ({} bytes, {} lines)", source.len(), source.lines().count());
+    let line_count = source.lines().count();
+    let preview: String = source.lines().take(3).collect::<Vec<_>>().join(" | ");
+    log::info!(
+        "Executing script ({} bytes, {} lines). First lines: {}",
+        source.len(),
+        line_count,
+        preview,
+    );
 
     Python::with_gil(|py| {
         // Log the Python version and sys.path for environment diagnostics.
@@ -178,14 +185,25 @@ pub fn execute_script_source(source: &str) -> Result<ExecutionResult, ExecutionE
         let c_source = CString::new(source)
             .map_err(|e| ExecutionError::ScriptNotFound(format!("invalid source: {e}")))?;
 
-        log::debug!("Running script via py.run()...");
+        log::info!("Running script via py.run() ({} bytes)...", source.len());
         py.run(&c_source, Some(&globals), None).map_err(|e| {
             log::error!("Python execution failed: {e}");
             ExecutionError::Python(e)
         })?;
-        log::debug!(
-            "Script executed successfully, namespace has {} entries",
-            globals.len(),
+
+        // Log what's in the namespace — crucial for diagnosing shape
+        // detection failures. At info level because this is the main
+        // debugging tool until the app is stable.
+        let keys: Vec<String> = globals
+            .keys()
+            .into_iter()
+            .filter_map(|k| k.extract::<String>().ok())
+            .filter(|k| !k.starts_with("__"))
+            .collect();
+        log::info!(
+            "Script executed. Namespace has {} user entries: [{}]",
+            keys.len(),
+            keys.join(", "),
         );
 
         // Extract provenance data from the instrumentation hooks.
