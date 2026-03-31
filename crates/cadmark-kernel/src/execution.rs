@@ -2,6 +2,7 @@
 
 use std::ffi::CString;
 use std::path::Path;
+use std::sync::Once;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -21,6 +22,96 @@ pub enum ExecutionError {
     Provenance(#[from] crate::provenance::ProvenanceError),
     #[error("Tessellation error: {0}")]
     Tessellation(#[from] crate::tessellation::TessellationError),
+}
+
+/// One-time venv activation guard.
+static VENV_ACTIVATED: Once = Once::new();
+
+/// Activate a Python virtualenv for the embedded interpreter.
+///
+/// Adds the venv's site-packages to `sys.path` so that packages
+/// installed in the venv (e.g. build123d) are importable. Call
+/// once at startup — repeated calls are no-ops.
+pub fn activate_venv(venv_path: &Path) -> Result<(), ExecutionError> {
+    // Glob for the site-packages directory rather than hardcoding
+    // the Python minor version — works across 3.x variants.
+    let lib_dir = venv_path.join("lib");
+    let site_packages = std::fs::read_dir(&lib_dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.starts_with("python3"))
+                })
+                .map(|e| e.path().join("site-packages"))
+        })
+        .filter(|p| p.is_dir());
+
+    let Some(site_packages) = site_packages else {
+        log::warn!(
+            "No site-packages found in venv at {}",
+            venv_path.display()
+        );
+        return Ok(());
+    };
+
+    let site_str = site_packages.to_string_lossy().to_string();
+
+    VENV_ACTIVATED.call_once(|| {
+        Python::with_gil(|py| {
+            let sys = py.import("sys").expect("failed to import sys");
+            let path = sys.getattr("path").expect("no sys.path");
+            // Prepend so venv packages shadow system packages.
+            path.call_method1("insert", (0, &site_str))
+                .expect("failed to insert into sys.path");
+            log::info!("Activated venv site-packages: {site_str}");
+        });
+    });
+
+    Ok(())
+}
+
+/// Discover and activate the project venv.
+///
+/// Search order:
+/// 1. `VIRTUAL_ENV` environment variable
+/// 2. `.venv/` next to the running executable
+/// 3. `.venv/` in the current working directory
+pub fn discover_and_activate_venv() -> Result<(), ExecutionError> {
+    // VIRTUAL_ENV — set by shell activation or launch scripts.
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let path = Path::new(&venv);
+        if path.is_dir() {
+            return activate_venv(path);
+        }
+    }
+
+    // .venv near the executable — walk up from the binary's directory
+    // to handle target/debug/ during development.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for ancestor in exe_dir.ancestors().take(4) {
+                let candidate = ancestor.join(".venv");
+                if candidate.is_dir() {
+                    return activate_venv(&candidate);
+                }
+            }
+        }
+    }
+
+    // .venv in cwd — fallback for `cargo run` from the workspace root.
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join(".venv");
+        if candidate.is_dir() {
+            return activate_venv(&candidate);
+        }
+    }
+
+    log::warn!("No Python venv found — build123d may not be importable");
+    Ok(())
 }
 
 /// Result of executing a build123d script.
