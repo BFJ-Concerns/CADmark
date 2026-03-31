@@ -9,8 +9,8 @@ use thiserror::Error;
 pub enum TessellationError {
     #[error("Python error during tessellation: {0}")]
     Python(#[from] PyErr),
-    #[error("No shape found in script namespace")]
-    NoShape,
+    #[error("No shape found in script namespace. {0}")]
+    NoShape(String),
     #[error("Tessellation produced no triangles")]
     EmptyMesh,
 }
@@ -144,17 +144,25 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
     }
 ";
 
-/// Code to find the result shape in the script namespace.
+/// Code to find the result shape in the script namespace and log
+/// diagnostic info about what was found.
 ///
 /// Checks for raw OCP shapes, build123d Shape subclasses, and Builder
 /// context managers (BuildPart, BuildSketch, BuildLine) which store
 /// their result in `.part`, `.sketch`, or `.line` respectively.
+///
+/// Sets `_cadmark_result_shape` to the found shape (or None) and
+/// `_cadmark_namespace_debug` to a diagnostic string listing all
+/// user-defined names and their types.
 const FIND_SHAPE_CODE: &std::ffi::CStr = c"
 _cadmark_result_shape = None
+_cadmark_namespace_debug_entries = []
 for _name, _val in list(locals().items()):
-    if _name.startswith('_cadmark'):
+    if _name.startswith('_cadmark') or _name.startswith('__'):
         continue
+
     _type_name = type(_val).__name__
+    _cadmark_namespace_debug_entries.append(f'{_name}: {_type_name}')
 
     # Direct OCP/build123d shape types.
     if _type_name in ('Solid', 'Compound', 'Shell', 'Part', 'Shape', 'Face'):
@@ -174,6 +182,8 @@ for _name, _val in list(locals().items()):
     # Fallback: anything with an OCP .wrapped attribute and a .part accessor.
     elif hasattr(_val, 'wrapped') and hasattr(_val, 'part'):
         _cadmark_result_shape = _val.part
+
+_cadmark_namespace_debug = ', '.join(_cadmark_namespace_debug_entries) if _cadmark_namespace_debug_entries else '(empty)'
 ";
 
 /// Code to unwrap build123d objects and tessellate.
@@ -194,17 +204,37 @@ pub fn tessellate_from_namespace(
     py.run(TESSELLATION_SOURCE, Some(namespace), None)
         .map_err(TessellationError::Python)?;
 
-    // Find the result shape.
+    // Find the result shape — also captures diagnostic info about
+    // what names and types exist in the namespace for debugging.
     py.run(FIND_SHAPE_CODE, Some(namespace), None)
         .map_err(TessellationError::Python)?;
 
+    // Extract the diagnostic string for logging/error messages.
+    let namespace_debug: String = namespace
+        .get_item("_cadmark_namespace_debug")?
+        .map(|v| v.extract().unwrap_or_default())
+        .unwrap_or_else(|| "(diagnostic not available)".into());
+    log::debug!("Script namespace contents: {namespace_debug}");
+
     let shape = namespace
         .get_item("_cadmark_result_shape")?
-        .ok_or(TessellationError::NoShape)?;
+        .ok_or_else(|| {
+            log::error!("Shape search variable missing from namespace. Contents: {namespace_debug}");
+            TessellationError::NoShape(format!("Namespace contents: {namespace_debug}"))
+        })?;
 
     if shape.is_none() {
-        return Err(TessellationError::NoShape);
+        log::error!("No recognised shape in namespace. Contents: {namespace_debug}");
+        return Err(TessellationError::NoShape(
+            format!("Namespace contents: {namespace_debug}"),
+        ));
     }
+
+    log::info!(
+        "Found shape: {} (type: {})",
+        shape.repr().map(|s| s.to_string()).unwrap_or_else(|_| "?".into()),
+        shape.get_type().name().map(|s| s.to_string()).unwrap_or_else(|_| "?".into()),
+    );
 
     // Unwrap build123d objects and tessellate.
     py.run(TESSELLATE_CODE, Some(namespace), None)
@@ -212,7 +242,9 @@ pub fn tessellate_from_namespace(
 
     let result = namespace
         .get_item("_cadmark_tess_result")?
-        .ok_or(TessellationError::NoShape)?;
+        .ok_or_else(|| TessellationError::NoShape(
+            "Tessellation produced no result dict".into(),
+        ))?;
 
     parse_tessellation_result(py, &result)
 }

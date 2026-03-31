@@ -155,7 +155,21 @@ pub fn execute_script(script_path: &Path) -> Result<ExecutionResult, ExecutionEr
 
 /// Execute build123d source code directly (for testing and AI-generated code).
 pub fn execute_script_source(source: &str) -> Result<ExecutionResult, ExecutionError> {
+    log::debug!("Executing script ({} bytes, {} lines)", source.len(), source.lines().count());
+
     Python::with_gil(|py| {
+        // Log the Python version and sys.path for environment diagnostics.
+        if log::log_enabled!(log::Level::Debug) {
+            if let Ok(sys) = py.import("sys") {
+                if let Ok(version) = sys.getattr("version") {
+                    log::debug!("Python version: {version}");
+                }
+                if let Ok(path) = sys.getattr("path") {
+                    log::debug!("sys.path: {path}");
+                }
+            }
+        }
+
         // Inject provenance instrumentation into the execution namespace.
         let provenance_capture = crate::provenance::inject_instrumentation(py)?;
 
@@ -163,7 +177,16 @@ pub fn execute_script_source(source: &str) -> Result<ExecutionResult, ExecutionE
         let globals = PyDict::new(py);
         let c_source = CString::new(source)
             .map_err(|e| ExecutionError::ScriptNotFound(format!("invalid source: {e}")))?;
-        py.run(&c_source, Some(&globals), None)?;
+
+        log::debug!("Running script via py.run()...");
+        py.run(&c_source, Some(&globals), None).map_err(|e| {
+            log::error!("Python execution failed: {e}");
+            ExecutionError::Python(e)
+        })?;
+        log::debug!(
+            "Script executed successfully, namespace has {} entries",
+            globals.len(),
+        );
 
         // Extract provenance data from the instrumentation hooks.
         let provenance = crate::provenance::extract_provenance(py, &provenance_capture)?;
