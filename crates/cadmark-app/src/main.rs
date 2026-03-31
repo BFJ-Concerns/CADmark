@@ -17,9 +17,8 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_title("CADmark"),
-        // 32-bit depth buffer for the 3D viewport — enables depth testing
-        // in the egui_wgpu paint callback used by the renderer.
-        depth_buffer: 32,
+        // Depth testing happens in the offscreen viewport pass (state.rs),
+        // not in egui's render pass — the blit pipeline has no depth.
         ..Default::default()
     };
 
