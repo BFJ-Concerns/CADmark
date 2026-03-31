@@ -300,6 +300,9 @@ pub struct CadmarkApp {
     has_mesh: bool,
     /// Cloned render state for GPU access from the UI thread.
     wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
+    /// Whether the initial script load has been attempted. Deferred to
+    /// the first `update()` call so that `self` is fully constructed.
+    initial_load_done: bool,
 }
 
 impl CadmarkApp {
@@ -387,6 +390,7 @@ impl CadmarkApp {
             pick_in_flight: None,
             has_mesh: false,
             wgpu_render_state,
+            initial_load_done: false,
         }
     }
 
@@ -683,6 +687,19 @@ impl CadmarkApp {
 
 impl eframe::App for CadmarkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // On first frame, execute any existing script to show its model.
+        // Deferred from new() because reload_script_state() needs &mut self.
+        if !self.initial_load_done {
+            self.initial_load_done = true;
+            if let Some(dir) = self.project_dir.clone() {
+                let script_path = dir.join("part.py");
+                if script_path.exists() {
+                    log::info!("Loading existing script: {}", script_path.display());
+                    self.reload_script_state(&dir);
+                }
+            }
+        }
+
         // Poll for async results from the orchestrator.
         self.poll_results();
 
