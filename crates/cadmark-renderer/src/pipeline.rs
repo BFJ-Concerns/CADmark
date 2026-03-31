@@ -67,6 +67,22 @@ pub struct RenderPipelines {
     pub simple_bind_group_layout: wgpu::BindGroupLayout,
 
     pub depth_texture: wgpu::TextureView,
+
+    // ── Offscreen viewport + blit ──────────────────────────────────
+    // Mesh and wireframe pipelines require depth stencil, but the egui
+    // paint callback's render pass has no depth attachment. We render
+    // to this offscreen texture in prepare() (with depth), then blit
+    // the result onto the egui render pass in paint().
+
+    /// Offscreen colour target for the main viewport pass.
+    pub viewport_colour_view: wgpu::TextureView,
+    /// Blit pipeline — fullscreen triangle sampling viewport_colour_view.
+    pub blit_pipeline: wgpu::RenderPipeline,
+    pub blit_bind_group_layout: wgpu::BindGroupLayout,
+    pub blit_bind_group: wgpu::BindGroup,
+    pub blit_sampler: wgpu::Sampler,
+    /// Stored so resize() can recreate the offscreen texture.
+    surface_format: wgpu::TextureFormat,
 }
 
 impl RenderPipelines {
@@ -342,6 +358,105 @@ impl RenderPipelines {
 
         let depth_texture = create_depth_texture(device, width, height);
 
+        // -- Offscreen viewport colour target --
+        let viewport_colour_view =
+            create_viewport_colour_texture(device, surface_format, width, height);
+
+        // -- Blit pipeline (fullscreen triangle, no depth) --
+        let blit_shader =
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("blit_shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("shaders/blit.wgsl").into(),
+                ),
+            });
+
+        let blit_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("blit_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let blit_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("blit_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float {
+                                filterable: true,
+                            },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(
+                            wgpu::SamplerBindingType::Filtering,
+                        ),
+                        count: None,
+                    },
+                ],
+            });
+
+        let blit_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("blit_bind_group"),
+                layout: &blit_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &viewport_colour_view,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&blit_sampler),
+                    },
+                ],
+            });
+
+        let blit_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("blit_pipeline_layout"),
+                bind_group_layouts: &[&blit_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let blit_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("blit_pipeline"),
+                layout: Some(&blit_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &blit_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blit_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
         Self {
             mesh_pipeline,
             mesh_bind_group_layout,
@@ -355,12 +470,66 @@ impl RenderPipelines {
             wireframe_bind_group,
             simple_bind_group_layout,
             depth_texture,
+            viewport_colour_view,
+            blit_pipeline,
+            blit_bind_group_layout,
+            blit_bind_group,
+            blit_sampler,
+            surface_format,
         }
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.depth_texture = create_depth_texture(device, width, height);
+        self.viewport_colour_view =
+            create_viewport_colour_texture(device, self.surface_format, width, height);
+
+        // Recreate the blit bind group — it references the texture view.
+        self.blit_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("blit_bind_group"),
+                layout: &self.blit_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(
+                            &self.viewport_colour_view,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(
+                            &self.blit_sampler,
+                        ),
+                    },
+                ],
+            });
     }
+}
+
+fn create_viewport_colour_texture(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("viewport_colour_texture"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        // Render target (in prepare) + sampled (in paint blit).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
 fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {

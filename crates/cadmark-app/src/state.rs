@@ -151,6 +151,72 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
 
+            // ── Offscreen main viewport pass (with depth) ──
+            // The egui paint callback's render pass has no depth attachment,
+            // so we render the shaded mesh + wireframe here with our own
+            // depth texture, then blit the result in paint().
+            {
+                let mut pass =
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("viewport_main_pass"),
+                        color_attachments: &[Some(
+                            wgpu::RenderPassColorAttachment {
+                                view: &res.pipelines.viewport_colour_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                                        r: 30.0 / 255.0,
+                                        g: 30.0 / 255.0,
+                                        b: 35.0 / 255.0,
+                                        a: 1.0,
+                                    }),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            },
+                        )],
+                        depth_stencil_attachment: Some(
+                            wgpu::RenderPassDepthStencilAttachment {
+                                view: &res.pipelines.depth_texture,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(1.0),
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            },
+                        ),
+                        ..Default::default()
+                    });
+
+                // Shaded mesh pass.
+                pass.set_pipeline(&res.pipelines.mesh_pipeline);
+                pass.set_bind_group(
+                    0,
+                    &res.pipelines.mesh_bind_group,
+                    &[],
+                );
+                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(
+                    mesh.index_buffer.slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+
+                // Wireframe overlay.
+                if mesh.edge_vertex_count > 0 {
+                    pass.set_pipeline(&res.pipelines.wireframe_pipeline);
+                    pass.set_bind_group(
+                        0,
+                        &res.pipelines.wireframe_bind_group,
+                        &[],
+                    );
+                    pass.set_vertex_buffer(
+                        0,
+                        mesh.edge_vertex_buffer.slice(..),
+                    );
+                    pass.draw(0..mesh.edge_vertex_count, 0..1);
+                }
+            }
+
             // Copy a single pixel from the picking texture to the
             // staging buffer so we can map it next frame.
             if let Some((x, y)) = self.pick_request {
@@ -176,34 +242,16 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         let Some(res) = callback_resources.get::<ViewportResources>() else {
             return;
         };
-        let Some(mesh) = &res.mesh else {
-            return;
-        };
 
-        // Shaded mesh pass.
-        render_pass.set_pipeline(&res.pipelines.mesh_pipeline);
-        render_pass.set_bind_group(0, &res.pipelines.mesh_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        render_pass.set_index_buffer(
-            mesh.index_buffer.slice(..),
-            wgpu::IndexFormat::Uint32,
+        // Blit the offscreen viewport texture (rendered in prepare()
+        // with depth testing) onto the egui render pass.
+        render_pass.set_pipeline(&res.pipelines.blit_pipeline);
+        render_pass.set_bind_group(
+            0,
+            &res.pipelines.blit_bind_group,
+            &[],
         );
-        render_pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-
-        // Wireframe overlay.
-        if mesh.edge_vertex_count > 0 {
-            render_pass.set_pipeline(&res.pipelines.wireframe_pipeline);
-            render_pass.set_bind_group(
-                0,
-                &res.pipelines.wireframe_bind_group,
-                &[],
-            );
-            render_pass.set_vertex_buffer(
-                0,
-                mesh.edge_vertex_buffer.slice(..),
-            );
-            render_pass.draw(0..mesh.edge_vertex_count, 0..1);
-        }
+        render_pass.draw(0..3, 0..1);
     }
 }
 
@@ -491,6 +539,7 @@ impl CadmarkApp {
         // Read the current script source to sync the orchestrator.
         let script_source = std::fs::read_to_string(&script_path).ok();
 
+
         match cadmark_kernel::execution::execute_script(&script_path) {
             Ok(result) => {
                 log::info!("Re-executed script after version change");
@@ -501,11 +550,35 @@ impl CadmarkApp {
                     let _ = tx.send(OrchestratorCommand::UpdateCode(code));
                 }
 
-                self.pending_mesh = Some(result.mesh);
-                // Provenance rebuild happens the same way as in poll_results;
-                // extracted here to avoid duplication once the codebase matures,
-                // but kept inline for now since the mapping logic is trivial.
+                // Rebuild provenance ledger from the re-executed script
+                // (same mapping as poll_results).
                 self.ledger.clear();
+                let hash_to_line: std::collections::HashMap<u64, (u32, cadmark_core::ledger::ProvenanceKind)> =
+                    result.provenance.entries.iter().map(|e| {
+                        let kind = match e.kind {
+                            cadmark_kernel::provenance::ProvenanceRelation::Generated =>
+                                cadmark_core::ledger::ProvenanceKind::Generated,
+                            cadmark_kernel::provenance::ProvenanceRelation::Modified =>
+                                cadmark_core::ledger::ProvenanceKind::Modified,
+                        };
+                        (e.shape_hash, (e.source_line, kind))
+                    }).collect();
+                for (face_idx, &shape_hash) in result.mesh.face_shape_hashes.iter().enumerate() {
+                    if let Some((line, kind)) = hash_to_line.get(&shape_hash) {
+                        self.ledger.record_face(
+                            cadmark_core::geometry::FaceId(face_idx as u32),
+                            cadmark_core::ledger::ProvenanceEntry {
+                                source: cadmark_core::ledger::SourceRef {
+                                    line: *line,
+                                    code: String::new(),
+                                },
+                                kind: kind.clone(),
+                            },
+                        );
+                    }
+                }
+
+                self.pending_mesh = Some(result.mesh);
             }
             Err(e) => {
                 log::warn!("Re-execution after version change failed: {e}");
@@ -588,6 +661,10 @@ impl CadmarkApp {
             if let Some(screen_pos) = self.pick_in_flight.take() {
                 self.handle_pick_result(element, screen_pos);
             }
+        } else {
+            // Background click (pick ID 0) — clear the in-flight
+            // state so we stop requesting repaints.
+            self.pick_in_flight.take();
         }
     }
 }
