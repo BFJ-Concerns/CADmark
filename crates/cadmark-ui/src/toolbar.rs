@@ -9,6 +9,8 @@ pub enum ToolbarAction {
     Redo,
     /// User selected a specific microversion from the dropdown.
     JumpToVersion(usize),
+    /// Re-execute the current script and reload the model.
+    Refresh,
 }
 
 /// Render the toolbar with undo/redo controls.
@@ -55,6 +57,17 @@ pub fn show_toolbar(
             .clicked()
         {
             action = ToolbarAction::Redo;
+        }
+
+        ui.separator();
+
+        // Refresh button — re-execute the script from disk.
+        if ui
+            .button("\u{21BB} Refresh")
+            .on_hover_text("Re-execute script and reload model")
+            .clicked()
+        {
+            action = ToolbarAction::Refresh;
         }
     });
 
