@@ -2,7 +2,9 @@
 
 # Objects
 
-Objects are Python classes that take parameters as inputs and create 1D, 2D or 3D Shapes. For example, a Torus is defined by a major and minor radii. In Builder mode, objects are positioned with `Locations` whilst in Algebra mode, objects are positioned with the `*` operator.
+Objects are Python classes that take parameters as inputs and create 1D, 2D or
+3D Shapes. For example, a Torus is defined by a major and minor radii. In
+CADmark, objects are positioned with builder-mode tools such as `Locations`.
 
 Builder mode example:
 ```build123d
@@ -14,12 +16,6 @@ with BuildPart() as disk:
         with Locations((0, b)):
             Circle(d, mode=Mode.SUBTRACT)
     extrude(amount=c)
-```
-
-Algebra mode example:
-```build123d
-sketch = Circle(a) - Pos(b, 0.0) * Rectangle(c, c) - Pos(0.0, b) * Circle(d)
-disk = extrude(sketch, c)
 ```
 
 ## Align
@@ -53,8 +49,6 @@ With the Builder API the `mode` parameter controls how objects are combined with
 - `INTERSECT`: intersect this object with the object under construction
 - `REPLACE`: replace the object under construction with this object
 - `PRIVATE`: don't interact with the object under construction at all
-
-The Algebra API doesn't use the `mode` parameter - users combine objects with operators.
 
 ## 1D Objects
 
@@ -144,7 +138,8 @@ class Club(BaseSketchObject):
         super().__init__(shape, align, mode)
 ```
 
-The custom object can now be used anywhere the built-in objects would be used - with either the Algebra or Builder API.
+The custom object can now be used anywhere the built-in objects would be used
+within the Builder API.
 
 Key points for custom objects:
 - The `__init__` method should contain all parameters used to instantiate the object

@@ -77,16 +77,12 @@ A Location represents a 3D coordinate system, including both position (origin) a
 
 In CAD, ownership refers to the relationship between geometric elements and the object that contains or "owns" them. For example, when a user creates a box as part of a BuildPart, the BuildPart owns the box. When the user creates a new object from the box through Boolean operations or other transformations, the old object may be replaced by the new object as the "current" object.
 
-## Algebra vs. Builder Mode
+## Builder Mode
 
-build123d provides two different paradigms for building 3D models:
+CADmark uses build123d through builder contexts such as `BuildPart`,
+`BuildSketch`, and `BuildLine`.
 
-### Builder Mode
-
-In builder mode, a stateful context (like BuildPart or BuildSketch) accumulates geometry as operations are performed. Each operation modifies the object within the context.
-
-### Algebra Mode
-
-In algebra mode, operations are performed on shapes directly using operators like `+` (union), `-` (cut), and `*` (intersect). Each operation returns a new shape without modifying the original.
-
-Both modes can be mixed and matched for maximum flexibility in your CAD scripts.
+In builder mode, a stateful context accumulates geometry as operations are
+performed. Each operation modifies the object within the active context, and
+the final model is typically accessed through the builder variable such as
+`part.part`.
