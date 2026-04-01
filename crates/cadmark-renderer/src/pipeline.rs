@@ -57,6 +57,7 @@ pub struct RenderPipelines {
     pub picking_pipeline: wgpu::RenderPipeline,
     pub picking_uniform_buffer: wgpu::Buffer,
     pub picking_bind_group: wgpu::BindGroup,
+    pub edge_picking_pipeline: wgpu::RenderPipeline,
 
     pub wireframe_pipeline: wgpu::RenderPipeline,
     pub wireframe_uniform_buffer: wgpu::Buffer,
@@ -280,6 +281,49 @@ impl RenderPipelines {
                 cache: None,
             });
 
+        let edge_picking_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("edge_picking_pipeline"),
+                layout: Some(&picking_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &picking_shader,
+                    entry_point: Some("vs_edge"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<EdgeVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3,
+                            1 => Float32,
+                        ],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &picking_shader,
+                    entry_point: Some("fs_edge"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Uint,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
         // -- Wireframe pipeline --
         let wireframe_shader =
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -465,6 +509,7 @@ impl RenderPipelines {
             picking_pipeline,
             picking_uniform_buffer,
             picking_bind_group,
+            edge_picking_pipeline,
             wireframe_pipeline,
             wireframe_uniform_buffer,
             wireframe_bind_group,
@@ -689,7 +734,11 @@ pub fn upload_mesh(
     // Build edge vertices as line segments.
     let mut edge_vertices = Vec::new();
     for (edge_idx, edge) in mesh.edges.iter().enumerate() {
-        let edge_id = edge_idx as f32;
+        let edge_id = crate::picking::encode_picking_id(
+            &cadmark_core::geometry::TopologyElement::Edge(
+                cadmark_core::geometry::EdgeId(edge_idx as u32),
+            ),
+        ) as f32;
         for window in edge.points.windows(2) {
             edge_vertices.push(EdgeVertex {
                 position: window[0],
@@ -714,5 +763,53 @@ pub fn upload_mesh(
         index_count: mesh.indices.len() as u32,
         edge_vertex_buffer,
         edge_vertex_count: edge_vertices.len() as u32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edge_vertices_use_picking_edge_ids() {
+        let mesh = cadmark_kernel::tessellation::TessellatedMesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            face_ids: Vec::new(),
+            face_shape_hashes: Vec::new(),
+            edges: vec![cadmark_kernel::tessellation::MeshEdge {
+                points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                shape_hash: 1,
+            }],
+        };
+
+        let encoded = crate::picking::encode_picking_id(
+            &cadmark_core::geometry::TopologyElement::Edge(
+                cadmark_core::geometry::EdgeId(0),
+            ),
+        ) as f32;
+
+        let mut edge_vertices = Vec::new();
+        for (edge_idx, edge) in mesh.edges.iter().enumerate() {
+            let edge_id = crate::picking::encode_picking_id(
+                &cadmark_core::geometry::TopologyElement::Edge(
+                    cadmark_core::geometry::EdgeId(edge_idx as u32),
+                ),
+            ) as f32;
+            for window in edge.points.windows(2) {
+                edge_vertices.push(EdgeVertex {
+                    position: window[0],
+                    edge_id,
+                });
+                edge_vertices.push(EdgeVertex {
+                    position: window[1],
+                    edge_id,
+                });
+            }
+        }
+
+        assert_eq!(edge_vertices.len(), 2);
+        assert_eq!(edge_vertices[0].edge_id, encoded);
+        assert_eq!(edge_vertices[1].edge_id, encoded);
     }
 }

@@ -151,6 +151,46 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
 
+            if mesh.edge_vertex_count > 0 {
+                let mut pass =
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("edge_picking_pass"),
+                        color_attachments: &[Some(
+                            wgpu::RenderPassColorAttachment {
+                                view: &res.picking.texture_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            },
+                        )],
+                        depth_stencil_attachment: Some(
+                            wgpu::RenderPassDepthStencilAttachment {
+                                view: &res.pipelines.depth_texture,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            },
+                        ),
+                        ..Default::default()
+                    });
+
+                pass.set_pipeline(&res.pipelines.edge_picking_pipeline);
+                pass.set_bind_group(
+                    0,
+                    &res.pipelines.picking_bind_group,
+                    &[],
+                );
+                pass.set_vertex_buffer(
+                    0,
+                    mesh.edge_vertex_buffer.slice(..),
+                );
+                pass.draw(0..mesh.edge_vertex_count, 0..1);
+            }
+
             // ── Offscreen main viewport pass (with depth) ──
             // The egui paint callback's render pass has no depth attachment,
             // so we render the shaded mesh + wireframe here with our own
