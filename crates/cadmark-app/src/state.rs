@@ -375,11 +375,23 @@ impl CadmarkApp {
             rs.renderer.write().callback_resources.insert(resources);
         }
 
+        let history = if let Some(ref dir) = project_dir {
+            match crate::git_ops::list_microversions(dir, 100) {
+                Ok(versions) => VersionHistory::from_versions(versions),
+                Err(e) => {
+                    log::warn!("Failed to load microversion history: {e}");
+                    VersionHistory::new()
+                }
+            }
+        } else {
+            VersionHistory::new()
+        };
+
         Self {
             conversation,
             chat: ChatPane::new(),
             overlay: OverlayState::default(),
-            history: VersionHistory::new(),
+            history,
             renderer: Renderer::new(),
             selection: SelectionState::None,
             project_dir,
@@ -792,8 +804,20 @@ impl eframe::App for CadmarkApp {
                         log::info!("Redo to {hash}");
                     }
                 }
-                cadmark_ui::toolbar::ToolbarAction::JumpToVersion(_idx) => {
-                    log::info!("Jump to version");
+                cadmark_ui::toolbar::ToolbarAction::JumpToVersion(idx) => {
+                    if let Some(version) = self.history.jump_to(idx) {
+                        let hash = version.commit_hash.clone();
+                        if let Some(dir) = self.project_dir.clone() {
+                            if let Err(e) =
+                                crate::git_ops::checkout_commit(&dir, &hash)
+                            {
+                                log::error!("Jump to version failed: {e}");
+                            } else {
+                                self.reload_script_state(&dir);
+                            }
+                        }
+                        log::info!("Jumped to {hash}");
+                    }
                 }
                 cadmark_ui::toolbar::ToolbarAction::Refresh => {
                     if let Some(dir) = self.project_dir.clone() {

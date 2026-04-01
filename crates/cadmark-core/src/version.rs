@@ -43,6 +43,13 @@ impl VersionHistory {
         }
     }
 
+    pub fn from_versions(versions: Vec<Microversion>) -> Self {
+        Self {
+            versions,
+            current_index: 0,
+        }
+    }
+
     /// Add a new microversion at the head. Truncates any redo history
     /// if the user was in an undone state.
     pub fn push(&mut self, version: Microversion) {
@@ -70,6 +77,16 @@ impl VersionHistory {
     pub fn redo(&mut self) -> Option<&Microversion> {
         if self.current_index > 0 {
             self.current_index -= 1;
+            Some(&self.versions[self.current_index])
+        } else {
+            None
+        }
+    }
+
+    /// Jump directly to a version by its index within `recent()`.
+    pub fn jump_to(&mut self, index: usize) -> Option<&Microversion> {
+        if index < self.versions.len() {
+            self.current_index = index;
             Some(&self.versions[self.current_index])
         } else {
             None
@@ -193,5 +210,31 @@ mod tests {
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].commit_hash, "ccc");
         assert_eq!(recent[1].commit_hash, "bbb");
+    }
+
+    #[test]
+    fn jump_to_selects_requested_version() {
+        let mut history = VersionHistory::new();
+        history.push(make_version("aaa", "first"));
+        history.push(make_version("bbb", "second"));
+        history.push(make_version("ccc", "third"));
+
+        let jumped = history.jump_to(2).unwrap();
+        assert_eq!(jumped.commit_hash, "aaa");
+        assert!(!history.can_undo());
+        assert!(history.can_redo());
+    }
+
+    #[test]
+    fn from_versions_starts_at_latest() {
+        let history = VersionHistory::from_versions(vec![
+            make_version("ccc", "third"),
+            make_version("bbb", "second"),
+            make_version("aaa", "first"),
+        ]);
+
+        assert_eq!(history.current().unwrap().commit_hash, "ccc");
+        assert!(history.can_undo());
+        assert!(!history.can_redo());
     }
 }
