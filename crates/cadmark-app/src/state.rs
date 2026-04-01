@@ -514,34 +514,11 @@ impl CadmarkApp {
                                     result.mesh.vertices.len(),
                                     result.provenance.entries.len(),
                                 );
-                                // Rebuild provenance ledger: map face shape hashes
-                                // from the mesh back to source lines captured during
-                                // execution.
-                                self.ledger.clear();
-                                let hash_to_line: std::collections::HashMap<u64, (u32, cadmark_core::ledger::ProvenanceKind)> =
-                                    result.provenance.entries.iter().map(|e| {
-                                        let kind = match e.kind {
-                                            cadmark_kernel::provenance::ProvenanceRelation::Generated =>
-                                                cadmark_core::ledger::ProvenanceKind::Generated,
-                                            cadmark_kernel::provenance::ProvenanceRelation::Modified =>
-                                                cadmark_core::ledger::ProvenanceKind::Modified,
-                                        };
-                                        (e.shape_hash, (e.source_line, kind))
-                                    }).collect();
-                                for (face_idx, &shape_hash) in result.mesh.face_shape_hashes.iter().enumerate() {
-                                    if let Some((line, kind)) = hash_to_line.get(&shape_hash) {
-                                        self.ledger.record_face(
-                                            cadmark_core::geometry::FaceId(face_idx as u32),
-                                            cadmark_core::ledger::ProvenanceEntry {
-                                                source: cadmark_core::ledger::SourceRef {
-                                                    line: *line,
-                                                    code: String::new(),
-                                                },
-                                                kind: kind.clone(),
-                                            },
-                                        );
-                                    }
-                                }
+                                self.ledger = build_ledger_from_execution(
+                                    &response.code,
+                                    &result.mesh,
+                                    &result.provenance,
+                                );
 
                                 // Store the tessellated mesh for GPU upload on
                                 // the next frame (update() has access to the
@@ -624,36 +601,14 @@ impl CadmarkApp {
                 // Sync the orchestrator's cached code so the next AI request
                 // sends the correct source.
                 if let Some(tx) = &self.cmd_tx {
-                    let _ = tx.send(OrchestratorCommand::UpdateCode(script_source));
+                    let _ = tx.send(OrchestratorCommand::UpdateCode(script_source.clone()));
                 }
 
-                // Rebuild provenance ledger from the re-executed script
-                // (same mapping as poll_results).
-                self.ledger.clear();
-                let hash_to_line: std::collections::HashMap<u64, (u32, cadmark_core::ledger::ProvenanceKind)> =
-                    result.provenance.entries.iter().map(|e| {
-                        let kind = match e.kind {
-                            cadmark_kernel::provenance::ProvenanceRelation::Generated =>
-                                cadmark_core::ledger::ProvenanceKind::Generated,
-                            cadmark_kernel::provenance::ProvenanceRelation::Modified =>
-                                cadmark_core::ledger::ProvenanceKind::Modified,
-                        };
-                        (e.shape_hash, (e.source_line, kind))
-                    }).collect();
-                for (face_idx, &shape_hash) in result.mesh.face_shape_hashes.iter().enumerate() {
-                    if let Some((line, kind)) = hash_to_line.get(&shape_hash) {
-                        self.ledger.record_face(
-                            cadmark_core::geometry::FaceId(face_idx as u32),
-                            cadmark_core::ledger::ProvenanceEntry {
-                                source: cadmark_core::ledger::SourceRef {
-                                    line: *line,
-                                    code: String::new(),
-                                },
-                                kind: kind.clone(),
-                            },
-                        );
-                    }
-                }
+                self.ledger = build_ledger_from_execution(
+                    &script_source,
+                    &result.mesh,
+                    &result.provenance,
+                );
 
                 self.pending_mesh = Some(result.mesh);
             }
@@ -750,6 +705,116 @@ impl CadmarkApp {
             // state so we stop requesting repaints.
             self.pick_in_flight.take();
         }
+    }
+}
+
+fn build_ledger_from_execution(
+    script_source: &str,
+    mesh: &cadmark_kernel::tessellation::TessellatedMesh,
+    provenance: &cadmark_kernel::provenance::RawProvenance,
+) -> cadmark_core::ledger::ProvenanceLedger {
+    let mut ledger = cadmark_core::ledger::ProvenanceLedger::new();
+    let source_lines: Vec<&str> = script_source.lines().collect();
+
+    let hash_to_entry: std::collections::HashMap<
+        u64,
+        cadmark_core::ledger::ProvenanceEntry,
+    > = provenance
+        .entries
+        .iter()
+        .map(|entry| {
+            let kind = match entry.kind {
+                cadmark_kernel::provenance::ProvenanceRelation::Generated => {
+                    cadmark_core::ledger::ProvenanceKind::Generated
+                }
+                cadmark_kernel::provenance::ProvenanceRelation::Modified => {
+                    cadmark_core::ledger::ProvenanceKind::Modified
+                }
+            };
+            let code = source_lines
+                .get(entry.source_line.saturating_sub(1) as usize)
+                .map(|line| line.trim().to_string())
+                .unwrap_or_default();
+
+            (
+                entry.shape_hash,
+                cadmark_core::ledger::ProvenanceEntry {
+                    source: cadmark_core::ledger::SourceRef {
+                        line: entry.source_line,
+                        code,
+                    },
+                    kind,
+                },
+            )
+        })
+        .collect();
+
+    for (face_idx, &shape_hash) in mesh.face_shape_hashes.iter().enumerate() {
+        if let Some(entry) = hash_to_entry.get(&shape_hash) {
+            ledger.record_face(
+                cadmark_core::geometry::FaceId(face_idx as u32),
+                entry.clone(),
+            );
+        }
+    }
+
+    for (edge_idx, edge) in mesh.edges.iter().enumerate() {
+        if let Some(entry) = hash_to_entry.get(&edge.shape_hash) {
+            ledger.record_edge(
+                cadmark_core::geometry::EdgeId(edge_idx as u32),
+                entry.clone(),
+            );
+        }
+    }
+
+    ledger
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_ledger_from_execution;
+
+    #[test]
+    fn ledger_rebuild_preserves_source_snippets_and_edges() {
+        let mesh = cadmark_kernel::tessellation::TessellatedMesh {
+            vertices: Vec::new(),
+            indices: vec![0, 1, 2],
+            face_ids: vec![0],
+            face_shape_hashes: vec![101],
+            edges: vec![cadmark_kernel::tessellation::MeshEdge {
+                points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                shape_hash: 202,
+            }],
+        };
+        let provenance = cadmark_kernel::provenance::RawProvenance {
+            entries: vec![
+                cadmark_kernel::provenance::RawProvenanceEntry {
+                    shape_hash: 101,
+                    source_line: 2,
+                    kind: cadmark_kernel::provenance::ProvenanceRelation::Generated,
+                },
+                cadmark_kernel::provenance::RawProvenanceEntry {
+                    shape_hash: 202,
+                    source_line: 3,
+                    kind: cadmark_kernel::provenance::ProvenanceRelation::Modified,
+                },
+            ],
+        };
+
+        let ledger = build_ledger_from_execution(
+            "from build123d import *\nBox(10, 10, 10)\nfillet(edges(), 1)",
+            &mesh,
+            &provenance,
+        );
+
+        let face = ledger.lookup_face(cadmark_core::geometry::FaceId(0)).unwrap();
+        assert_eq!(face.source.line, 2);
+        assert_eq!(face.source.code, "Box(10, 10, 10)");
+
+        let edge = ledger.lookup_edge(cadmark_core::geometry::EdgeId(0)).unwrap();
+        assert_eq!(edge.source.line, 3);
+        assert_eq!(edge.source.code, "fillet(edges(), 1)");
+        assert_eq!(edge.kind, cadmark_core::ledger::ProvenanceKind::Modified);
     }
 }
 
