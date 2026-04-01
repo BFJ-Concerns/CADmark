@@ -2,7 +2,8 @@
 
 # Moving Objects
 
-In build123d, there are several methods to move objects. These methods vary based on the mode of operation and provide flexibility for object placement and orientation. Below, we outline the three main approaches to moving objects: builder mode, algebra mode, and direct manipulation methods.
+In CADmark, object movement is described using builder-mode placement tools and
+direct manipulation methods on shapes.
 
 ## Builder Mode
 
@@ -20,21 +21,6 @@ In builder mode, object locations are defined before the objects themselves are 
 ```python
 with Locations((10, 20, 30)):
     Box(5, 5, 5)
-```
-
-## Algebra Mode
-
-In algebra mode, object movement is expressed using algebraic operations. The `Pos` function, short for Position, represents a location, which can be combined with objects or planes to define placement.
-
-1. `Pos() * shape` - Applies a position to a shape.
-2. `Plane() * Pos() * shape` - Combines a plane with a position and applies it to a shape.
-
-Rotation is an important concept in this mode. A `Rotation` represents a location with orientation values set, which can be used to define a new location or modify an existing one.
-
-### Example:
-
-```python
-rotated_box = Rotation(45, 0, 0) * box
 ```
 
 ## Direct Manipulation Methods

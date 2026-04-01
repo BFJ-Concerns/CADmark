@@ -2,7 +2,9 @@
 
 # Operations
 
-Operations are functions that take objects as inputs and transform them into new objects. For example, a 2D Sketch can be extruded to create a 3D Part. All operations are Python functions which can be applied using both the Algebra and Builder APIs.
+Operations are functions that take objects as inputs and transform them into new
+objects. For example, a 2D Sketch can be extruded to create a 3D Part. CADmark
+uses these operations through the Builder API.
 
 **Important:** Objects created by operations are not affected by `Locations`, meaning their position is determined solely by the input objects used in the operation.
 
@@ -15,15 +17,9 @@ with BuildPart() as cylinder:
     extrude(amount=height)
 ```
 
-## Algebra API Example
-
-```build123d
-cylinder = extrude(Circle(radius), amount=height)
-```
-
 ## Available Operations
 
-The following table summarises all available operations. Operations marked as 1D are applicable to BuildLine and Algebra Curve, 2D to BuildSketch and Algebra Sketch, 3D to BuildPart and Algebra Part.
+The following table summarises the main operations used in builder contexts.
 
 | Operation | Description | 1D | 2D | 3D |
 |-----------|-------------|----|----|-----|
