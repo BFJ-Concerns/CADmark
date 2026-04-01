@@ -11,6 +11,8 @@ pub enum TessellationError {
     Python(#[from] PyErr),
     #[error("No shape found in script namespace. {0}")]
     NoShape(String),
+    #[error("Unsupported build123d script output. {0}")]
+    UnsupportedScriptOutput(String),
     #[error("Tessellation produced no triangles")]
     EmptyMesh,
 }
@@ -144,48 +146,6 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
     }
 ";
 
-/// Code to find the result shape in the script namespace and log
-/// diagnostic info about what was found.
-///
-/// Checks for raw OCP shapes, build123d Shape subclasses, and Builder
-/// context managers (BuildPart, BuildSketch, BuildLine) which store
-/// their result in `.part`, `.sketch`, or `.line` respectively.
-///
-/// Sets `_cadmark_result_shape` to the found shape (or None) and
-/// `_cadmark_namespace_debug` to a diagnostic string listing all
-/// user-defined names and their types.
-const FIND_SHAPE_CODE: &std::ffi::CStr = c"
-_cadmark_result_shape = None
-_cadmark_namespace_debug_entries = []
-for _name, _val in list(locals().items()):
-    if _name.startswith('_cadmark') or _name.startswith('__'):
-        continue
-
-    _type_name = type(_val).__name__
-    _cadmark_namespace_debug_entries.append(f'{_name}: {_type_name}')
-
-    # Direct OCP/build123d shape types.
-    if _type_name in ('Solid', 'Compound', 'Shell', 'Part', 'Shape', 'Face'):
-        _cadmark_result_shape = _val
-
-    # Builder context managers — extract their built result.
-    elif _type_name == 'BuildPart':
-        if hasattr(_val, 'part') and _val.part is not None:
-            _cadmark_result_shape = _val.part
-    elif _type_name == 'BuildSketch':
-        if hasattr(_val, 'sketch') and _val.sketch is not None:
-            _cadmark_result_shape = _val.sketch
-    elif _type_name == 'BuildLine':
-        if hasattr(_val, 'line') and _val.line is not None:
-            _cadmark_result_shape = _val.line
-
-    # Fallback: anything with an OCP .wrapped attribute and a .part accessor.
-    elif hasattr(_val, 'wrapped') and hasattr(_val, 'part'):
-        _cadmark_result_shape = _val.part
-
-_cadmark_namespace_debug = ', '.join(_cadmark_namespace_debug_entries) if _cadmark_namespace_debug_entries else '(empty)'
-";
-
 /// Code to unwrap build123d objects and tessellate.
 const TESSELLATE_CODE: &std::ffi::CStr = c"
 if hasattr(_cadmark_result_shape, 'wrapped'):
@@ -204,31 +164,7 @@ pub fn tessellate_from_namespace(
     py.run(TESSELLATION_SOURCE, Some(namespace), None)
         .map_err(TessellationError::Python)?;
 
-    // Find the result shape — also captures diagnostic info about
-    // what names and types exist in the namespace for debugging.
-    py.run(FIND_SHAPE_CODE, Some(namespace), None)
-        .map_err(TessellationError::Python)?;
-
-    // Extract the diagnostic string for logging/error messages.
-    let namespace_debug: String = namespace
-        .get_item("_cadmark_namespace_debug")?
-        .map(|v| v.extract().unwrap_or_default())
-        .unwrap_or_else(|| "(diagnostic not available)".into());
-    log::debug!("Script namespace contents: {namespace_debug}");
-
-    let shape = namespace
-        .get_item("_cadmark_result_shape")?
-        .ok_or_else(|| {
-            log::error!("Shape search variable missing from namespace. Contents: {namespace_debug}");
-            TessellationError::NoShape(format!("Namespace contents: {namespace_debug}"))
-        })?;
-
-    if shape.is_none() {
-        log::error!("No recognised shape in namespace. Contents: {namespace_debug}");
-        return Err(TessellationError::NoShape(
-            format!("Namespace contents: {namespace_debug}"),
-        ));
-    }
+    let shape = find_result_shape(namespace)?;
 
     log::info!(
         "Found shape: {} (type: {})",
@@ -247,6 +183,108 @@ pub fn tessellate_from_namespace(
         ))?;
 
     parse_tessellation_result(py, &result)
+}
+
+fn find_result_shape<'py>(
+    namespace: &Bound<'py, PyDict>,
+) -> Result<Bound<'py, PyAny>, TessellationError> {
+    let mut namespace_debug = Vec::new();
+    let mut build_part_shape = None;
+    let mut unsupported_outputs = Vec::new();
+
+    for (name, value) in namespace.iter() {
+        let Ok(name) = name.extract::<String>() else {
+            continue;
+        };
+        if name.starts_with("_cadmark") || name.starts_with("__") {
+            continue;
+        }
+
+        let type_name = value
+            .get_type()
+            .name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "?".into());
+        namespace_debug.push(format!("{name}: {type_name}"));
+
+        match type_name.as_str() {
+            "BuildPart" => {
+                if let Some(part) = get_non_none_attr(&value, "part")? {
+                    build_part_shape = Some(part);
+                }
+            }
+            "BuildSketch" => {
+                if get_non_none_attr(&value, "sketch")?.is_some() {
+                    unsupported_outputs.push(format!(
+                        "{name}: BuildSketch (2D output)"
+                    ));
+                }
+            }
+            "BuildLine" => {
+                if get_non_none_attr(&value, "line")?.is_some() {
+                    unsupported_outputs.push(format!(
+                        "{name}: BuildLine (1D output)"
+                    ));
+                }
+            }
+            _ => {
+                if has_non_none_attr(&value, "wrapped")? {
+                    unsupported_outputs.push(format!("{name}: {type_name}"));
+                }
+            }
+        }
+    }
+
+    let namespace_debug = if namespace_debug.is_empty() {
+        "(empty)".to_string()
+    } else {
+        namespace_debug.join(", ")
+    };
+    log::debug!("Script namespace contents: {namespace_debug}");
+
+    if let Some(shape) = build_part_shape {
+        return Ok(shape);
+    }
+
+    if !unsupported_outputs.is_empty() {
+        let details = unsupported_outputs.join(", ");
+        log::error!(
+            "Unsupported script output detected. Outputs: {details}. Namespace contents: {namespace_debug}"
+        );
+        return Err(TessellationError::UnsupportedScriptOutput(format!(
+            "CADmark only supports Builder mode scripts with a completed `BuildPart` context. \
+             Unsupported outputs detected: {details}. \
+             Use `with BuildPart() as part:` and leave the final 3D model in `part.part`. \
+             Namespace contents: {namespace_debug}"
+        )));
+    }
+
+    log::error!("No completed BuildPart found. Contents: {namespace_debug}");
+    Err(TessellationError::NoShape(format!(
+        "Expected a completed `BuildPart` context such as `with BuildPart() as part:`. \
+         Namespace contents: {namespace_debug}"
+    )))
+}
+
+fn get_non_none_attr<'py>(
+    value: &Bound<'py, PyAny>,
+    attr: &str,
+) -> Result<Option<Bound<'py, PyAny>>, TessellationError> {
+    match value.getattr(attr) {
+        Ok(attr_value) if !attr_value.is_none() => Ok(Some(attr_value)),
+        Ok(_) => Ok(None),
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(value.py()) => {
+            Ok(None)
+        }
+        Err(err) => Err(TessellationError::Python(err)),
+    }
+}
+
+fn has_non_none_attr(
+    value: &Bound<'_, PyAny>,
+    attr: &str,
+) -> Result<bool, TessellationError> {
+    Ok(get_non_none_attr(value, attr)?.is_some())
 }
 
 /// Parse the Python tessellation dict into a Rust struct.
@@ -292,4 +330,107 @@ fn parse_tessellation_result(
         face_shape_hashes,
         edges,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_completed_build_part_output() {
+        Python::with_gil(|py| {
+            let namespace = PyDict::new(py);
+            py.run(
+                c"
+class DirectShape:
+    def __init__(self):
+        self.wrapped = object()
+
+class BuildPart:
+    def __init__(self):
+        self.part = DirectShape()
+
+part = BuildPart()
+",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+
+            let shape = find_result_shape(&namespace).unwrap();
+            assert!(shape.getattr("wrapped").is_ok());
+        });
+    }
+
+    #[test]
+    fn rejects_direct_shape_outputs_without_build_part() {
+        Python::with_gil(|py| {
+            let namespace = PyDict::new(py);
+            py.run(
+                c"
+class DirectShape:
+    def __init__(self):
+        self.wrapped = object()
+
+result = DirectShape()
+",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+
+            let err = find_result_shape(&namespace).unwrap_err();
+            assert!(matches!(
+                err,
+                TessellationError::UnsupportedScriptOutput(_)
+            ));
+            assert!(err
+                .to_string()
+                .contains("CADmark only supports Builder mode scripts"));
+        });
+    }
+
+    #[test]
+    fn rejects_sketch_only_builder_scripts() {
+        Python::with_gil(|py| {
+            let namespace = PyDict::new(py);
+            py.run(
+                c"
+class DirectShape:
+    def __init__(self):
+        self.wrapped = object()
+
+class BuildSketch:
+    def __init__(self):
+        self.sketch = DirectShape()
+
+sketch = BuildSketch()
+",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+
+            let err = find_result_shape(&namespace).unwrap_err();
+            assert!(matches!(
+                err,
+                TessellationError::UnsupportedScriptOutput(_)
+            ));
+            assert!(err.to_string().contains("BuildSketch"));
+        });
+    }
+
+    #[test]
+    fn reports_missing_build_part_when_no_shape_exists() {
+        Python::with_gil(|py| {
+            let namespace = PyDict::new(py);
+            py.run(c"value = 42", Some(&namespace), None).unwrap();
+
+            let err = find_result_shape(&namespace).unwrap_err();
+            assert!(matches!(err, TessellationError::NoShape(_)));
+            assert!(err
+                .to_string()
+                .contains("Expected a completed `BuildPart` context"));
+        });
+    }
 }

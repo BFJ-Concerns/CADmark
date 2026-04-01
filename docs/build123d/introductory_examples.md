@@ -4,11 +4,11 @@
 
 ## Overview
 
-This documentation collection demonstrates CAD object creation using build123d, progressing from simple to complex designs. All examples require `from build123d import *` and support both builder mode and algebra mode implementations.
+This documentation collection demonstrates CAD object creation using build123d, progressing from simple to complex designs. All examples require `from build123d import *` and are intended for builder mode usage in CADmark.
 
 **Key Setup Notes:**
 - Use `show(object)` in ocp_vscode or `show_object(object.part)` in CQ-editor for visualization
-- Export to STL with `export_stl(object.part, "file.stl")` (builder) or `export_stl(object, "file.stl")` (algebra)
+- Export to STL with `export_stl(object.part, "file.stl")` from a builder context
 - Multiple file formats supported including STEP
 
 ---
@@ -21,7 +21,7 @@ The most basic design element creates a single `Box` primitive.
 
 ## Example 2: Plate with Hole
 
-Demonstrates Boolean operations using `Mode.SUBTRACT` (builder) or the `-` operator (algebra) to cut a `Cylinder` from a `Box`.
+Demonstrates Boolean operations using `Mode.SUBTRACT` in a builder context to cut a `Cylinder` from a `Box`.
 
 ---
 
@@ -41,7 +41,7 @@ Complex profiles combine line and arc segments using `BuildSketch`. The `make_fa
 
 ## Example 5: Moving the Current Working Point
 
-Objects are positioned using `Locations` (builder) or the pattern `Pos(x, y, z=0) * obj` (algebra). Rotation uses `Rot(x_angle, y_angle, z_angle) * obj`.
+Objects are positioned using `Locations` within builder contexts.
 
 ---
 
@@ -75,7 +75,7 @@ Introduces edge selection and modification:
 
 ## Example 10: Select Last and Hole
 
-Demonstrates selecting recently modified edges using `Select.LAST` (builder) or snapshot comparison (algebra). Introduces `Hole` for automatic through-hole cutting.
+Demonstrates selecting recently modified edges using `Select.LAST` in builder mode. Introduces `Hole` for automatic through-hole cutting.
 
 ---
 
