@@ -15,6 +15,7 @@ use std::sync::mpsc;
 use cadmark_bridge::backend::{AiBackend, AiResponse};
 use cadmark_bridge::context::AiRequest;
 use cadmark_core::geometry::GeometryContext;
+use cadmark_core::message::MessageId;
 
 /// Commands sent from the UI thread to the orchestrator.
 pub enum OrchestratorCommand {
@@ -22,6 +23,7 @@ pub enum OrchestratorCommand {
     ChatMessage(String),
     /// User submitted a spatial comment with geometry context.
     SpatialComment {
+        id: MessageId,
         text: String,
         context: GeometryContext,
     },
@@ -34,6 +36,8 @@ pub enum OrchestratorResult {
     /// AI responded successfully — code executed and mesh is ready.
     Success {
         response: AiResponse,
+        trigger_message: String,
+        applied_spatial_message_id: Option<MessageId>,
         /// Path to the updated script file (for the kernel to re-read).
         script_path: PathBuf,
     },
@@ -86,12 +90,13 @@ impl Orchestrator {
         backend: &dyn AiBackend,
     ) -> OrchestratorResult {
         let request = AiRequest::from_chat(self.current_code.clone(), message.to_string());
-        self.process_request(request, backend).await
+        self.process_request(request, backend, None).await
     }
 
     /// Process a spatial comment through the AI.
     pub async fn handle_spatial_comment(
         &mut self,
+        id: MessageId,
         text: &str,
         context: GeometryContext,
         backend: &dyn AiBackend,
@@ -101,7 +106,7 @@ impl Orchestrator {
             text.to_string(),
             context,
         );
-        self.process_request(request, backend).await
+        self.process_request(request, backend, Some(id)).await
     }
 
     /// Core request processing — send to AI, execute, retry on failure.
@@ -109,7 +114,9 @@ impl Orchestrator {
         &mut self,
         request: AiRequest,
         backend: &dyn AiBackend,
+        applied_spatial_message_id: Option<MessageId>,
     ) -> OrchestratorResult {
+        let trigger_message = request.user_message.clone();
         // Step 1: Send to AI.
         let response = match backend.request(request.clone()).await {
             Ok(r) => r,
@@ -131,6 +138,8 @@ impl Orchestrator {
                 self.current_code = response.code.clone();
                 OrchestratorResult::Success {
                     response,
+                    trigger_message,
+                    applied_spatial_message_id,
                     script_path,
                 }
             }
@@ -154,6 +163,8 @@ impl Orchestrator {
                                 self.current_code = retry_response.code.clone();
                                 OrchestratorResult::Success {
                                     response: retry_response,
+                                    trigger_message,
+                                    applied_spatial_message_id,
                                     script_path,
                                 }
                             }
@@ -237,11 +248,18 @@ pub fn spawn_orchestrator(
                     cmd => {
                         let result = match cmd {
                             OrchestratorCommand::ChatMessage(msg) => {
-                                orchestrator.handle_chat(&msg, &backend).await
+                                orchestrator.process_request(
+                                    AiRequest::from_chat(
+                                        orchestrator.current_code.clone(),
+                                        msg,
+                                    ),
+                                    &backend,
+                                    None,
+                                ).await
                             }
-                            OrchestratorCommand::SpatialComment { text, context } => {
+                            OrchestratorCommand::SpatialComment { id, text, context } => {
                                 orchestrator
-                                    .handle_spatial_comment(&text, context, &backend)
+                                    .handle_spatial_comment(id, &text, context, &backend)
                                     .await
                             }
                             OrchestratorCommand::UpdateCode(_) => unreachable!(),

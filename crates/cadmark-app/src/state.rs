@@ -436,13 +436,18 @@ impl CadmarkApp {
         text: String,
         context: cadmark_core::geometry::GeometryContext,
     ) {
-        self.conversation.push(
-            cadmark_core::message::Message::spatial_comment(&text, context.clone()),
-        );
+        let message =
+            cadmark_core::message::Message::spatial_comment(&text, context.clone());
+        let message_id = message.id;
+        self.conversation.push(message);
 
         if let Some(tx) = &self.cmd_tx {
             if tx
-                .send(OrchestratorCommand::SpatialComment { text, context })
+                .send(OrchestratorCommand::SpatialComment {
+                    id: message_id,
+                    text,
+                    context,
+                })
                 .is_ok()
             {
                 self.ai_busy = true;
@@ -464,9 +469,15 @@ impl CadmarkApp {
             while let Ok(result) = rx.try_recv() {
                 self.ai_busy = false;
                 match result {
-                    OrchestratorResult::Success { response, script_path } => {
-                        // Mark all pending spatial comments as applied.
-                        self.conversation.mark_all_spatial_applied();
+                    OrchestratorResult::Success {
+                        response,
+                        trigger_message,
+                        applied_spatial_message_id,
+                        script_path,
+                    } => {
+                        if let Some(id) = applied_spatial_message_id {
+                            self.conversation.mark_spatial_applied(id);
+                        }
 
                         // Add the AI response to chat.
                         self.conversation.push(
@@ -478,7 +489,7 @@ impl CadmarkApp {
                             match crate::git_ops::create_microversion(
                                 dir,
                                 &response.summary,
-                                &response.message,
+                                &trigger_message,
                                 script_path
                                     .file_name()
                                     .and_then(|n| n.to_str())

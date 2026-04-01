@@ -116,10 +116,13 @@ impl Conversation {
         &self.messages
     }
 
-    /// Mark all pending spatial comments as applied.
-    pub fn mark_all_spatial_applied(&mut self) {
+    /// Mark a specific spatial comment as applied.
+    pub fn mark_spatial_applied(&mut self, id: MessageId) {
         for message in &mut self.messages {
-            message.mark_applied();
+            if message.id == id {
+                message.mark_applied();
+                break;
+            }
         }
     }
 
@@ -163,18 +166,24 @@ mod tests {
     }
 
     #[test]
-    fn conversation_marks_all_spatial_applied() {
+    fn conversation_marks_only_target_spatial_comment_applied() {
         let mut conv = Conversation::new();
         conv.push(Message::user_chat("make a box"));
-        conv.push(Message::spatial_comment("round this", sample_geometry_context()));
+        let first = Message::spatial_comment("round this", sample_geometry_context());
+        let first_id = first.id;
+        conv.push(first);
         conv.push(Message::ai_response("Done."));
-        conv.push(Message::spatial_comment("and this", sample_geometry_context()));
+        let second = Message::spatial_comment("and this", sample_geometry_context());
+        let second_id = second.id;
+        conv.push(second);
 
-        conv.mark_all_spatial_applied();
+        conv.mark_spatial_applied(first_id);
 
-        // Both spatial comments should be applied.
+        // Only the targeted spatial comment should be applied.
         let applied_count = conv.messages().iter().filter(|m| m.is_applied()).count();
-        assert_eq!(applied_count, 2);
+        assert_eq!(applied_count, 1);
+        assert!(conv.messages().iter().any(|m| m.id == first_id && m.is_applied()));
+        assert!(conv.messages().iter().any(|m| m.id == second_id && !m.is_applied()));
 
         // Non-spatial messages are unaffected.
         assert!(!conv.messages()[0].is_applied());
