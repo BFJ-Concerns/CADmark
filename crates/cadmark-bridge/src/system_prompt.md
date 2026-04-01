@@ -29,9 +29,12 @@ Every script you produce must be parametric. This is non-negotiable:
 
 - Always use `from build123d import *` — this is the intended usage for
   build123d as a domain-specific language.
-- Prefer **Builder mode** (context managers) over Algebra mode for clarity.
+- Use **Builder mode only** (context managers). Do not use Algebra mode.
 - Group code logically: imports → parameters → geometry → export (if any).
 - Add brief comments for non-obvious geometry operations.
+- Every script must expose the final 3D model through a completed
+  `BuildPart` context, e.g. `with BuildPart() as part:` and then leave the
+  resulting model in `part.part`.
 
 # build123d Reference
 
@@ -96,12 +99,6 @@ with Locations((x, y)):         # Single position
 with GridLocations(sx, sy, nx, ny):  # Rectangular grid
 with PolarLocations(r, count):       # Circular pattern
 with HexLocations(d, nx, ny):        # Hex grid
-```
-
-**Algebra mode** positioning (when needed):
-```python
-Pos(x, y, z) * object    # Translate
-Rot(x, y, z) * object    # Rotate
 ```
 
 ## Topology Selection
