@@ -131,33 +131,63 @@ pub fn render_picking(
         return;
     };
 
-    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("picking_pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &picking.texture_view,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                // Clear to 0 = background (no element).
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: &pipelines.depth_texture,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Clear(1.0),
-                store: wgpu::StoreOp::Store,
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("picking_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &picking.texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // Clear to 0 = background (no element).
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &pipelines.depth_texture,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
             }),
-            stencil_ops: None,
-        }),
-        ..Default::default()
-    });
+            ..Default::default()
+        });
 
-    pass.set_pipeline(&pipelines.picking_pipeline);
-    pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
-    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        pass.set_pipeline(&pipelines.picking_pipeline);
+        pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+    }
+
+    if mesh.edge_vertex_count > 0 {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("edge_picking_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &picking.texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &pipelines.depth_texture,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&pipelines.edge_picking_pipeline);
+        pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
+        pass.draw(0..mesh.edge_vertex_count, 0..1);
+    }
 }
 
 /// Issue a copy from the picking texture to the staging buffer for a single pixel.
