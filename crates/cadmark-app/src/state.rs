@@ -73,8 +73,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             device.poll(wgpu::Maintain::Wait);
             if let Ok(Ok(())) = rx.recv() {
                 let data = slice.get_mapped_range();
-                res.pick_result =
-                    cadmark_renderer::viewport::decode_pick_result(&data);
+                res.pick_result = cadmark_renderer::viewport::decode_pick_result(&data);
                 drop(data);
                 res.picking.staging_buffer.unmap();
             }
@@ -109,85 +108,59 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         if let Some(mesh) = &res.mesh {
             // Render colour-ID picking pass to offscreen texture.
             {
-                let mut pass =
-                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("picking_pass"),
-                        color_attachments: &[Some(
-                            wgpu::RenderPassColorAttachment {
-                                view: &res.picking.texture_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(
-                                        wgpu::Color::BLACK,
-                                    ),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            },
-                        )],
-                        depth_stencil_attachment: Some(
-                            wgpu::RenderPassDepthStencilAttachment {
-                                view: &res.pipelines.depth_texture,
-                                depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(1.0),
-                                    store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            },
-                        ),
-                        ..Default::default()
-                    });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("picking_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &res.picking.texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &res.pipelines.depth_texture,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
 
                 pass.set_pipeline(&res.pipelines.picking_pipeline);
-                pass.set_bind_group(
-                    0,
-                    &res.pipelines.picking_bind_group,
-                    &[],
-                );
+                pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(
-                    mesh.index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
+                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
             }
 
             if mesh.edge_vertex_count > 0 {
-                let mut pass =
-                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("edge_picking_pass"),
-                        color_attachments: &[Some(
-                            wgpu::RenderPassColorAttachment {
-                                view: &res.picking.texture_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            },
-                        )],
-                        depth_stencil_attachment: Some(
-                            wgpu::RenderPassDepthStencilAttachment {
-                                view: &res.pipelines.depth_texture,
-                                depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            },
-                        ),
-                        ..Default::default()
-                    });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("edge_picking_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &res.picking.texture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &res.pipelines.depth_texture,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
 
                 pass.set_pipeline(&res.pipelines.edge_picking_pipeline);
-                pass.set_bind_group(
-                    0,
-                    &res.pipelines.picking_bind_group,
-                    &[],
-                );
-                pass.set_vertex_buffer(
-                    0,
-                    mesh.edge_vertex_buffer.slice(..),
-                );
+                pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
+                pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
                 pass.draw(0..mesh.edge_vertex_count, 0..1);
             }
 
@@ -196,63 +169,44 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             // so we render the shaded mesh + wireframe here with our own
             // depth texture, then blit the result in paint().
             {
-                let mut pass =
-                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("viewport_main_pass"),
-                        color_attachments: &[Some(
-                            wgpu::RenderPassColorAttachment {
-                                view: &res.pipelines.viewport_colour_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                                        r: 30.0 / 255.0,
-                                        g: 30.0 / 255.0,
-                                        b: 35.0 / 255.0,
-                                        a: 1.0,
-                                    }),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            },
-                        )],
-                        depth_stencil_attachment: Some(
-                            wgpu::RenderPassDepthStencilAttachment {
-                                view: &res.pipelines.depth_texture,
-                                depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(1.0),
-                                    store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            },
-                        ),
-                        ..Default::default()
-                    });
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("viewport_main_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &res.pipelines.viewport_colour_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 30.0 / 255.0,
+                                g: 30.0 / 255.0,
+                                b: 35.0 / 255.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &res.pipelines.depth_texture,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    ..Default::default()
+                });
 
                 // Shaded mesh pass.
                 pass.set_pipeline(&res.pipelines.mesh_pipeline);
-                pass.set_bind_group(
-                    0,
-                    &res.pipelines.mesh_bind_group,
-                    &[],
-                );
+                pass.set_bind_group(0, &res.pipelines.mesh_bind_group, &[]);
                 pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(
-                    mesh.index_buffer.slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
+                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.index_count, 0, 0..1);
 
                 // Wireframe overlay.
                 if mesh.edge_vertex_count > 0 {
                     pass.set_pipeline(&res.pipelines.wireframe_pipeline);
-                    pass.set_bind_group(
-                        0,
-                        &res.pipelines.wireframe_bind_group,
-                        &[],
-                    );
-                    pass.set_vertex_buffer(
-                        0,
-                        mesh.edge_vertex_buffer.slice(..),
-                    );
+                    pass.set_bind_group(0, &res.pipelines.wireframe_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
                     pass.draw(0..mesh.edge_vertex_count, 0..1);
                 }
             }
@@ -260,12 +214,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             // Copy a single pixel from the picking texture to the
             // staging buffer so we can map it next frame.
             if let Some((x, y)) = self.pick_request {
-                cadmark_renderer::viewport::request_pick_readback(
-                    encoder,
-                    &res.picking,
-                    x,
-                    y,
-                );
+                cadmark_renderer::viewport::request_pick_readback(encoder, &res.picking, x, y);
                 res.readback_pending = true;
             }
         }
@@ -286,11 +235,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         // Blit the offscreen viewport texture (rendered in prepare()
         // with depth testing) onto the egui render pass.
         render_pass.set_pipeline(&res.pipelines.blit_pipeline);
-        render_pass.set_bind_group(
-            0,
-            &res.pipelines.blit_bind_group,
-            &[],
-        );
+        render_pass.set_bind_group(0, &res.pipelines.blit_bind_group, &[]);
         render_pass.draw(0..3, 0..1);
     }
 }
@@ -363,7 +308,9 @@ impl CadmarkApp {
             std::env::args()
                 .nth(1)
                 .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::current_dir().expect("failed to read current directory")),
+                .unwrap_or_else(|| {
+                    std::env::current_dir().expect("failed to read current directory")
+                }),
         );
 
         // Activate the Python venv so the embedded interpreter can
@@ -380,10 +327,8 @@ impl CadmarkApp {
         }
 
         let (cmd_tx, result_rx) = if let Some(ref dir) = project_dir {
-            let (tx, rx) = crate::orchestrator::spawn_orchestrator(
-                dir.clone(),
-                "part.py".to_string(),
-            );
+            let (tx, rx) =
+                crate::orchestrator::spawn_orchestrator(dir.clone(), "part.py".to_string());
             (Some(tx), Some(rx))
         } else {
             (None, None)
@@ -398,11 +343,8 @@ impl CadmarkApp {
             // prepare() will resize to the actual viewport.
             let (w, h) = (800, 600);
             let pipelines =
-                cadmark_renderer::pipeline::RenderPipelines::new(
-                    &rs.device, format, w, h,
-                );
-            let picking =
-                cadmark_renderer::picking::PickingPass::new(&rs.device, w, h);
+                cadmark_renderer::pipeline::RenderPipelines::new(&rs.device, format, w, h);
+            let picking = cadmark_renderer::picking::PickingPass::new(&rs.device, w, h);
 
             let resources = ViewportResources {
                 pipelines,
@@ -459,14 +401,16 @@ impl CadmarkApp {
             if tx.send(OrchestratorCommand::ChatMessage(message)).is_ok() {
                 self.ai_busy = true;
             } else {
-                self.conversation.push(cadmark_core::message::Message::ai_response(
-                    "Error: AI backend is not available.",
-                ));
+                self.conversation
+                    .push(cadmark_core::message::Message::ai_response(
+                        "Error: AI backend is not available.",
+                    ));
             }
         } else {
-            self.conversation.push(cadmark_core::message::Message::ai_response(
-                "No project directory set. Pass a directory path as a command-line argument.",
-            ));
+            self.conversation
+                .push(cadmark_core::message::Message::ai_response(
+                    "No project directory set. Pass a directory path as a command-line argument.",
+                ));
         }
     }
 
@@ -476,8 +420,7 @@ impl CadmarkApp {
         text: String,
         context: cadmark_core::geometry::GeometryContext,
     ) {
-        let message =
-            cadmark_core::message::Message::spatial_comment(&text, context.clone());
+        let message = cadmark_core::message::Message::spatial_comment(&text, context.clone());
         let message_id = message.id;
         self.conversation.push(message);
 
@@ -492,14 +435,16 @@ impl CadmarkApp {
             {
                 self.ai_busy = true;
             } else {
-                self.conversation.push(cadmark_core::message::Message::ai_response(
-                    "Error: AI backend is not available.",
-                ));
+                self.conversation
+                    .push(cadmark_core::message::Message::ai_response(
+                        "Error: AI backend is not available.",
+                    ));
             }
         } else {
-            self.conversation.push(cadmark_core::message::Message::ai_response(
-                "No project directory set. Pass a directory path as a command-line argument.",
-            ));
+            self.conversation
+                .push(cadmark_core::message::Message::ai_response(
+                    "No project directory set. Pass a directory path as a command-line argument.",
+                ));
         }
     }
 
@@ -520,9 +465,10 @@ impl CadmarkApp {
                         }
 
                         // Add the AI response to chat.
-                        self.conversation.push(
-                            cadmark_core::message::Message::ai_response(&response.message),
-                        );
+                        self.conversation
+                            .push(cadmark_core::message::Message::ai_response(
+                                &response.message,
+                            ));
 
                         // Create a microversion commit.
                         if let Some(ref dir) = self.project_dir {
@@ -571,20 +517,47 @@ impl CadmarkApp {
                         }
                     }
                     OrchestratorResult::ExecutionFailed { ai_message, error } => {
-                        self.conversation.push(
-                            cadmark_core::message::Message::ai_response(&format!(
+                        self.conversation
+                            .push(cadmark_core::message::Message::ai_response(&format!(
                                 "{ai_message}\n\n**Execution failed:**\n```\n{error}\n```"
-                            )),
-                        );
+                            )));
                     }
                     OrchestratorResult::BackendError(error) => {
-                        self.conversation.push(
-                            cadmark_core::message::Message::ai_response(&format!(
+                        self.conversation
+                            .push(cadmark_core::message::Message::ai_response(&format!(
                                 "**AI error:** {error}"
-                            )),
-                        );
+                            )));
                     }
                 }
+            }
+        }
+    }
+
+    /// Sync the orchestrator's cached script source with the copy on disk.
+    fn sync_orchestrator_code(&self, code: String) {
+        if let Some(tx) = &self.cmd_tx {
+            let _ = tx.send(OrchestratorCommand::UpdateCode(code));
+        }
+    }
+
+    /// Clear the currently loaded model and any selection/picking state so the
+    /// viewport cannot show stale geometry after a reload failure.
+    fn clear_loaded_model(&mut self) {
+        self.pending_mesh = None;
+        self.ledger.clear();
+        self.has_mesh = false;
+        self.pending_pick = None;
+        self.pick_in_flight = None;
+        self.selection = SelectionState::None;
+        self.renderer.selected_id = 0;
+        self.overlay.close();
+
+        if let Some(rs) = &self.wgpu_render_state {
+            let mut renderer = rs.renderer.write();
+            if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
+                res.mesh = None;
+                res.pick_result = None;
+                res.readback_pending = false;
             }
         }
     }
@@ -597,6 +570,8 @@ impl CadmarkApp {
         if !script_path.exists() {
             let msg = format!("No script found at {}", script_path.display());
             log::warn!("{msg}");
+            self.sync_orchestrator_code(String::new());
+            self.clear_loaded_model();
             self.status_message = Some(msg);
             return;
         }
@@ -607,12 +582,12 @@ impl CadmarkApp {
             Err(e) => {
                 let msg = format!("Failed to read {}: {e}", script_path.display());
                 log::error!("{msg}");
+                self.clear_loaded_model();
                 self.status_message = Some(msg.clone());
-                self.conversation.push(
-                    cadmark_core::message::Message::ai_response(
-                        &format!("**Script load error:** {msg}"),
-                    ),
-                );
+                self.conversation
+                    .push(cadmark_core::message::Message::ai_response(&format!(
+                        "**Script load error:** {msg}"
+                    )));
                 return;
             }
         };
@@ -622,6 +597,10 @@ impl CadmarkApp {
             script_path.display(),
             script_source.len(),
         );
+
+        // Sync the orchestrator before execution so "fix this" requests operate
+        // on the script currently on disk, even if execution fails.
+        self.sync_orchestrator_code(script_source.clone());
 
         match cadmark_kernel::execution::execute_script(&script_path) {
             Ok(result) => {
@@ -638,29 +617,20 @@ impl CadmarkApp {
                     result.mesh.face_shape_hashes.len(),
                 ));
 
-                // Sync the orchestrator's cached code so the next AI request
-                // sends the correct source.
-                if let Some(tx) = &self.cmd_tx {
-                    let _ = tx.send(OrchestratorCommand::UpdateCode(script_source.clone()));
-                }
-
-                self.ledger = build_ledger_from_execution(
-                    &script_source,
-                    &result.mesh,
-                    &result.provenance,
-                );
+                self.ledger =
+                    build_ledger_from_execution(&script_source, &result.mesh, &result.provenance);
 
                 self.pending_mesh = Some(result.mesh);
             }
             Err(e) => {
                 let msg = format!("{e}");
                 log::error!("Script execution failed: {msg}");
+                self.clear_loaded_model();
                 self.status_message = Some(format!("Execution error: {msg}"));
-                self.conversation.push(
-                    cadmark_core::message::Message::ai_response(
-                        &format!("**Script execution failed:**\n```\n{msg}\n```"),
-                    ),
-                );
+                self.conversation
+                    .push(cadmark_core::message::Message::ai_response(&format!(
+                        "**Script execution failed:**\n```\n{msg}\n```"
+                    )));
             }
         }
     }
@@ -675,8 +645,7 @@ impl CadmarkApp {
         self.selection = SelectionState::Selected(element.clone());
 
         // Update the renderer's selection state for glow effect.
-        self.renderer.selected_id =
-            cadmark_renderer::picking::encode_picking_id(&element);
+        self.renderer.selected_id = cadmark_renderer::picking::encode_picking_id(&element);
 
         // Resolve geometry context via provenance.
         let context = cadmark_core::context::resolve_context(
@@ -706,15 +675,14 @@ impl CadmarkApp {
             Some(m) => m,
             None => return,
         };
-        let Some(rs) = &self.wgpu_render_state else { return };
+        let Some(rs) = &self.wgpu_render_state else {
+            return;
+        };
 
-        let gpu_mesh =
-            cadmark_renderer::pipeline::upload_mesh(&rs.device, &mesh);
+        let gpu_mesh = cadmark_renderer::pipeline::upload_mesh(&rs.device, &mesh);
 
         let mut renderer = rs.renderer.write();
-        if let Some(res) =
-            renderer.callback_resources.get_mut::<ViewportResources>()
-        {
+        if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
             res.mesh = Some(gpu_mesh);
         }
         self.has_mesh = true;
@@ -723,14 +691,14 @@ impl CadmarkApp {
     /// Check callback_resources for a decoded pick result from the
     /// previous frame's readback. If one exists, consume it.
     fn consume_pick_result(&mut self) {
-        let Some(rs) = self.wgpu_render_state.clone() else { return };
+        let Some(rs) = self.wgpu_render_state.clone() else {
+            return;
+        };
 
         // Extract the pick result from callback_resources.
         let element = {
             let mut renderer = rs.renderer.write();
-            let Some(res) =
-                renderer.callback_resources.get_mut::<ViewportResources>()
-            else {
+            let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() else {
                 return;
             };
             res.pick_result.take()
@@ -756,38 +724,36 @@ fn build_ledger_from_execution(
     let mut ledger = cadmark_core::ledger::ProvenanceLedger::new();
     let source_lines: Vec<&str> = script_source.lines().collect();
 
-    let hash_to_entry: std::collections::HashMap<
-        u64,
-        cadmark_core::ledger::ProvenanceEntry,
-    > = provenance
-        .entries
-        .iter()
-        .map(|entry| {
-            let kind = match entry.kind {
-                cadmark_kernel::provenance::ProvenanceRelation::Generated => {
-                    cadmark_core::ledger::ProvenanceKind::Generated
-                }
-                cadmark_kernel::provenance::ProvenanceRelation::Modified => {
-                    cadmark_core::ledger::ProvenanceKind::Modified
-                }
-            };
-            let code = source_lines
-                .get(entry.source_line.saturating_sub(1) as usize)
-                .map(|line| line.trim().to_string())
-                .unwrap_or_default();
+    let hash_to_entry: std::collections::HashMap<u64, cadmark_core::ledger::ProvenanceEntry> =
+        provenance
+            .entries
+            .iter()
+            .map(|entry| {
+                let kind = match entry.kind {
+                    cadmark_kernel::provenance::ProvenanceRelation::Generated => {
+                        cadmark_core::ledger::ProvenanceKind::Generated
+                    }
+                    cadmark_kernel::provenance::ProvenanceRelation::Modified => {
+                        cadmark_core::ledger::ProvenanceKind::Modified
+                    }
+                };
+                let code = source_lines
+                    .get(entry.source_line.saturating_sub(1) as usize)
+                    .map(|line| line.trim().to_string())
+                    .unwrap_or_default();
 
-            (
-                entry.shape_hash,
-                cadmark_core::ledger::ProvenanceEntry {
-                    source: cadmark_core::ledger::SourceRef {
-                        line: entry.source_line,
-                        code,
+                (
+                    entry.shape_hash,
+                    cadmark_core::ledger::ProvenanceEntry {
+                        source: cadmark_core::ledger::SourceRef {
+                            line: entry.source_line,
+                            code,
+                        },
+                        kind,
                     },
-                    kind,
-                },
-            )
-        })
-        .collect();
+                )
+            })
+            .collect();
 
     for (face_idx, &shape_hash) in mesh.face_shape_hashes.iter().enumerate() {
         if let Some(entry) = hash_to_entry.get(&shape_hash) {
@@ -847,11 +813,15 @@ mod tests {
             &provenance,
         );
 
-        let face = ledger.lookup_face(cadmark_core::geometry::FaceId(0)).unwrap();
+        let face = ledger
+            .lookup_face(cadmark_core::geometry::FaceId(0))
+            .unwrap();
         assert_eq!(face.source.line, 2);
         assert_eq!(face.source.code, "Box(10, 10, 10)");
 
-        let edge = ledger.lookup_edge(cadmark_core::geometry::EdgeId(0)).unwrap();
+        let edge = ledger
+            .lookup_edge(cadmark_core::geometry::EdgeId(0))
+            .unwrap();
         assert_eq!(edge.source.line, 3);
         assert_eq!(edge.source.code, "fillet(edges(), 1)");
         assert_eq!(edge.kind, cadmark_core::ledger::ProvenanceKind::Modified);
@@ -894,9 +864,7 @@ impl eframe::App for CadmarkApp {
                     if let Some(version) = self.history.undo() {
                         let hash = version.commit_hash.clone();
                         if let Some(dir) = self.project_dir.clone() {
-                            if let Err(e) =
-                                crate::git_ops::checkout_commit(&dir, &hash)
-                            {
+                            if let Err(e) = crate::git_ops::checkout_commit(&dir, &hash) {
                                 log::error!("Undo failed: {e}");
                             } else {
                                 self.reload_script_state(&dir);
@@ -909,9 +877,7 @@ impl eframe::App for CadmarkApp {
                     if let Some(version) = self.history.redo() {
                         let hash = version.commit_hash.clone();
                         if let Some(dir) = self.project_dir.clone() {
-                            if let Err(e) =
-                                crate::git_ops::checkout_commit(&dir, &hash)
-                            {
+                            if let Err(e) = crate::git_ops::checkout_commit(&dir, &hash) {
                                 log::error!("Redo failed: {e}");
                             } else {
                                 self.reload_script_state(&dir);
@@ -924,9 +890,7 @@ impl eframe::App for CadmarkApp {
                     if let Some(version) = self.history.jump_to(idx) {
                         let hash = version.commit_hash.clone();
                         if let Some(dir) = self.project_dir.clone() {
-                            if let Err(e) =
-                                crate::git_ops::checkout_commit(&dir, &hash)
-                            {
+                            if let Err(e) = crate::git_ops::checkout_commit(&dir, &hash) {
                                 log::error!("Jump to version failed: {e}");
                             } else {
                                 self.reload_script_state(&dir);
@@ -960,10 +924,7 @@ impl eframe::App for CadmarkApp {
                     };
                     ui.colored_label(colour, status);
                 } else {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(100, 100, 110),
-                        "No script loaded",
-                    );
+                    ui.colored_label(egui::Color32::from_rgb(100, 100, 110), "No script loaded");
                 }
             });
         });
@@ -981,8 +942,7 @@ impl eframe::App for CadmarkApp {
         // Central panel: 3D viewport.
         egui::CentralPanel::default().show(ctx, |ui| {
             let available = ui.available_size();
-            let (rect, response) =
-                ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+            let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
 
             // Handle viewport input — CAD navigation.
             if response.dragged_by(egui::PointerButton::Secondary) {
@@ -1008,11 +968,7 @@ impl eframe::App for CadmarkApp {
                     self.pending_pick = Some((local_pos.x, local_pos.y));
                     // Absolute coordinates position the overlay on result.
                     self.pick_in_flight = Some((pos.x, pos.y));
-                    log::debug!(
-                        "Pick requested at ({}, {})",
-                        local_pos.x,
-                        local_pos.y
-                    );
+                    log::debug!("Pick requested at ({}, {})", local_pos.x, local_pos.y);
                 }
             }
 
@@ -1036,24 +992,19 @@ impl eframe::App for CadmarkApp {
 
             // Background rect — always drawn so the viewport has a
             // consistent dark fill even before any mesh is loaded.
-            ui.painter().rect_filled(
-                rect,
-                0.0,
-                egui::Color32::from_rgb(30, 30, 35),
-            );
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 35));
 
             // Build the paint callback that drives the wgpu renderer.
             let ppp = ctx.pixels_per_point();
-            let viewport_size = (
-                (rect.width() * ppp) as u32,
-                (rect.height() * ppp) as u32,
-            );
+            let viewport_size = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
             let aspect = rect.width() / rect.height().max(1.0);
 
             // Consume the pending pick (local coords → pixel coords).
-            let pick_request = self.pending_pick.take().map(|(x, y)| {
-                ((x * ppp) as u32, (y * ppp) as u32)
-            });
+            let pick_request = self
+                .pending_pick
+                .take()
+                .map(|(x, y)| ((x * ppp) as u32, (y * ppp) as u32));
 
             let callback = eframe::egui_wgpu::Callback::new_paint_callback(
                 rect,
