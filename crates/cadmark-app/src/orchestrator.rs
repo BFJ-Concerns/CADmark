@@ -50,6 +50,9 @@ pub enum OrchestratorResult {
     BackendError(String),
 }
 
+/// Maximum number of previous user messages retained for doc lookup context.
+const MAX_MESSAGE_HISTORY: usize = 10;
+
 /// Manages the async AI request cycle.
 /// Lives on a background tokio runtime, communicates with the UI via channels.
 pub struct Orchestrator {
@@ -59,6 +62,9 @@ pub struct Orchestrator {
     project_dir: PathBuf,
     /// Path to the script file within the project.
     script_filename: String,
+    /// Rolling window of recent user messages, used by the doc lookup
+    /// agent to understand conversational context.
+    message_history: Vec<String>,
 }
 
 impl Orchestrator {
@@ -67,6 +73,7 @@ impl Orchestrator {
             current_code: String::new(),
             project_dir,
             script_filename,
+            message_history: Vec::new(),
         }
     }
 
@@ -84,16 +91,28 @@ impl Orchestrator {
     }
 
     /// Process a chat message through the AI.
+    /// Runs the doc lookup agent first to gather relevant API references.
     pub async fn handle_chat(
         &mut self,
         message: &str,
         backend: &dyn AiBackend,
     ) -> OrchestratorResult {
-        let request = AiRequest::from_chat(self.current_code.clone(), message.to_string());
+        self.push_message(message);
+        let doc_context = cadmark_bridge::doc_lookup::DocLookup::lookup(
+            message,
+            &self.message_history,
+        )
+        .await;
+
+        let mut request = AiRequest::from_chat(self.current_code.clone(), message.to_string());
+        if let Some(docs) = doc_context {
+            request = request.with_doc_context(docs);
+        }
         self.process_request(request, backend, None).await
     }
 
     /// Process a spatial comment through the AI.
+    /// Runs the doc lookup agent first to gather relevant API references.
     pub async fn handle_spatial_comment(
         &mut self,
         id: MessageId,
@@ -101,11 +120,21 @@ impl Orchestrator {
         context: GeometryContext,
         backend: &dyn AiBackend,
     ) -> OrchestratorResult {
-        let request = AiRequest::from_spatial_comment(
+        self.push_message(text);
+        let doc_context = cadmark_bridge::doc_lookup::DocLookup::lookup(
+            text,
+            &self.message_history,
+        )
+        .await;
+
+        let mut request = AiRequest::from_spatial_comment(
             self.current_code.clone(),
             text.to_string(),
             context,
         );
+        if let Some(docs) = doc_context {
+            request = request.with_doc_context(docs);
+        }
         self.process_request(request, backend, Some(id)).await
     }
 
@@ -210,6 +239,15 @@ impl Orchestrator {
     pub fn current_code(&self) -> &str {
         &self.current_code
     }
+
+    /// Record a user message for doc lookup context.
+    /// Keeps only the most recent messages to avoid unbounded growth.
+    fn push_message(&mut self, message: &str) {
+        self.message_history.push(message.to_string());
+        if self.message_history.len() > MAX_MESSAGE_HISTORY {
+            self.message_history.remove(0);
+        }
+    }
 }
 
 /// Spawn the orchestrator on a tokio runtime with channel communication.
@@ -248,14 +286,9 @@ pub fn spawn_orchestrator(
                     cmd => {
                         let result = match cmd {
                             OrchestratorCommand::ChatMessage(msg) => {
-                                orchestrator.process_request(
-                                    AiRequest::from_chat(
-                                        orchestrator.current_code.clone(),
-                                        msg,
-                                    ),
-                                    &backend,
-                                    None,
-                                ).await
+                                orchestrator
+                                    .handle_chat(&msg, &backend)
+                                    .await
                             }
                             OrchestratorCommand::SpatialComment { id, text, context } => {
                                 orchestrator

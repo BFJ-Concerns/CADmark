@@ -20,6 +20,10 @@ pub struct AiRequest {
     pub is_retry: bool,
     /// Python traceback from the failed execution, if retrying.
     pub traceback: Option<String>,
+    /// Relevant build123d API documentation extracted by the doc lookup
+    /// pre-processing agent. Injected into the design prompt so the AI
+    /// has exact signatures and usage patterns to work from.
+    pub doc_context: Option<String>,
 }
 
 impl AiRequest {
@@ -31,6 +35,7 @@ impl AiRequest {
             geometry_context: None,
             is_retry: false,
             traceback: None,
+            doc_context: None,
         }
     }
 
@@ -46,7 +51,14 @@ impl AiRequest {
             geometry_context: Some(context),
             is_retry: false,
             traceback: None,
+            doc_context: None,
         }
+    }
+
+    /// Attach documentation context from the doc lookup agent.
+    pub fn with_doc_context(mut self, doc_context: String) -> Self {
+        self.doc_context = Some(doc_context);
+        self
     }
 
     /// Create a retry request after a Python execution error.

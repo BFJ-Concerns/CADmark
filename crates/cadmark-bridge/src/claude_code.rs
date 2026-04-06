@@ -63,6 +63,14 @@ impl ClaudeCodeBackend {
             }
         }
 
+        // Inject documentation references from the doc lookup agent
+        // so the design agent has exact API signatures to work from.
+        if let Some(doc_ctx) = &request.doc_context {
+            prompt.push_str("Relevant build123d API reference:\n\n");
+            prompt.push_str(doc_ctx);
+            prompt.push_str("\n\n");
+        }
+
         prompt.push_str("User message: ");
         prompt.push_str(&request.user_message);
         prompt.push_str("\n\nCurrent build123d code:\n```python\n");
@@ -260,6 +268,22 @@ mod tests {
         );
         let prompt = backend.build_prompt(&request);
         assert!(prompt.contains("position: top face"));
+    }
+
+    #[test]
+    fn build_prompt_with_doc_context() {
+        let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
+        let request = AiRequest::from_chat(
+            "box = Box(10, 10, 10)".to_string(),
+            "fillet the top edges".to_string(),
+        )
+        .with_doc_context("fillet(objects, radius)\n\nRound edges.".to_string());
+        let prompt = backend.build_prompt(&request);
+        // Doc context appears before the user message.
+        let doc_pos = prompt.find("Relevant build123d API reference").unwrap();
+        let msg_pos = prompt.find("User message:").unwrap();
+        assert!(doc_pos < msg_pos, "doc context should precede user message");
+        assert!(prompt.contains("fillet(objects, radius)"));
     }
 
     #[test]
