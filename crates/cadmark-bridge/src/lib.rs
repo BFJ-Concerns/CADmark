@@ -7,3 +7,4 @@
 pub mod backend;
 pub mod claude_code;
 pub mod context;
+pub mod doc_lookup;

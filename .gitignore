@@ -31,3 +31,7 @@ Desktop.ini
 # Logs
 *.log
 logs/
+
+# AI agent configuration
+.codex
+AGENTS.md
