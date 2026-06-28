@@ -42,10 +42,7 @@ pub enum OrchestratorResult {
         script_path: PathBuf,
     },
     /// AI responded but code execution failed after retry.
-    ExecutionFailed {
-        ai_message: String,
-        error: String,
-    },
+    ExecutionFailed { ai_message: String, error: String },
     /// AI backend itself failed.
     BackendError(String),
 }
@@ -98,11 +95,8 @@ impl Orchestrator {
         backend: &dyn AiBackend,
     ) -> OrchestratorResult {
         self.push_message(message);
-        let doc_context = cadmark_bridge::doc_lookup::DocLookup::lookup(
-            message,
-            &self.message_history,
-        )
-        .await;
+        let doc_context =
+            cadmark_bridge::doc_lookup::DocLookup::lookup(message, &self.message_history).await;
 
         let mut request = AiRequest::from_chat(self.current_code.clone(), message.to_string());
         if let Some(docs) = doc_context {
@@ -121,17 +115,11 @@ impl Orchestrator {
         backend: &dyn AiBackend,
     ) -> OrchestratorResult {
         self.push_message(text);
-        let doc_context = cadmark_bridge::doc_lookup::DocLookup::lookup(
-            text,
-            &self.message_history,
-        )
-        .await;
+        let doc_context =
+            cadmark_bridge::doc_lookup::DocLookup::lookup(text, &self.message_history).await;
 
-        let mut request = AiRequest::from_spatial_comment(
-            self.current_code.clone(),
-            text.to_string(),
-            context,
-        );
+        let mut request =
+            AiRequest::from_spatial_comment(self.current_code.clone(), text.to_string(), context);
         if let Some(docs) = doc_context {
             request = request.with_doc_context(docs);
         }
@@ -199,7 +187,9 @@ impl Orchestrator {
                             }
                             Err(retry_error) => {
                                 // Restore the original code on double failure.
-                                if let Err(restore_err) = std::fs::write(&script_path, &self.current_code) {
+                                if let Err(restore_err) =
+                                    std::fs::write(&script_path, &self.current_code)
+                                {
                                     log::error!(
                                         "Failed to restore script after execution error: {restore_err}. \
                                          File may contain broken AI-generated code."
@@ -268,13 +258,12 @@ pub fn spawn_orchestrator(
             let mut orchestrator = Orchestrator::new(project_dir.clone(), script_filename);
             if let Err(e) = orchestrator.load_current_code() {
                 log::error!("Failed to load existing script: {e}");
-                let _ = result_tx.send(OrchestratorResult::BackendError(
-                    format!("Could not read project script: {e}"),
-                ));
+                let _ = result_tx.send(OrchestratorResult::BackendError(format!(
+                    "Could not read project script: {e}"
+                )));
             }
 
-            let backend =
-                cadmark_bridge::claude_code::ClaudeCodeBackend::new(project_dir);
+            let backend = cadmark_bridge::claude_code::ClaudeCodeBackend::new(project_dir);
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
@@ -286,9 +275,7 @@ pub fn spawn_orchestrator(
                     cmd => {
                         let result = match cmd {
                             OrchestratorCommand::ChatMessage(msg) => {
-                                orchestrator
-                                    .handle_chat(&msg, &backend)
-                                    .await
+                                orchestrator.handle_chat(&msg, &backend).await
                             }
                             OrchestratorCommand::SpatialComment { id, text, context } => {
                                 orchestrator

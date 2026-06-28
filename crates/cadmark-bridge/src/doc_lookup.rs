@@ -84,10 +84,7 @@ impl DocLookup {
     ///
     /// Failure is intentionally non-fatal — a warning is logged but
     /// the design agent proceeds without extra documentation context.
-    pub async fn lookup(
-        user_message: &str,
-        message_history: &[String],
-    ) -> Option<String> {
+    pub async fn lookup(user_message: &str, message_history: &[String]) -> Option<String> {
         let prompt = Self::build_prompt(user_message, message_history);
 
         let output = tokio::process::Command::new("claude")
@@ -111,19 +108,13 @@ impl DocLookup {
                     log::debug!("Doc lookup returned no relevant results");
                     None
                 } else {
-                    log::debug!(
-                        "Doc lookup returned {} bytes of API reference",
-                        text.len()
-                    );
+                    log::debug!("Doc lookup returned {} bytes of API reference", text.len());
                     Some(text)
                 }
             }
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
-                log::warn!(
-                    "Doc lookup agent exited with {}: {stderr}",
-                    out.status
-                );
+                log::warn!("Doc lookup agent exited with {}: {stderr}", out.status);
                 None
             }
             Err(e) => {

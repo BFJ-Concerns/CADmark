@@ -219,10 +219,8 @@ mod tests {
     #[test]
     fn build_prompt_retry_includes_traceback() {
         let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
-        let request = AiRequest::from_chat(
-            "bad code".to_string(),
-            "fix it".to_string(),
-        ).retry_with_traceback("NameError: name 'x' is not defined".to_string());
+        let request = AiRequest::from_chat("bad code".to_string(), "fix it".to_string())
+            .retry_with_traceback("NameError: name 'x' is not defined".to_string());
         let prompt = backend.build_prompt(&request);
         assert!(prompt.contains("previous code failed"));
         assert!(prompt.contains("NameError"));
@@ -261,11 +259,8 @@ mod tests {
             source_code: None,
             identification,
         };
-        let request = AiRequest::from_spatial_comment(
-            "code".to_string(),
-            "fillet this".to_string(),
-            context,
-        );
+        let request =
+            AiRequest::from_spatial_comment("code".to_string(), "fillet this".to_string(), context);
         let prompt = backend.build_prompt(&request);
         assert!(prompt.contains("position: top face"));
     }

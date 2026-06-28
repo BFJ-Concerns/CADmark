@@ -40,11 +40,7 @@ impl AiRequest {
     }
 
     /// Create a request from a spatial comment.
-    pub fn from_spatial_comment(
-        code: String,
-        message: String,
-        context: GeometryContext,
-    ) -> Self {
+    pub fn from_spatial_comment(code: String, message: String, context: GeometryContext) -> Self {
         Self {
             current_code: code,
             user_message: message,
@@ -86,18 +82,15 @@ mod tests {
     #[test]
     fn from_spatial_comment_includes_context() {
         let ctx = GeometryContext {
-            element: cadmark_core::geometry::TopologyElement::Face(
-                cadmark_core::geometry::FaceId(1),
-            ),
+            element: cadmark_core::geometry::TopologyElement::Face(cadmark_core::geometry::FaceId(
+                1,
+            )),
             source_line: Some(10),
             source_code: Some("box = Box(5,5,5)".to_string()),
             identification: std::collections::HashMap::new(),
         };
-        let req = AiRequest::from_spatial_comment(
-            "code".to_string(),
-            "round this".to_string(),
-            ctx,
-        );
+        let req =
+            AiRequest::from_spatial_comment("code".to_string(), "round this".to_string(), ctx);
         assert!(req.geometry_context.is_some());
         assert_eq!(req.geometry_context.unwrap().source_line, Some(10));
     }

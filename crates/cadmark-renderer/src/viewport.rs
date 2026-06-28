@@ -18,7 +18,6 @@ pub struct ViewportRenderState {
     pub pick_request: Option<(u32, u32)>,
 }
 
-
 /// Encode a render pass for the main shaded mesh + wireframe overlay.
 pub fn render_scene(
     encoder: &mut wgpu::CommandEncoder,
@@ -117,10 +116,7 @@ pub fn render_scene(
 }
 
 /// Encode the picking pass into the offscreen colour-ID texture.
-pub fn render_picking(
-    encoder: &mut wgpu::CommandEncoder,
-    state: &ViewportRenderState,
-) {
+pub fn render_picking(encoder: &mut wgpu::CommandEncoder, state: &ViewportRenderState) {
     let Some(pipelines) = &state.pipelines else {
         return;
     };

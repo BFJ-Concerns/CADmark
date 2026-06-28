@@ -70,9 +70,8 @@ pub fn create_microversion(
     run_git(project_dir, &["add", script_filename])?;
 
     // Build the structured commit message.
-    let message = format!(
-        "{summary}\n\n{METADATA_MARKER}\ntrigger: {trigger_message}\ntype: microversion"
-    );
+    let message =
+        format!("{summary}\n\n{METADATA_MARKER}\ntrigger: {trigger_message}\ntype: microversion");
 
     run_git(project_dir, &["commit", "-m", &message])?;
 
@@ -97,9 +96,7 @@ pub fn create_snapshot(
 ) -> Result<Microversion, GitError> {
     run_git(project_dir, &["add", script_filename])?;
 
-    let message = format!(
-        "Snapshot: {name}\n\n{METADATA_MARKER}\ntype: snapshot\nname: {name}"
-    );
+    let message = format!("Snapshot: {name}\n\n{METADATA_MARKER}\ntype: snapshot\nname: {name}");
 
     run_git(project_dir, &["commit", "-m", &message, "--allow-empty"])?;
 
@@ -131,19 +128,12 @@ pub fn checkout_branch_tip(project_dir: &Path, branch: &str) -> Result<(), GitEr
 }
 
 /// List recent microversions from git log, most recent first.
-pub fn list_microversions(
-    project_dir: &Path,
-    count: usize,
-) -> Result<Vec<Microversion>, GitError> {
+pub fn list_microversions(project_dir: &Path, count: usize) -> Result<Vec<Microversion>, GitError> {
     // Use null byte as record separator — it cannot appear in commit text,
     // unlike the old "---END---" delimiter which could collide with user input.
     let log_output = run_git(
         project_dir,
-        &[
-            "log",
-            &format!("-{count}"),
-            "--format=%H%n%s%n%aI%n%b%x00",
-        ],
+        &["log", &format!("-{count}"), "--format=%H%n%s%n%aI%n%b%x00"],
     )?;
 
     let mut versions = Vec::new();
@@ -292,13 +282,13 @@ mod tests {
         let script = "part.py";
         fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
 
-        let v1 = create_microversion(dir.path(), "Create initial box", "make a box", script)
-            .unwrap();
+        let v1 =
+            create_microversion(dir.path(), "Create initial box", "make a box", script).unwrap();
         assert!(!v1.commit_hash.is_empty());
 
         fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
-        let v2 = create_microversion(dir.path(), "Double box size", "make it bigger", script)
-            .unwrap();
+        let v2 =
+            create_microversion(dir.path(), "Double box size", "make it bigger", script).unwrap();
 
         let versions = list_microversions(dir.path(), 10).unwrap();
         assert_eq!(versions.len(), 2);
@@ -328,8 +318,7 @@ mod tests {
         let dir = test_repo();
         let script = "part.py";
         fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
-        let v1 =
-            create_microversion(dir.path(), "First version", "make a box", script).unwrap();
+        let v1 = create_microversion(dir.path(), "First version", "make a box", script).unwrap();
 
         // Detach HEAD by checking out the commit directly.
         checkout_commit(dir.path(), &v1.commit_hash).unwrap();

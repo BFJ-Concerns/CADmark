@@ -15,10 +15,7 @@ pub trait IdentificationStrategy: Send + Sync {
     /// Given a selected element, produce additional key-value identification
     /// data that helps the AI disambiguate. Returns an empty map if the
     /// strategy doesn't apply.
-    fn identify(
-        &self,
-        element: &TopologyElement,
-    ) -> std::collections::HashMap<String, String>;
+    fn identify(&self, element: &TopologyElement) -> std::collections::HashMap<String, String>;
 
     fn name(&self) -> &str;
 }
@@ -28,10 +25,7 @@ pub trait IdentificationStrategy: Send + Sync {
 pub struct NullIdentification;
 
 impl IdentificationStrategy for NullIdentification {
-    fn identify(
-        &self,
-        _element: &TopologyElement,
-    ) -> std::collections::HashMap<String, String> {
+    fn identify(&self, _element: &TopologyElement) -> std::collections::HashMap<String, String> {
         std::collections::HashMap::new()
     }
 

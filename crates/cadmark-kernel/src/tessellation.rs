@@ -160,16 +160,28 @@ pub fn tessellate_from_namespace(
     py: Python<'_>,
     namespace: &Bound<'_, PyDict>,
 ) -> Result<TessellatedMesh, TessellationError> {
-    // Inject tessellation helper.
+    let shape = find_result_shape(namespace)?;
+
+    namespace
+        .set_item("_cadmark_result_shape", &shape)
+        .map_err(TessellationError::Python)?;
+
+    // Inject tessellation helper after extracting the user result so helper
+    // imports don't pollute shape-discovery diagnostics.
     py.run(TESSELLATION_SOURCE, Some(namespace), None)
         .map_err(TessellationError::Python)?;
 
-    let shape = find_result_shape(namespace)?;
-
     log::info!(
         "Found shape: {} (type: {})",
-        shape.repr().map(|s| s.to_string()).unwrap_or_else(|_| "?".into()),
-        shape.get_type().name().map(|s| s.to_string()).unwrap_or_else(|_| "?".into()),
+        shape
+            .repr()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "?".into()),
+        shape
+            .get_type()
+            .name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "?".into()),
     );
 
     // Unwrap build123d objects and tessellate.
@@ -178,9 +190,7 @@ pub fn tessellate_from_namespace(
 
     let result = namespace
         .get_item("_cadmark_tess_result")?
-        .ok_or_else(|| TessellationError::NoShape(
-            "Tessellation produced no result dict".into(),
-        ))?;
+        .ok_or_else(|| TessellationError::NoShape("Tessellation produced no result dict".into()))?;
 
     parse_tessellation_result(py, &result)
 }
@@ -196,7 +206,7 @@ fn find_result_shape<'py>(
         let Ok(name) = name.extract::<String>() else {
             continue;
         };
-        if name.starts_with("_cadmark") || name.starts_with("__") {
+        if is_internal_namespace_name(&name) {
             continue;
         }
 
@@ -215,16 +225,12 @@ fn find_result_shape<'py>(
             }
             "BuildSketch" => {
                 if get_non_none_attr(&value, "sketch")?.is_some() {
-                    unsupported_outputs.push(format!(
-                        "{name}: BuildSketch (2D output)"
-                    ));
+                    unsupported_outputs.push(format!("{name}: BuildSketch (2D output)"));
                 }
             }
             "BuildLine" => {
                 if get_non_none_attr(&value, "line")?.is_some() {
-                    unsupported_outputs.push(format!(
-                        "{name}: BuildLine (1D output)"
-                    ));
+                    unsupported_outputs.push(format!("{name}: BuildLine (1D output)"));
                 }
             }
             _ => {
@@ -266,6 +272,26 @@ fn find_result_shape<'py>(
     )))
 }
 
+fn is_internal_namespace_name(name: &str) -> bool {
+    matches!(
+        name,
+        "_cadmark_tessellate"
+            | "_cadmark_result_shape"
+            | "_cadmark_ocp_shape"
+            | "_cadmark_tess_result"
+            | "BRepMesh_IncrementalMesh"
+            | "TopExp_Explorer"
+            | "TopAbs_FACE"
+            | "TopAbs_EDGE"
+            | "BRep_Tool"
+            | "TopLoc_Location"
+            | "GCPnts_TangentialDeflection"
+            | "BRepAdaptor_Curve"
+            | "math"
+    ) || name.starts_with("_cadmark")
+        || name.starts_with("__")
+}
+
 fn get_non_none_attr<'py>(
     value: &Bound<'py, PyAny>,
     attr: &str,
@@ -280,10 +306,7 @@ fn get_non_none_attr<'py>(
     }
 }
 
-fn has_non_none_attr(
-    value: &Bound<'_, PyAny>,
-    attr: &str,
-) -> Result<bool, TessellationError> {
+fn has_non_none_attr(value: &Bound<'_, PyAny>, attr: &str) -> Result<bool, TessellationError> {
     Ok(get_non_none_attr(value, attr)?.is_some())
 }
 
@@ -380,13 +403,11 @@ result = DirectShape()
             .unwrap();
 
             let err = find_result_shape(&namespace).unwrap_err();
-            assert!(matches!(
-                err,
-                TessellationError::UnsupportedScriptOutput(_)
-            ));
-            assert!(err
-                .to_string()
-                .contains("CADmark only supports Builder mode scripts"));
+            assert!(matches!(err, TessellationError::UnsupportedScriptOutput(_)));
+            assert!(
+                err.to_string()
+                    .contains("CADmark only supports Builder mode scripts")
+            );
         });
     }
 
@@ -412,10 +433,7 @@ sketch = BuildSketch()
             .unwrap();
 
             let err = find_result_shape(&namespace).unwrap_err();
-            assert!(matches!(
-                err,
-                TessellationError::UnsupportedScriptOutput(_)
-            ));
+            assert!(matches!(err, TessellationError::UnsupportedScriptOutput(_)));
             assert!(err.to_string().contains("BuildSketch"));
         });
     }
@@ -428,9 +446,68 @@ sketch = BuildSketch()
 
             let err = find_result_shape(&namespace).unwrap_err();
             assert!(matches!(err, TessellationError::NoShape(_)));
-            assert!(err
-                .to_string()
-                .contains("Expected a completed `BuildPart` context"));
+            assert!(
+                err.to_string()
+                    .contains("Expected a completed `BuildPart` context")
+            );
+        });
+    }
+
+    #[test]
+    fn tessellation_injects_result_shape_before_running_helper_code() {
+        Python::with_gil(|py| {
+            let namespace = PyDict::new(py);
+            py.run(
+                c"
+class DirectShape:
+    def __init__(self):
+        self.wrapped = object()
+
+class BuildPart:
+    def __init__(self):
+        self.part = DirectShape()
+
+part = BuildPart()
+",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+
+            let shape = find_result_shape(&namespace).unwrap();
+            namespace.set_item("_cadmark_result_shape", &shape).unwrap();
+            let err = py.run(TESSELLATE_CODE, Some(&namespace), None).unwrap_err();
+            assert!(!err.to_string().contains("_cadmark_result_shape"));
+
+            let stored_shape = namespace
+                .get_item("_cadmark_result_shape")
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored_shape.get_type().name().unwrap(), "DirectShape");
+        });
+    }
+
+    #[test]
+    fn missing_build_part_error_only_reports_user_namespace() {
+        Python::with_gil(|py| {
+            let namespace = PyDict::new(py);
+            py.run(
+                c"
+value = 42
+BRepMesh_IncrementalMesh = object()
+math = __import__('math')
+",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+
+            let err = find_result_shape(&namespace).unwrap_err();
+            let msg = err.to_string();
+
+            assert!(msg.contains("value: int"));
+            assert!(!msg.contains("BRepMesh_IncrementalMesh"));
+            assert!(!msg.contains("math: module"));
         });
     }
 }

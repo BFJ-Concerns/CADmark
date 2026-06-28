@@ -78,9 +78,7 @@ impl OverlayState {
 
                             // Submit on Ctrl+Enter.
                             if response.has_focus()
-                                && ui.input(|i| {
-                                    i.modifiers.ctrl && i.key_pressed(egui::Key::Enter)
-                                })
+                                && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter))
                                 && !text.trim().is_empty()
                             {
                                 action = OverlayAction::Submit(text.trim().to_string());
@@ -105,10 +103,7 @@ impl OverlayState {
                 // Draw connecting line from overlay to anchor.
                 let painter = ui.painter();
                 painter.line_segment(
-                    [
-                        egui::pos2(anchor.x, anchor.y),
-                        overlay_pos,
-                    ],
+                    [egui::pos2(anchor.x, anchor.y), overlay_pos],
                     egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 200, 255)),
                 );
 
