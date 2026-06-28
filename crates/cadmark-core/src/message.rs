@@ -182,8 +182,16 @@ mod tests {
         // Only the targeted spatial comment should be applied.
         let applied_count = conv.messages().iter().filter(|m| m.is_applied()).count();
         assert_eq!(applied_count, 1);
-        assert!(conv.messages().iter().any(|m| m.id == first_id && m.is_applied()));
-        assert!(conv.messages().iter().any(|m| m.id == second_id && !m.is_applied()));
+        assert!(
+            conv.messages()
+                .iter()
+                .any(|m| m.id == first_id && m.is_applied())
+        );
+        assert!(
+            conv.messages()
+                .iter()
+                .any(|m| m.id == second_id && !m.is_applied())
+        );
 
         // Non-spatial messages are unaffected.
         assert!(!conv.messages()[0].is_applied());

@@ -27,11 +27,7 @@ impl ChatPane {
     }
 
     /// Render the chat pane. Returns Some(text) if the user submitted a message.
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        conversation: &Conversation,
-    ) -> Option<String> {
+    pub fn show(&mut self, ui: &mut egui::Ui, conversation: &Conversation) -> Option<String> {
         let mut submitted = None;
 
         // Reserve space for the input area at the bottom first,
@@ -67,11 +63,11 @@ impl ChatPane {
                                 // Geometry chip header.
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        egui::RichText::new("Spatial Comment")
-                                            .strong()
-                                            .color(egui::Color32::from_rgba_premultiplied(
+                                        egui::RichText::new("Spatial Comment").strong().color(
+                                            egui::Color32::from_rgba_premultiplied(
                                                 100, 200, 255, alpha,
-                                            )),
+                                            ),
+                                        ),
                                     );
                                     if let Some(line) = context.source_line {
                                         ui.label(
@@ -91,12 +87,9 @@ impl ChatPane {
                                         );
                                     }
                                 });
-                                ui.label(
-                                    egui::RichText::new(&message.text)
-                                        .color(egui::Color32::from_rgba_premultiplied(
-                                            220, 220, 220, alpha,
-                                        )),
-                                );
+                                ui.label(egui::RichText::new(&message.text).color(
+                                    egui::Color32::from_rgba_premultiplied(220, 220, 220, alpha),
+                                ));
                             });
                         }
                         MessageKind::AiResponse => {
@@ -142,8 +135,8 @@ impl ChatPane {
                 .clicked();
 
             // Submit on Enter or button click.
-            let enter_pressed = response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter_pressed =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             if (send_clicked || enter_pressed) && !self.input_text.trim().is_empty() {
                 submitted = Some(self.input_text.trim().to_string());

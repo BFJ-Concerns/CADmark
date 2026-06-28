@@ -27,8 +27,10 @@ cargo run -- [dir]   # Run with a project directory (defaults to cwd)
 ```
 
 Requires Python 3.12 (cadquery-ocp). The `.cargo/config.toml` points PyO3
-at the uv-managed Python 3.12 installation. The `.venv/` in the project root
-is for runtime use.
+at the uv-managed Python 3.12 installation. `cadmark-app` embeds an rpath
+to that runtime's `lib/` directory, and `cadmark-kernel` sets `PYTHONHOME`
+from the configured interpreter before Python initialises. The `.venv/` in
+the project root is for runtime packages such as `build123d`.
 
 ## Key Decisions
 

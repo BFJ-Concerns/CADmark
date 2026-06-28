@@ -14,10 +14,7 @@ pub enum ToolbarAction {
 }
 
 /// Render the toolbar with undo/redo controls.
-pub fn show_toolbar(
-    ui: &mut egui::Ui,
-    history: &VersionHistory,
-) -> ToolbarAction {
+pub fn show_toolbar(ui: &mut egui::Ui, history: &VersionHistory) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 
     ui.horizontal(|ui| {
@@ -31,11 +28,7 @@ pub fn show_toolbar(
 
             // Dropdown on right-click or long-press showing recent versions.
             undo_response.context_menu(|ui| {
-                ui.label(
-                    egui::RichText::new("Recent versions")
-                        .strong()
-                        .small(),
-                );
+                ui.label(egui::RichText::new("Recent versions").strong().small());
                 ui.separator();
                 for (i, version) in history.recent(10).iter().enumerate() {
                     let label = format!(

@@ -33,6 +33,8 @@ static VENV_ACTIVATED: Once = Once::new();
 /// installed in the venv (e.g. build123d) are importable. Call
 /// once at startup — repeated calls are no-ops.
 pub fn activate_venv(venv_path: &Path) -> Result<(), ExecutionError> {
+    crate::python_runtime::configure_python_home();
+
     // Glob for the site-packages directory rather than hardcoding
     // the Python minor version — works across 3.x variants.
     let lib_dir = venv_path.join("lib");
@@ -51,10 +53,7 @@ pub fn activate_venv(venv_path: &Path) -> Result<(), ExecutionError> {
         .filter(|p| p.is_dir());
 
     let Some(site_packages) = site_packages else {
-        log::warn!(
-            "No site-packages found in venv at {}",
-            venv_path.display()
-        );
+        log::warn!("No site-packages found in venv at {}", venv_path.display());
         return Ok(());
     };
 
@@ -82,6 +81,8 @@ pub fn activate_venv(venv_path: &Path) -> Result<(), ExecutionError> {
 /// 3. `.venv/` near the running executable (walk up 4 levels)
 /// 4. `.venv/` in the current working directory
 pub fn discover_and_activate_venv() -> Result<(), ExecutionError> {
+    crate::python_runtime::configure_python_home();
+
     // VIRTUAL_ENV — set by shell activation or launch scripts.
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
         let path = Path::new(&venv);
@@ -155,6 +156,8 @@ pub fn execute_script(script_path: &Path) -> Result<ExecutionResult, ExecutionEr
 
 /// Execute build123d source code directly (for testing and AI-generated code).
 pub fn execute_script_source(source: &str) -> Result<ExecutionResult, ExecutionError> {
+    crate::python_runtime::configure_python_home();
+
     let line_count = source.lines().count();
     let preview: String = source.lines().take(3).collect::<Vec<_>>().join(" | ");
     log::info!(
