@@ -113,8 +113,8 @@ impl fmt::Debug for OpenAiCompatibleClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenAiCompatibleClient")
-            .field("responses_url", &self.responses_url)
-            .field("model", &self.model)
+            .field("responses_url", &"[CONFIGURED]")
+            .field("model", &"[CONFIGURED]")
             .field("credential", &self.credential)
             .finish_non_exhaustive()
     }

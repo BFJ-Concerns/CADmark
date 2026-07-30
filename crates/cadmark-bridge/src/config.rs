@@ -45,10 +45,10 @@ fn default_timeout_seconds() -> u64 {
 /// A configuration error safe to show to the user.
 #[derive(Debug, Error)]
 pub enum ConfigurationError {
-    #[error("AI configuration is not valid JSON: {0}")]
-    Parse(String),
-    #[error("unsupported AI provider `{0}`")]
-    UnsupportedProvider(String),
+    #[error("AI configuration is not valid JSON or does not match the required schema")]
+    Parse,
+    #[error("AI configuration selects an unsupported provider")]
+    UnsupportedProvider,
     #[error("AI base URL is invalid")]
     InvalidBaseUrl,
     #[error("AI base URL must use HTTPS unless `allow_insecure_http` is true")]
@@ -57,10 +57,10 @@ pub enum ConfigurationError {
     InvalidModel,
     #[error("AI timeout must be greater than zero")]
     InvalidTimeout,
-    #[error("AI credential environment variable name `{0}` is invalid")]
-    InvalidCredentialEnvironment(String),
-    #[error("AI credential environment variable `{0}` is missing or blank")]
-    MissingCredential(String),
+    #[error("AI credential environment variable name is invalid")]
+    InvalidCredentialEnvironment,
+    #[error("AI credential environment variable is missing or blank")]
+    MissingCredential,
     #[error("could not construct the AI HTTP client")]
     ClientConstruction,
 }
@@ -68,8 +68,8 @@ pub enum ConfigurationError {
 impl AiConfiguration {
     /// Parse a complete configuration file without accepting unknown fields.
     pub fn parse(contents: &str) -> Result<Self, ConfigurationError> {
-        let value: serde_json::Value = serde_json::from_str(contents)
-            .map_err(|error| ConfigurationError::Parse(error.to_string()))?;
+        let value: serde_json::Value =
+            serde_json::from_str(contents).map_err(|_| ConfigurationError::Parse)?;
 
         if let Some(provider) = value
             .get("ai")
@@ -77,12 +77,10 @@ impl AiConfiguration {
             .and_then(serde_json::Value::as_str)
             && provider != "openai-compatible"
         {
-            return Err(ConfigurationError::UnsupportedProvider(
-                provider.to_string(),
-            ));
+            return Err(ConfigurationError::UnsupportedProvider);
         }
 
-        serde_json::from_value(value).map_err(|error| ConfigurationError::Parse(error.to_string()))
+        serde_json::from_value(value).map_err(|_| ConfigurationError::Parse)
     }
 
     /// Resolve machine-local credentials and construct the shared provider client.
@@ -133,11 +131,11 @@ impl OpenAiCompatibleSettings {
         let credential = match self.credential_env {
             Some(name) => {
                 if !valid_environment_name(&name) {
-                    return Err(ConfigurationError::InvalidCredentialEnvironment(name));
+                    return Err(ConfigurationError::InvalidCredentialEnvironment);
                 }
                 let value = environment(&name)
                     .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| ConfigurationError::MissingCredential(name.clone()))?;
+                    .ok_or(ConfigurationError::MissingCredential)?;
                 Some(Credential::new(value))
             }
             None => None,
@@ -183,9 +181,12 @@ impl fmt::Debug for OpenAiCompatibleSettings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OpenAiCompatibleSettings")
-            .field("base_url", &self.base_url)
-            .field("model", &self.model)
-            .field("credential_env", &self.credential_env)
+            .field("base_url", &"[CONFIGURED]")
+            .field("model", &"[CONFIGURED]")
+            .field(
+                "credential_env",
+                &self.credential_env.as_ref().map(|_| "[CONFIGURED]"),
+            )
             .field("timeout_seconds", &self.timeout_seconds)
             .field("allow_insecure_http", &self.allow_insecure_http)
             .finish()
@@ -230,10 +231,10 @@ mod tests {
     #[test]
     fn rejects_unknown_and_embedded_secret_fields() {
         let unknown = AiConfiguration::parse(&config(r#", "modle": "typo""#)).unwrap_err();
-        assert!(unknown.to_string().contains("unknown field"));
+        assert!(matches!(unknown, ConfigurationError::Parse));
 
         let embedded = AiConfiguration::parse(&config(r#", "api_key": "secret""#)).unwrap_err();
-        assert!(embedded.to_string().contains("unknown field"));
+        assert!(matches!(embedded, ConfigurationError::Parse));
         assert!(!format!("{embedded:?}").contains("secret"));
     }
 
@@ -241,10 +242,7 @@ mod tests {
     fn rejects_unsupported_provider() {
         let input = config("").replace("openai-compatible", "other-provider");
         let error = AiConfiguration::parse(&input).unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigurationError::UnsupportedProvider(provider) if provider == "other-provider"
-        ));
+        assert!(matches!(error, ConfigurationError::UnsupportedProvider));
     }
 
     #[test]
@@ -288,10 +286,7 @@ mod tests {
                 .unwrap()
                 .build_client_with_env(|_| None)
                 .unwrap_err();
-        assert!(matches!(
-            missing,
-            ConfigurationError::MissingCredential(name) if name == "CADMARK_MISSING_KEY"
-        ));
+        assert!(matches!(missing, ConfigurationError::MissingCredential));
     }
 
     #[test]
@@ -304,7 +299,7 @@ mod tests {
                     .unwrap_err();
             assert!(matches!(
                 error,
-                ConfigurationError::InvalidCredentialEnvironment(_)
+                ConfigurationError::InvalidCredentialEnvironment
             ));
         }
     }
@@ -324,5 +319,32 @@ mod tests {
         assert!(matches!(error, ConfigurationError::InvalidBaseUrl));
         assert!(!error.to_string().contains(secret));
         assert!(!format!("{error:?}").contains(secret));
+    }
+
+    #[test]
+    fn wrong_type_value_is_absent_from_every_parse_error_surface() {
+        let secret = "DISTINCTIVE_WRONG_TYPE_FAKE_CREDENTIAL_7f46c92a";
+        let input = config(&format!(r#", "timeout_seconds": "{secret}""#));
+        let error = AiConfiguration::parse(&input).unwrap_err();
+
+        assert!(matches!(error, ConfigurationError::Parse));
+        for surfaced in [error.to_string(), format!("{error:?}")] {
+            assert!(!surfaced.contains(secret));
+        }
+    }
+
+    #[test]
+    fn configuration_debug_does_not_repeat_configured_string_values() {
+        let secret = "DISTINCTIVE_CONFIG_VALUE_FAKE_CREDENTIAL_c86351db";
+        let input = config(&format!(r#", "credential_env": "{secret}""#))
+            .replace("test-model", secret)
+            .replace(
+                "https://provider.example/v1",
+                &format!("https://example.test/{secret}"),
+            );
+        let configuration = AiConfiguration::parse(&input).unwrap();
+        let debug = format!("{configuration:?}");
+
+        assert!(!debug.contains(secret));
     }
 }
