@@ -49,8 +49,8 @@ pub enum ConfigurationError {
     Parse(String),
     #[error("unsupported AI provider `{0}`")]
     UnsupportedProvider(String),
-    #[error("AI base URL `{0}` is invalid")]
-    InvalidBaseUrl(String),
+    #[error("AI base URL is invalid")]
+    InvalidBaseUrl,
     #[error("AI base URL must use HTTPS unless `allow_insecure_http` is true")]
     InsecureHttp,
     #[error("AI model must not be blank")]
@@ -112,8 +112,8 @@ impl OpenAiCompatibleSettings {
             return Err(ConfigurationError::InvalidTimeout);
         }
 
-        let mut base_url = Url::parse(self.base_url.trim())
-            .map_err(|_| ConfigurationError::InvalidBaseUrl(self.base_url.clone()))?;
+        let mut base_url =
+            Url::parse(self.base_url.trim()).map_err(|_| ConfigurationError::InvalidBaseUrl)?;
         if !matches!(base_url.scheme(), "http" | "https")
             || !base_url.username().is_empty()
             || base_url.password().is_some()
@@ -121,7 +121,7 @@ impl OpenAiCompatibleSettings {
             || base_url.fragment().is_some()
             || base_url.host_str().is_none()
         {
-            return Err(ConfigurationError::InvalidBaseUrl(self.base_url));
+            return Err(ConfigurationError::InvalidBaseUrl);
         }
         if base_url.scheme() == "http" && !self.allow_insecure_http {
             return Err(ConfigurationError::InsecureHttp);
@@ -264,7 +264,7 @@ mod tests {
             AiConfiguration::parse(&invalid_url)
                 .unwrap()
                 .build_client_with_env(|_| None),
-            Err(ConfigurationError::InvalidBaseUrl(_))
+            Err(ConfigurationError::InvalidBaseUrl)
         ));
 
         let blank_model = config("").replace("test-model", "   ");
@@ -307,5 +307,22 @@ mod tests {
                 ConfigurationError::InvalidCredentialEnvironment(_)
             ));
         }
+    }
+
+    #[test]
+    fn invalid_url_error_does_not_repeat_embedded_userinfo() {
+        let secret = "url-secret-that-must-not-appear";
+        let input = config("").replace(
+            "https://provider.example/v1",
+            &format!("https://user:{secret}@provider.example/v1"),
+        );
+        let error = AiConfiguration::parse(&input)
+            .unwrap()
+            .build_client_with_env(|_| None)
+            .unwrap_err();
+
+        assert!(matches!(error, ConfigurationError::InvalidBaseUrl));
+        assert!(!error.to_string().contains(secret));
+        assert!(!format!("{error:?}").contains(secret));
     }
 }
