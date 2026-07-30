@@ -25,9 +25,13 @@ struct ViewportResources {
     pipelines: cadmark_renderer::pipeline::RenderPipelines,
     picking: cadmark_renderer::picking::PickingPass,
     mesh: Option<cadmark_renderer::mesh::GpuMesh>,
-    /// A pick readback was issued last frame and the staging buffer
-    /// is ready to map.
-    readback_pending: bool,
+    /// Pick attempt submitted through the independent readback encoder. Its
+    /// marker proves whether those commands completed before bytes are trusted.
+    pick_attempt: Option<PickAttempt>,
+    submission_marker_source: wgpu::Buffer,
+    submission_marker_staging: wgpu::Buffer,
+    next_submission_token: u32,
+    retry_pick: Option<(u32, u32)>,
     /// Decoded pick result from the most recent readback, waiting
     /// for `update()` to consume it.
     pick_result: Option<CompletedPick>,
@@ -40,6 +44,26 @@ enum CompletedPick {
     Hit(cadmark_core::geometry::TopologyElement),
     Background,
     ReadbackFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PickAttempt {
+    pixel: (u32, u32),
+    submission_token: u32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PickSubmissionDecision {
+    ReadPick,
+    Retry((u32, u32)),
+}
+
+fn pick_submission_decision(attempt: PickAttempt, marker_bytes: [u8; 4]) -> PickSubmissionDecision {
+    if u32::from_le_bytes(marker_bytes) == attempt.submission_token {
+        PickSubmissionDecision::ReadPick
+    } else {
+        PickSubmissionDecision::Retry(attempt.pixel)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -97,26 +121,57 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             return Vec::new();
         };
 
-        // ── Read back previous frame's pick result ──
-        if res.readback_pending {
-            res.readback_pending = false;
-            let slice = res.picking.staging_buffer.slice(..256);
+        // Confirm that the independent picking encoder completed before
+        // trusting readback bytes. A stale marker retries the exact pixel.
+        if let Some(attempt) = res.pick_attempt.take() {
+            let slice = res.submission_marker_staging.slice(..4);
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            slice.map_async(wgpu::MapMode::Read, move |v| {
-                let _ = tx.send(v);
+            slice.map_async(wgpu::MapMode::Read, move |status| {
+                let _ = tx.send(status);
             });
             device.poll(wgpu::Maintain::Wait);
             match rx.recv() {
                 Ok(Ok(())) => {
                     let data = slice.get_mapped_range();
-                    res.pick_result = Some(
-                        match cadmark_renderer::viewport::decode_pick_result(&data) {
-                            Some(element) => CompletedPick::Hit(element),
-                            None => CompletedPick::Background,
-                        },
-                    );
+                    let marker_bytes = [data[0], data[1], data[2], data[3]];
                     drop(data);
-                    res.picking.staging_buffer.unmap();
+                    res.submission_marker_staging.unmap();
+
+                    match pick_submission_decision(attempt, marker_bytes) {
+                        PickSubmissionDecision::ReadPick => {
+                            let slice = res.picking.staging_buffer.slice(..256);
+                            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                            slice.map_async(wgpu::MapMode::Read, move |status| {
+                                let _ = tx.send(status);
+                            });
+                            device.poll(wgpu::Maintain::Wait);
+                            match rx.recv() {
+                                Ok(Ok(())) => {
+                                    let data = slice.get_mapped_range();
+                                    res.pick_result = Some(
+                                        match cadmark_renderer::viewport::decode_pick_result(&data)
+                                        {
+                                            Some(element) => CompletedPick::Hit(element),
+                                            None => CompletedPick::Background,
+                                        },
+                                    );
+                                    drop(data);
+                                    res.picking.staging_buffer.unmap();
+                                }
+                                _ => {
+                                    res.pick_result = Some(CompletedPick::ReadbackFailed);
+                                }
+                            }
+                        }
+                        PickSubmissionDecision::Retry(pixel) => {
+                            log::debug!(
+                                "Pick submission was dropped; retrying at ({}, {})",
+                                pixel.0,
+                                pixel.1
+                            );
+                            res.retry_pick = Some(pixel);
+                        }
+                    }
                 }
                 _ => {
                     res.pick_result = Some(CompletedPick::ReadbackFailed);
@@ -149,64 +204,102 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             bytemuck::bytes_of(&self.simple_uniforms),
         );
 
-        // ── Offscreen picking pass + optional readback ──
+        // ── Offscreen rendering + optional pick readback ──
         if let Some(mesh) = &res.mesh {
-            // Render colour-ID picking pass to offscreen texture.
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("picking_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &res.picking.texture_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &res.pipelines.depth_texture,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
-
-                pass.set_pipeline(&res.pipelines.picking_pipeline);
-                pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+            if self.pick_request.is_some() {
+                res.retry_pick = None;
             }
+            if let Some((x, y)) = self.pick_request.or_else(|| res.retry_pick.take()) {
+                // Submit picking independently. eframe acquires the surface
+                // after prepare(); an Outdated surface returns early and drops
+                // its shared encoder, but must not drop user selection work.
+                let mut pick_encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("pick_readback_encoder"),
+                    });
 
-            if mesh.edge_vertex_count > 0 {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("edge_picking_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &res.picking.texture_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &res.pipelines.depth_texture,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
+                {
+                    let mut pass = pick_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("picking_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &res.picking.texture_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &res.pipelines.depth_texture,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
                         }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
+                        ..Default::default()
+                    });
 
-                pass.set_pipeline(&res.pipelines.edge_picking_pipeline);
-                pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
-                pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
-                pass.draw(0..mesh.edge_vertex_count, 0..1);
+                    pass.set_pipeline(&res.pipelines.picking_pipeline);
+                    pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+
+                if mesh.edge_vertex_count > 0 {
+                    let mut pass = pick_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("edge_picking_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &res.picking.texture_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &res.pipelines.depth_texture,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        ..Default::default()
+                    });
+
+                    pass.set_pipeline(&res.pipelines.edge_picking_pipeline);
+                    pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
+                    pass.draw(0..mesh.edge_vertex_count, 0..1);
+                }
+
+                let submission_token = res.next_submission_token;
+                res.next_submission_token = res.next_submission_token.wrapping_add(1).max(1);
+                queue.write_buffer(
+                    &res.submission_marker_source,
+                    0,
+                    &submission_token.to_le_bytes(),
+                );
+                cadmark_renderer::viewport::request_pick_readback(
+                    &mut pick_encoder,
+                    &res.picking,
+                    x,
+                    y,
+                );
+                pick_encoder.copy_buffer_to_buffer(
+                    &res.submission_marker_source,
+                    0,
+                    &res.submission_marker_staging,
+                    0,
+                    4,
+                );
+                queue.submit(std::iter::once(pick_encoder.finish()));
+                res.pick_attempt = Some(PickAttempt {
+                    pixel: (x, y),
+                    submission_token,
+                });
             }
 
             // ── Offscreen main viewport pass (with depth) ──
@@ -254,13 +347,6 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
                     pass.draw(0..mesh.edge_vertex_count, 0..1);
                 }
-            }
-
-            // Copy a single pixel from the picking texture to the
-            // staging buffer so we can map it next frame.
-            if let Some((x, y)) = self.pick_request {
-                cadmark_renderer::viewport::request_pick_readback(encoder, &res.picking, x, y);
-                res.readback_pending = true;
             }
         }
 
@@ -414,12 +500,28 @@ impl CadmarkApp {
             let pipelines =
                 cadmark_renderer::pipeline::RenderPipelines::new(&rs.device, format, w, h);
             let picking = cadmark_renderer::picking::PickingPass::new(&rs.device, w, h);
+            let submission_marker_source = rs.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pick_submission_marker_source"),
+                size: 4,
+                usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let submission_marker_staging = rs.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pick_submission_marker_staging"),
+                size: 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
 
             let resources = ViewportResources {
                 pipelines,
                 picking,
                 mesh: None,
-                readback_pending: false,
+                pick_attempt: None,
+                submission_marker_source,
+                submission_marker_staging,
+                next_submission_token: 1,
+                retry_pick: None,
                 pick_result: None,
                 viewport_size: (w, h),
             };
@@ -637,7 +739,8 @@ impl CadmarkApp {
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
                 res.mesh = None;
                 res.pick_result = None;
-                res.readback_pending = false;
+                res.pick_attempt = None;
+                res.retry_pick = None;
             }
         }
     }
@@ -818,7 +921,34 @@ impl CadmarkApp {
 mod pick_state_tests {
     use cadmark_core::geometry::{FaceId, TopologyElement};
 
-    use super::{CompletedPick, PickTransition, completed_pick_transition};
+    use super::{
+        CompletedPick, PickAttempt, PickSubmissionDecision, PickTransition,
+        completed_pick_transition, pick_submission_decision,
+    };
+
+    #[test]
+    fn submitted_pick_marker_permits_readback() {
+        let attempt = PickAttempt {
+            pixel: (438, 466),
+            submission_token: 42,
+        };
+        assert_eq!(
+            pick_submission_decision(attempt, 42_u32.to_le_bytes()),
+            PickSubmissionDecision::ReadPick
+        );
+    }
+
+    #[test]
+    fn stale_pick_marker_retries_the_exact_pixel() {
+        let attempt = PickAttempt {
+            pixel: (438, 466),
+            submission_token: 42,
+        };
+        assert_eq!(
+            pick_submission_decision(attempt, 41_u32.to_le_bytes()),
+            PickSubmissionDecision::Retry((438, 466))
+        );
+    }
 
     #[test]
     fn incomplete_readback_retains_the_pick_anchor() {
