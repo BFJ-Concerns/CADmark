@@ -285,7 +285,14 @@ class _CadmarkSession:
                             for changed in self.history_results(
                                 builder, method, input_shape
                             ):
-                                if self.contains(changed, output, kind):
+                                if output.IsSame(changed):
+                                    direct.append(
+                                        {
+                                            "operation_id": operation_id,
+                                            "relation": relation,
+                                        }
+                                    )
+                                elif self.contains(changed, output, kind):
                                     descendants.append(
                                         {
                                             "operation_id": operation_id,

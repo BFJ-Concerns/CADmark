@@ -491,13 +491,25 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             context.provenance.operation == SemanticOperation::Fillet
+                && matches!(context.element, TopologyElement::Face(_))
+                && context.provenance.relation == ProvenanceRelation::Generated
+        }));
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Fillet
+                && context.provenance.relation == ProvenanceRelation::Modified
+        }));
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Fillet
+                && matches!(context.element, TopologyElement::Edge(_))
                 && matches!(
                     context.provenance.relation,
-                    ProvenanceRelation::Generated | ProvenanceRelation::Modified
+                    ProvenanceRelation::GeneratedDescendant
+                        | ProvenanceRelation::ModifiedDescendant
                 )
         }));
         assert!(contexts.iter().any(|context| {
             context.provenance.operation == SemanticOperation::Fillet
+                && matches!(context.element, TopologyElement::Vertex(_))
                 && matches!(
                     context.provenance.relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -523,13 +535,25 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             context.provenance.operation == SemanticOperation::Chamfer
+                && matches!(context.element, TopologyElement::Face(_))
+                && context.provenance.relation == ProvenanceRelation::Generated
+        }));
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Chamfer
+                && context.provenance.relation == ProvenanceRelation::Modified
+        }));
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Chamfer
+                && matches!(context.element, TopologyElement::Edge(_))
                 && matches!(
                     context.provenance.relation,
-                    ProvenanceRelation::Generated | ProvenanceRelation::Modified
+                    ProvenanceRelation::GeneratedDescendant
+                        | ProvenanceRelation::ModifiedDescendant
                 )
         }));
         assert!(contexts.iter().any(|context| {
             context.provenance.operation == SemanticOperation::Chamfer
+                && matches!(context.element, TopologyElement::Vertex(_))
                 && matches!(
                     context.provenance.relation,
                     ProvenanceRelation::GeneratedDescendant
