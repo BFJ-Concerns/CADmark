@@ -15,6 +15,12 @@ pub enum TessellationError {
     UnsupportedScriptOutput(String),
     #[error("Tessellation produced no triangles")]
     EmptyMesh,
+    #[error("{kind} topology ID {index} is outside final-map bound {bound}")]
+    InvalidTopologyId {
+        kind: &'static str,
+        index: u32,
+        bound: usize,
+    },
 }
 
 /// A vertex in the tessellated mesh.
@@ -29,8 +35,8 @@ pub struct MeshVertex {
 pub struct MeshEdge {
     /// Polyline vertices approximating the edge curve.
     pub points: Vec<[f32; 3]>,
-    /// The edge's provenance shape hash for picking correlation.
-    pub shape_hash: u64,
+    /// Global zero-based final-topology edge identifier.
+    pub edge_id: u32,
 }
 
 /// The complete tessellated output from a build123d script.
@@ -43,8 +49,6 @@ pub struct TessellatedMesh {
     /// Per-triangle face identifier for GPU picking.
     /// Index i corresponds to triangle i (indices[i*3..i*3+3]).
     pub face_ids: Vec<u32>,
-    /// Shape hashes per face for provenance correlation.
-    pub face_shape_hashes: Vec<u64>,
     /// Edges for wireframe overlay.
     pub edges: Vec<MeshEdge>,
 }
@@ -59,6 +63,7 @@ from OCP.BRep import BRep_Tool
 from OCP.TopLoc import TopLoc_Location
 from OCP.GCPnts import GCPnts_TangentialDeflection
 from OCP.BRepAdaptor import BRepAdaptor_Curve
+from OCP.TopoDS import TopoDS
 import math
 
 def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
@@ -70,15 +75,14 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
     all_normals = []
     all_indices = []
     all_face_ids = []
-    face_shape_hashes = []
     edges = []
 
     vertex_offset = 0
-    face_id = 0
 
     explorer = TopExp_Explorer(shape, TopAbs_FACE)
     while explorer.More():
-        face = explorer.Current()
+        face = TopoDS.Face_s(explorer.Current())
+        face_id = _cadmark_session.topology_index(face, 'face')
         location = TopLoc_Location()
         triangulation = BRep_Tool.Triangulation_s(face, location)
 
@@ -108,15 +112,13 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
                 ])
                 all_face_ids.append(face_id)
 
-            face_shape_hashes.append(face.HashCode(2**31 - 1))
             vertex_offset += nb_nodes
-            face_id += 1
 
         explorer.Next()
 
     edge_explorer = TopExp_Explorer(shape, TopAbs_EDGE)
     while edge_explorer.More():
-        edge = edge_explorer.Current()
+        edge = TopoDS.Edge_s(edge_explorer.Current())
         try:
             adaptor = BRepAdaptor_Curve(edge)
             deflector = GCPnts_TangentialDeflection(adaptor, angular_deflection, linear_deflection)
@@ -127,7 +129,7 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
             if points:
                 edges.append({
                     'points': points,
-                    'shape_hash': edge.HashCode(2**31 - 1),
+                    'edge_id': _cadmark_session.topology_index(edge, 'edge'),
                 })
         except Exception:
             # Some edges (seam edges, degenerate edges from boolean ops)
@@ -141,7 +143,6 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
         'normals': all_normals,
         'indices': all_indices,
         'face_ids': all_face_ids,
-        'face_shape_hashes': face_shape_hashes,
         'edges': edges,
     }
 ";
@@ -195,7 +196,7 @@ pub fn tessellate_from_namespace(
     parse_tessellation_result(py, &result)
 }
 
-fn find_result_shape<'py>(
+pub(crate) fn find_result_shape<'py>(
     namespace: &Bound<'py, PyDict>,
 ) -> Result<Bound<'py, PyAny>, TessellationError> {
     let mut namespace_debug = Vec::new();
@@ -287,6 +288,7 @@ fn is_internal_namespace_name(name: &str) -> bool {
             | "TopLoc_Location"
             | "GCPnts_TangentialDeflection"
             | "BRepAdaptor_Curve"
+            | "TopoDS"
             | "math"
     ) || name.starts_with("_cadmark")
         || name.starts_with("__")
@@ -319,7 +321,6 @@ fn parse_tessellation_result(
     let normals_raw: Vec<Vec<f32>> = result.get_item("normals")?.extract()?;
     let indices: Vec<u32> = result.get_item("indices")?.extract()?;
     let face_ids: Vec<u32> = result.get_item("face_ids")?.extract()?;
-    let face_shape_hashes: Vec<u64> = result.get_item("face_shape_hashes")?.extract()?;
 
     if indices.is_empty() {
         return Err(TessellationError::EmptyMesh);
@@ -339,10 +340,10 @@ fn parse_tessellation_result(
     let mut edges = Vec::with_capacity(edges_raw.len());
     for edge_dict in &edges_raw {
         let points: Vec<Vec<f32>> = edge_dict.get_item("points")?.extract()?;
-        let shape_hash: u64 = edge_dict.get_item("shape_hash")?.extract()?;
+        let edge_id: u32 = edge_dict.get_item("edge_id")?.extract()?;
         edges.push(MeshEdge {
             points: points.iter().map(|p| [p[0], p[1], p[2]]).collect(),
-            shape_hash,
+            edge_id,
         });
     }
 
@@ -350,7 +351,6 @@ fn parse_tessellation_result(
         vertices,
         indices,
         face_ids,
-        face_shape_hashes,
         edges,
     })
 }

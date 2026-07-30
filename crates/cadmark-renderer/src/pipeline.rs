@@ -700,23 +700,7 @@ pub fn upload_mesh(
     });
 
     // Build edge vertices as line segments.
-    let mut edge_vertices = Vec::new();
-    for (edge_idx, edge) in mesh.edges.iter().enumerate() {
-        let edge_id =
-            crate::picking::encode_picking_id(&cadmark_core::geometry::TopologyElement::Edge(
-                cadmark_core::geometry::EdgeId(edge_idx as u32),
-            )) as f32;
-        for window in edge.points.windows(2) {
-            edge_vertices.push(EdgeVertex {
-                position: window[0],
-                edge_id,
-            });
-            edge_vertices.push(EdgeVertex {
-                position: window[1],
-                edge_id,
-            });
-        }
-    }
+    let edge_vertices = edge_vertices(mesh);
 
     let edge_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("edge_vertex_buffer"),
@@ -733,6 +717,27 @@ pub fn upload_mesh(
     }
 }
 
+fn edge_vertices(mesh: &cadmark_kernel::tessellation::TessellatedMesh) -> Vec<EdgeVertex> {
+    let mut edge_vertices = Vec::new();
+    for edge in &mesh.edges {
+        let edge_id =
+            crate::picking::encode_picking_id(&cadmark_core::geometry::TopologyElement::Edge(
+                cadmark_core::geometry::EdgeId(edge.edge_id),
+            )) as f32;
+        for window in edge.points.windows(2) {
+            edge_vertices.push(EdgeVertex {
+                position: window[0],
+                edge_id,
+            });
+            edge_vertices.push(EdgeVertex {
+                position: window[1],
+                edge_id,
+            });
+        }
+    }
+    edge_vertices
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,34 +748,17 @@ mod tests {
             vertices: Vec::new(),
             indices: Vec::new(),
             face_ids: Vec::new(),
-            face_shape_hashes: Vec::new(),
             edges: vec![cadmark_kernel::tessellation::MeshEdge {
                 points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
-                shape_hash: 1,
+                edge_id: 7,
             }],
         };
 
         let encoded = crate::picking::encode_picking_id(
-            &cadmark_core::geometry::TopologyElement::Edge(cadmark_core::geometry::EdgeId(0)),
+            &cadmark_core::geometry::TopologyElement::Edge(cadmark_core::geometry::EdgeId(7)),
         ) as f32;
 
-        let mut edge_vertices = Vec::new();
-        for (edge_idx, edge) in mesh.edges.iter().enumerate() {
-            let edge_id =
-                crate::picking::encode_picking_id(&cadmark_core::geometry::TopologyElement::Edge(
-                    cadmark_core::geometry::EdgeId(edge_idx as u32),
-                )) as f32;
-            for window in edge.points.windows(2) {
-                edge_vertices.push(EdgeVertex {
-                    position: window[0],
-                    edge_id,
-                });
-                edge_vertices.push(EdgeVertex {
-                    position: window[1],
-                    edge_id,
-                });
-            }
-        }
+        let edge_vertices = edge_vertices(&mesh);
 
         assert_eq!(edge_vertices.len(), 2);
         assert_eq!(edge_vertices[0].edge_id, encoded);

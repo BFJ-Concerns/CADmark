@@ -19,19 +19,51 @@ pub struct SourceRef {
 }
 
 /// Records how a topological element relates to its generating operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ProvenanceKind {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ProvenanceRelation {
     /// Directly created by the operation.
     Generated,
     /// Existed before and was modified by the operation.
     Modified,
+    /// Contained by topology directly reported as generated.
+    GeneratedDescendant,
+    /// Contained by topology directly reported as modified.
+    ModifiedDescendant,
+}
+
+/// The user-authored operation responsible for topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SemanticOperation {
+    Box,
+    Cylinder,
+    BooleanFuse,
+    BooleanCut,
+    BooleanCommon,
+    Fillet,
+    Chamfer,
 }
 
 /// A single provenance record linking an element to its generating code.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceEntry {
     pub source: SourceRef,
-    pub kind: ProvenanceKind,
+    pub operation: SemanticOperation,
+    pub operation_id: u64,
+    pub relation: ProvenanceRelation,
+}
+
+/// The provenance state for one final topology element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerValue {
+    Resolved(ProvenanceEntry),
+    Ambiguous(Vec<ProvenanceEntry>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("provenance already recorded for {kind} {index}")]
+pub struct DuplicateTopologyId {
+    pub kind: &'static str,
+    pub index: u32,
 }
 
 /// The provenance ledger — rebuilt each time the script executes.
@@ -42,9 +74,9 @@ pub struct ProvenanceEntry {
 /// Fillet), the most recent operation is stored.
 #[derive(Debug, Default)]
 pub struct ProvenanceLedger {
-    faces: HashMap<FaceId, ProvenanceEntry>,
-    edges: HashMap<EdgeId, ProvenanceEntry>,
-    vertices: HashMap<VertexId, ProvenanceEntry>,
+    faces: HashMap<FaceId, LedgerValue>,
+    edges: HashMap<EdgeId, LedgerValue>,
+    vertices: HashMap<VertexId, LedgerValue>,
 }
 
 impl ProvenanceLedger {
@@ -61,32 +93,68 @@ impl ProvenanceLedger {
 
     // -- Face provenance --
 
-    pub fn record_face(&mut self, id: FaceId, entry: ProvenanceEntry) {
-        self.faces.insert(id, entry);
+    pub fn record_face(
+        &mut self,
+        id: FaceId,
+        value: LedgerValue,
+    ) -> Result<(), DuplicateTopologyId> {
+        record(&mut self.faces, id, value, "face", id.0)
     }
 
-    pub fn lookup_face(&self, id: FaceId) -> Option<&ProvenanceEntry> {
+    pub fn lookup_face(&self, id: FaceId) -> Option<&LedgerValue> {
         self.faces.get(&id)
     }
 
     // -- Edge provenance --
 
-    pub fn record_edge(&mut self, id: EdgeId, entry: ProvenanceEntry) {
-        self.edges.insert(id, entry);
+    pub fn record_edge(
+        &mut self,
+        id: EdgeId,
+        value: LedgerValue,
+    ) -> Result<(), DuplicateTopologyId> {
+        record(&mut self.edges, id, value, "edge", id.0)
     }
 
-    pub fn lookup_edge(&self, id: EdgeId) -> Option<&ProvenanceEntry> {
+    pub fn lookup_edge(&self, id: EdgeId) -> Option<&LedgerValue> {
         self.edges.get(&id)
     }
 
     // -- Vertex provenance --
 
-    pub fn record_vertex(&mut self, id: VertexId, entry: ProvenanceEntry) {
-        self.vertices.insert(id, entry);
+    pub fn record_vertex(
+        &mut self,
+        id: VertexId,
+        value: LedgerValue,
+    ) -> Result<(), DuplicateTopologyId> {
+        record(&mut self.vertices, id, value, "vertex", id.0)
     }
 
-    pub fn lookup_vertex(&self, id: VertexId) -> Option<&ProvenanceEntry> {
+    pub fn lookup_vertex(&self, id: VertexId) -> Option<&LedgerValue> {
         self.vertices.get(&id)
+    }
+
+    pub fn face_ids(&self) -> impl Iterator<Item = FaceId> + '_ {
+        self.faces.keys().copied()
+    }
+
+    pub fn edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.edges.keys().copied()
+    }
+
+    pub fn vertex_ids(&self) -> impl Iterator<Item = VertexId> + '_ {
+        self.vertices.keys().copied()
+    }
+
+    pub fn face_count(&self) -> usize {
+        self.faces.len()
+    }
+
+    pub fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    pub fn vertex_count(&self) -> usize {
+        self.vertices.len()
     }
 
     /// Total number of entries across all element types.
@@ -96,6 +164,24 @@ impl ProvenanceLedger {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+fn record<K: std::hash::Hash + Eq>(
+    entries: &mut HashMap<K, LedgerValue>,
+    id: K,
+    value: LedgerValue,
+    kind: &'static str,
+    index: u32,
+) -> Result<(), DuplicateTopologyId> {
+    use std::collections::hash_map::Entry;
+
+    match entries.entry(id) {
+        Entry::Vacant(slot) => {
+            slot.insert(value);
+            Ok(())
+        }
+        Entry::Occupied(_) => Err(DuplicateTopologyId { kind, index }),
     }
 }
 
@@ -116,60 +202,82 @@ mod tests {
         let id = FaceId(0);
         let entry = ProvenanceEntry {
             source: source(5, "box = Box(10, 10, 10)"),
-            kind: ProvenanceKind::Generated,
+            operation: SemanticOperation::Box,
+            operation_id: 1,
+            relation: ProvenanceRelation::Generated,
         };
-        ledger.record_face(id, entry.clone());
+        ledger
+            .record_face(id, LedgerValue::Resolved(entry.clone()))
+            .unwrap();
 
-        let found = ledger.lookup_face(id).unwrap();
+        let LedgerValue::Resolved(found) = ledger.lookup_face(id).unwrap() else {
+            panic!("expected resolved provenance");
+        };
         assert_eq!(found.source.line, 5);
-        assert_eq!(found.kind, ProvenanceKind::Generated);
+        assert_eq!(found.relation, ProvenanceRelation::Generated);
     }
 
     #[test]
-    fn modification_overwrites_generation() {
+    fn duplicate_topology_id_is_rejected() {
         let mut ledger = ProvenanceLedger::new();
         let id = FaceId(3);
 
         // Initially generated by Box.
-        ledger.record_face(
-            id,
-            ProvenanceEntry {
-                source: source(2, "box = Box(10, 10, 10)"),
-                kind: ProvenanceKind::Generated,
-            },
-        );
+        ledger
+            .record_face(
+                id,
+                LedgerValue::Resolved(ProvenanceEntry {
+                    source: source(2, "box = Box(10, 10, 10)"),
+                    operation: SemanticOperation::Box,
+                    operation_id: 1,
+                    relation: ProvenanceRelation::Generated,
+                }),
+            )
+            .unwrap();
 
-        // Then modified by Fillet — overwrites.
-        ledger.record_face(
+        let error = ledger.record_face(
             id,
-            ProvenanceEntry {
+            LedgerValue::Resolved(ProvenanceEntry {
                 source: source(3, "fillet = Fillet(box, 1.0)"),
-                kind: ProvenanceKind::Modified,
-            },
+                operation: SemanticOperation::Fillet,
+                operation_id: 2,
+                relation: ProvenanceRelation::Modified,
+            }),
         );
-
-        let found = ledger.lookup_face(id).unwrap();
-        assert_eq!(found.source.line, 3);
-        assert_eq!(found.kind, ProvenanceKind::Modified);
+        assert_eq!(
+            error,
+            Err(DuplicateTopologyId {
+                kind: "face",
+                index: 3
+            })
+        );
     }
 
     #[test]
     fn clear_empties_all() {
         let mut ledger = ProvenanceLedger::new();
-        ledger.record_face(
-            FaceId(0),
-            ProvenanceEntry {
-                source: source(1, "x"),
-                kind: ProvenanceKind::Generated,
-            },
-        );
-        ledger.record_edge(
-            EdgeId(0),
-            ProvenanceEntry {
-                source: source(1, "x"),
-                kind: ProvenanceKind::Generated,
-            },
-        );
+        ledger
+            .record_face(
+                FaceId(0),
+                LedgerValue::Resolved(ProvenanceEntry {
+                    source: source(1, "x"),
+                    operation: SemanticOperation::Box,
+                    operation_id: 1,
+                    relation: ProvenanceRelation::Generated,
+                }),
+            )
+            .unwrap();
+        ledger
+            .record_edge(
+                EdgeId(0),
+                LedgerValue::Resolved(ProvenanceEntry {
+                    source: source(1, "x"),
+                    operation: SemanticOperation::Box,
+                    operation_id: 1,
+                    relation: ProvenanceRelation::Generated,
+                }),
+            )
+            .unwrap();
         assert_eq!(ledger.len(), 2);
 
         ledger.clear();

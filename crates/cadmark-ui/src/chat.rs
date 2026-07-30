@@ -69,15 +69,18 @@ impl ChatPane {
                                             ),
                                         ),
                                     );
-                                    if let Some(line) = context.source_line {
-                                        ui.label(
-                                            egui::RichText::new(format!("line {line}"))
-                                                .small()
-                                                .color(egui::Color32::from_rgba_premultiplied(
-                                                    150, 150, 150, alpha,
-                                                )),
-                                        );
-                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "line {}",
+                                            context.provenance.source.line
+                                        ))
+                                        .small()
+                                        .color(
+                                            egui::Color32::from_rgba_premultiplied(
+                                                150, 150, 150, alpha,
+                                            ),
+                                        ),
+                                    );
                                     if *applied {
                                         ui.label(
                                             egui::RichText::new("Applied")

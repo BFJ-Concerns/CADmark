@@ -68,6 +68,7 @@ impl AiRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
 
     #[test]
     fn from_chat_sets_fields_correctly() {
@@ -85,14 +86,21 @@ mod tests {
             element: cadmark_core::geometry::TopologyElement::Face(cadmark_core::geometry::FaceId(
                 1,
             )),
-            source_line: Some(10),
-            source_code: Some("box = Box(5,5,5)".to_string()),
+            provenance: ProvenanceEntry {
+                source: SourceRef {
+                    line: 10,
+                    code: "box = Box(5,5,5)".to_string(),
+                },
+                operation: SemanticOperation::Box,
+                operation_id: 1,
+                relation: ProvenanceRelation::Generated,
+            },
             identification: std::collections::HashMap::new(),
         };
         let req =
             AiRequest::from_spatial_comment("code".to_string(), "round this".to_string(), ctx);
         assert!(req.geometry_context.is_some());
-        assert_eq!(req.geometry_context.unwrap().source_line, Some(10));
+        assert_eq!(req.geometry_context.unwrap().provenance.source.line, 10);
     }
 
     #[test]

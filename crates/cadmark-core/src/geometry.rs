@@ -3,8 +3,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ledger::ProvenanceEntry;
+
 /// A topological element the user can select in the viewport.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TopologyElement {
     Face(FaceId),
     Edge(EdgeId),
@@ -48,10 +50,8 @@ pub enum SelectionState {
 pub struct GeometryContext {
     /// The selected element type and ID.
     pub element: TopologyElement,
-    /// Source code location that generated this element (from provenance).
-    pub source_line: Option<u32>,
-    /// The generating code snippet.
-    pub source_code: Option<String>,
+    /// Required, resolved construction-time provenance.
+    pub provenance: ProvenanceEntry,
     /// Experimental identification data — strategies can attach arbitrary
     /// key-value pairs here without changing the outer format.
     #[serde(default)]
