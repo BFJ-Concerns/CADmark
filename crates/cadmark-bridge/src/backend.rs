@@ -30,17 +30,11 @@ pub struct AiResponse {
     pub message: String,
 }
 
-/// Abstract AI backend interface.
-///
-/// Era 0: implemented by Claude Code subprocess.
-/// Era 0.1: direct API implementations for Claude, GPT, etc.
+/// Abstract model-edit backend interface.
 pub trait AiBackend: Send + Sync {
     /// Send a request to the AI and get a response.
     fn request(
         &self,
         request: AiRequest,
     ) -> Pin<Box<dyn Future<Output = Result<AiResponse, BackendError>> + Send + '_>>;
-
-    /// Check whether the backend is available and configured.
-    fn is_available(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
 }

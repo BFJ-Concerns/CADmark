@@ -1,19 +1,18 @@
-// Documentation lookup pre-processing agent.
+//! Documentation lookup consumer.
 //
 // Searches the build123d documentation corpus for API references
 // relevant to the user's request. Runs before the design agent so
 // it has exact signatures and usage patterns to work from, countering
 // incorrect syntax from general training knowledge.
 //
-// Uses Haiku via `claude --print --model haiku` for cheap, fast lookup.
-// Failure is non-fatal — the design agent proceeds without extra docs.
+use crate::openai_compatible::OpenAiCompatibleClient;
 
-/// System prompt instructing Haiku to act as a reference librarian.
+/// System prompt for the reference lookup consumer.
 const LOOKUP_PROMPT: &str = include_str!("doc_lookup_prompt.md");
 
 /// Full build123d documentation corpus, baked in at compile time.
-/// Ordered from conceptual overview to detailed API reference so Haiku
-/// encounters the high-level context before the exhaustive signatures.
+/// Ordered from conceptual overview to detailed API reference so the lookup
+/// consumer encounters high-level context before exhaustive signatures.
 const DOC_CORPUS: &str = concat!(
     // Conceptual foundations
     include_str!("../../../docs/build123d/introduction.md"),
@@ -70,61 +69,52 @@ const DOC_CORPUS: &str = concat!(
     include_str!("../../../docs/build123d/tutorials/surface_modeling.md"),
 );
 
-/// Documentation lookup agent — searches build123d docs for API
-/// references relevant to the user's request.
-///
-/// Stateless: the doc corpus and system prompt are compile-time
-/// constants, so no initialisation or shared state is needed.
-pub struct DocLookup;
+/// Documentation lookup consumer sharing the configured provider client.
+pub struct DocLookup {
+    client: OpenAiCompatibleClient,
+}
+
+impl std::fmt::Debug for DocLookup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DocLookup")
+            .field("client", &self.client)
+            .finish()
+    }
+}
 
 impl DocLookup {
+    pub(crate) fn new(client: OpenAiCompatibleClient) -> Self {
+        Self { client }
+    }
+
     /// Search the documentation corpus for content relevant to the
     /// user's request. Returns extracted API references and usage
     /// patterns, or `None` if the lookup fails for any reason.
     ///
     /// Failure is intentionally non-fatal — a warning is logged but
     /// the design agent proceeds without extra documentation context.
-    pub async fn lookup(user_message: &str, message_history: &[String]) -> Option<String> {
+    pub async fn lookup(&self, user_message: &str, message_history: &[String]) -> Option<String> {
         let prompt = Self::build_prompt(user_message, message_history);
-
-        let output = tokio::process::Command::new("claude")
-            .arg("--print")
-            .arg("--model")
-            .arg("haiku")
-            .arg("--output-format")
-            .arg("text")
-            .arg("--system-prompt")
-            .arg(LOOKUP_PROMPT)
-            .arg("--no-session-persistence")
-            .arg("--bare")
-            .arg(&prompt)
-            .output()
-            .await;
-
-        match output {
-            Ok(out) if out.status.success() => {
-                let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if text.is_empty() || text == "No relevant documentation found." {
-                    log::debug!("Doc lookup returned no relevant results");
-                    None
-                } else {
-                    log::debug!("Doc lookup returned {} bytes of API reference", text.len());
-                    Some(text)
-                }
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                log::warn!("Doc lookup agent exited with {}: {stderr}", out.status);
+        match self.client.request_text(LOOKUP_PROMPT, &prompt).await {
+            Ok(text)
+                if text.trim().is_empty() || text.trim() == "No relevant documentation found." =>
+            {
+                log::debug!("Doc lookup returned no relevant results");
                 None
             }
-            Err(e) => {
-                log::warn!("Failed to invoke doc lookup agent: {e}");
+            Ok(text) => {
+                log::debug!("Doc lookup returned {} bytes of API reference", text.len());
+                Some(text)
+            }
+            Err(error) => {
+                log::warn!("Documentation lookup failed: {error}");
                 None
             }
         }
     }
 
-    /// Assemble the prompt sent to Haiku. Contains the conversation
+    /// Assemble the lookup prompt. Contains the conversation
     /// history, the current request, and the full documentation corpus.
     fn build_prompt(user_message: &str, message_history: &[String]) -> String {
         let mut prompt = String::new();

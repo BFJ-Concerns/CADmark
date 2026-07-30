@@ -264,6 +264,8 @@ pub struct CadmarkApp {
     cmd_tx: Option<mpsc::Sender<OrchestratorCommand>>,
     /// Channel to receive results from the orchestrator.
     result_rx: Option<mpsc::Receiver<OrchestratorResult>>,
+    /// Sanitised reason that AI services were not started.
+    ai_unavailable_reason: Option<String>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: cadmark_core::ledger::ProvenanceLedger,
     /// Active identification strategy for geometry context.
@@ -326,12 +328,31 @@ impl CadmarkApp {
             }
         }
 
-        let (cmd_tx, result_rx) = if let Some(ref dir) = project_dir {
-            let (tx, rx) =
-                crate::orchestrator::spawn_orchestrator(dir.clone(), "part.py".to_string());
-            (Some(tx), Some(rx))
+        let (cmd_tx, result_rx, ai_unavailable_reason) = if let Some(ref dir) = project_dir {
+            match crate::config::load_ai_services(dir) {
+                Ok(services) => {
+                    let (tx, rx) = crate::orchestrator::spawn_orchestrator(
+                        dir.clone(),
+                        "part.py".to_string(),
+                        services,
+                    );
+                    (Some(tx), Some(rx), None)
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    log::warn!("{reason}");
+                    conversation.push(cadmark_core::message::Message::ai_response(&format!(
+                        "AI is unavailable: {reason}"
+                    )));
+                    (None, None, Some(reason))
+                }
+            }
         } else {
-            (None, None)
+            (
+                None,
+                None,
+                Some("No project directory is configured.".to_string()),
+            )
         };
 
         // Initialise GPU resources and insert into callback_resources
@@ -380,6 +401,7 @@ impl CadmarkApp {
             ai_busy: false,
             cmd_tx,
             result_rx,
+            ai_unavailable_reason,
             ledger: cadmark_core::ledger::ProvenanceLedger::new(),
             identification_strategy: Box::new(cadmark_core::context::NullIdentification),
             pending_mesh: None,
@@ -407,10 +429,14 @@ impl CadmarkApp {
                     ));
             }
         } else {
+            let reason = self
+                .ai_unavailable_reason
+                .as_deref()
+                .unwrap_or("AI services are unavailable.");
             self.conversation
-                .push(cadmark_core::message::Message::ai_response(
-                    "No project directory set. Pass a directory path as a command-line argument.",
-                ));
+                .push(cadmark_core::message::Message::ai_response(&format!(
+                    "AI is unavailable: {reason}"
+                )));
         }
     }
 
@@ -441,10 +467,14 @@ impl CadmarkApp {
                     ));
             }
         } else {
+            let reason = self
+                .ai_unavailable_reason
+                .as_deref()
+                .unwrap_or("AI services are unavailable.");
             self.conversation
-                .push(cadmark_core::message::Message::ai_response(
-                    "No project directory set. Pass a directory path as a command-line argument.",
-                ));
+                .push(cadmark_core::message::Message::ai_response(&format!(
+                    "AI is unavailable: {reason}"
+                )));
         }
     }
 
