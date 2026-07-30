@@ -7,7 +7,18 @@
 // 3. Output format (stable): packages the result for the AI bridge.
 
 use crate::geometry::{GeometryContext, TopologyElement};
-use crate::ledger::ProvenanceLedger;
+use crate::ledger::{LedgerValue, ProvenanceEntry, ProvenanceLedger};
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProvenanceResolutionError {
+    #[error("no provenance exists for {element:?}")]
+    MissingElement { element: TopologyElement },
+    #[error("provenance is ambiguous for {element:?}")]
+    Ambiguous {
+        element: TopologyElement,
+        candidates: Vec<ProvenanceEntry>,
+    },
+}
 
 /// Strategy for identifying which specific element was clicked.
 /// ADR-0003 mandates this layer is modular and experimental.
@@ -42,7 +53,7 @@ pub fn resolve_context(
     element: &TopologyElement,
     ledger: &ProvenanceLedger,
     strategy: &dyn IdentificationStrategy,
-) -> GeometryContext {
+) -> Result<GeometryContext, ProvenanceResolutionError> {
     // Step 1: Provenance lookup.
     let provenance = match element {
         TopologyElement::Face(id) => ledger.lookup_face(*id),
@@ -50,62 +61,74 @@ pub fn resolve_context(
         TopologyElement::Vertex(id) => ledger.lookup_vertex(*id),
     };
 
-    let source_line = provenance.map(|e| e.source.line);
-    let source_code = provenance.map(|e| e.source.code.clone());
+    let provenance = match provenance {
+        Some(LedgerValue::Resolved(entry)) => entry.clone(),
+        Some(LedgerValue::Ambiguous(candidates)) => {
+            return Err(ProvenanceResolutionError::Ambiguous {
+                element: element.clone(),
+                candidates: candidates.clone(),
+            });
+        }
+        None => {
+            return Err(ProvenanceResolutionError::MissingElement {
+                element: element.clone(),
+            });
+        }
+    };
 
     // Step 2: Identification strategy.
     let identification = strategy.identify(element);
 
     // Step 3: Package into the stable output format.
-    GeometryContext {
+    Ok(GeometryContext {
         element: element.clone(),
-        source_line,
-        source_code,
+        provenance,
         identification,
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::geometry::{EdgeId, FaceId};
-    use crate::ledger::{ProvenanceEntry, ProvenanceKind, SourceRef};
+    use crate::ledger::{
+        LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+    };
 
     #[test]
     fn resolve_face_with_provenance() {
         let mut ledger = ProvenanceLedger::new();
-        ledger.record_face(
-            FaceId(3),
-            ProvenanceEntry {
-                source: SourceRef {
-                    line: 5,
-                    code: "box = Box(10, 10, 10)".to_string(),
-                },
-                kind: ProvenanceKind::Generated,
-            },
-        );
+        ledger
+            .record_face(
+                FaceId(3),
+                LedgerValue::Resolved(ProvenanceEntry {
+                    source: SourceRef {
+                        line: 5,
+                        code: "box = Box(10, 10, 10)".to_string(),
+                    },
+                    operation: SemanticOperation::Box,
+                    operation_id: 1,
+                    relation: ProvenanceRelation::Generated,
+                }),
+            )
+            .unwrap();
 
         let element = TopologyElement::Face(FaceId(3));
         let strategy = NullIdentification;
-        let context = resolve_context(&element, &ledger, &strategy);
+        let context = resolve_context(&element, &ledger, &strategy).unwrap();
 
-        assert_eq!(context.source_line, Some(5));
-        assert_eq!(
-            context.source_code.as_deref(),
-            Some("box = Box(10, 10, 10)")
-        );
+        assert_eq!(context.provenance.source.line, 5);
+        assert_eq!(context.provenance.source.code, "box = Box(10, 10, 10)");
         assert!(context.identification.is_empty());
     }
 
     #[test]
-    fn resolve_without_provenance_returns_none_fields() {
+    fn resolve_without_provenance_returns_error() {
         let ledger = ProvenanceLedger::new();
         let element = TopologyElement::Edge(EdgeId(99));
         let strategy = NullIdentification;
-        let context = resolve_context(&element, &ledger, &strategy);
-
-        assert_eq!(context.source_line, None);
-        assert_eq!(context.source_code, None);
+        let error = resolve_context(&element, &ledger, &strategy).unwrap_err();
+        assert_eq!(error, ProvenanceResolutionError::MissingElement { element });
     }
 
     #[test]
@@ -132,10 +155,24 @@ mod tests {
             }
         }
 
-        let ledger = ProvenanceLedger::new();
+        let mut ledger = ProvenanceLedger::new();
         let element = TopologyElement::Face(FaceId(7));
+        ledger
+            .record_face(
+                FaceId(7),
+                LedgerValue::Resolved(ProvenanceEntry {
+                    source: SourceRef {
+                        line: 1,
+                        code: "Box(1, 1, 1)".into(),
+                    },
+                    operation: SemanticOperation::Box,
+                    operation_id: 1,
+                    relation: ProvenanceRelation::Generated,
+                }),
+            )
+            .unwrap();
         let strategy = TestStrategy;
-        let context = resolve_context(&element, &ledger, &strategy);
+        let context = resolve_context(&element, &ledger, &strategy).unwrap();
 
         assert_eq!(context.identification.get("face_index").unwrap(), "7");
         assert_eq!(context.identification.get("method").unwrap(), "test");

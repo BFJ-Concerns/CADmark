@@ -498,13 +498,9 @@ impl CadmarkApp {
                                 log::info!(
                                     "Script executed: {} vertices, {} provenance entries",
                                     result.mesh.vertices.len(),
-                                    result.provenance.entries.len(),
+                                    result.ledger.len(),
                                 );
-                                self.ledger = build_ledger_from_execution(
-                                    &response.code,
-                                    &result.mesh,
-                                    &result.provenance,
-                                );
+                                self.ledger = result.ledger;
 
                                 // Store the tessellated mesh for GPU upload on
                                 // the next frame (update() has access to the
@@ -607,18 +603,17 @@ impl CadmarkApp {
                 log::info!(
                     "Script executed: {} vertices, {} faces, {} provenance entries",
                     result.mesh.vertices.len(),
-                    result.mesh.face_shape_hashes.len(),
-                    result.provenance.entries.len(),
+                    result.ledger.face_count(),
+                    result.ledger.len(),
                 );
 
                 self.status_message = Some(format!(
                     "Model loaded: {} vertices, {} faces",
                     result.mesh.vertices.len(),
-                    result.mesh.face_shape_hashes.len(),
+                    result.ledger.face_count(),
                 ));
 
-                self.ledger =
-                    build_ledger_from_execution(&script_source, &result.mesh, &result.provenance);
+                self.ledger = result.ledger;
 
                 self.pending_mesh = Some(result.mesh);
             }
@@ -654,17 +649,32 @@ impl CadmarkApp {
             self.identification_strategy.as_ref(),
         );
 
-        // Open the spatial comment overlay near the selection.
-        self.overlay.open(ScreenPosition {
-            x: screen_pos.0,
-            y: screen_pos.1,
-        });
-
-        log::info!(
-            "Selected {:?}, source line: {:?}",
-            element,
-            context.source_line
-        );
+        match context {
+            Ok(context) => {
+                log::info!(
+                    "Selected {:?}, source line: {}",
+                    element,
+                    context.provenance.source.line
+                );
+                self.overlay.open(
+                    ScreenPosition {
+                        x: screen_pos.0,
+                        y: screen_pos.1,
+                    },
+                    context,
+                );
+            }
+            Err(error) => {
+                let message = format_provenance_resolution_error(&error);
+                self.selection = SelectionState::None;
+                self.renderer.selected_id = 0;
+                self.status_message = Some(format!("Execution error: {message}"));
+                self.conversation
+                    .push(cadmark_core::message::Message::ai_response(&format!(
+                        "**Selection provenance failed:**\n```\n{message}\n```"
+                    )));
+            }
+        }
     }
 
     // ── GPU helpers called from update() ────────────────────────────
@@ -716,115 +726,29 @@ impl CadmarkApp {
     }
 }
 
-fn build_ledger_from_execution(
-    script_source: &str,
-    mesh: &cadmark_kernel::tessellation::TessellatedMesh,
-    provenance: &cadmark_kernel::provenance::RawProvenance,
-) -> cadmark_core::ledger::ProvenanceLedger {
-    let mut ledger = cadmark_core::ledger::ProvenanceLedger::new();
-    let source_lines: Vec<&str> = script_source.lines().collect();
-
-    let hash_to_entry: std::collections::HashMap<u64, cadmark_core::ledger::ProvenanceEntry> =
-        provenance
-            .entries
-            .iter()
-            .map(|entry| {
-                let kind = match entry.kind {
-                    cadmark_kernel::provenance::ProvenanceRelation::Generated => {
-                        cadmark_core::ledger::ProvenanceKind::Generated
-                    }
-                    cadmark_kernel::provenance::ProvenanceRelation::Modified => {
-                        cadmark_core::ledger::ProvenanceKind::Modified
-                    }
-                };
-                let code = source_lines
-                    .get(entry.source_line.saturating_sub(1) as usize)
-                    .map(|line| line.trim().to_string())
-                    .unwrap_or_default();
-
-                (
-                    entry.shape_hash,
-                    cadmark_core::ledger::ProvenanceEntry {
-                        source: cadmark_core::ledger::SourceRef {
-                            line: entry.source_line,
-                            code,
-                        },
-                        kind,
-                    },
-                )
-            })
-            .collect();
-
-    for (face_idx, &shape_hash) in mesh.face_shape_hashes.iter().enumerate() {
-        if let Some(entry) = hash_to_entry.get(&shape_hash) {
-            ledger.record_face(
-                cadmark_core::geometry::FaceId(face_idx as u32),
-                entry.clone(),
-            );
+fn format_provenance_resolution_error(
+    error: &cadmark_core::context::ProvenanceResolutionError,
+) -> String {
+    match error {
+        cadmark_core::context::ProvenanceResolutionError::MissingElement { element } => {
+            format!("no provenance exists for selected {element:?}")
         }
-    }
-
-    for (edge_idx, edge) in mesh.edges.iter().enumerate() {
-        if let Some(entry) = hash_to_entry.get(&edge.shape_hash) {
-            ledger.record_edge(
-                cadmark_core::geometry::EdgeId(edge_idx as u32),
-                entry.clone(),
-            );
+        cadmark_core::context::ProvenanceResolutionError::Ambiguous {
+            element,
+            candidates,
+        } => {
+            let candidates = candidates
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "{:?} at line {} ({:?})",
+                        candidate.operation, candidate.source.line, candidate.relation
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("ambiguous provenance for selected {element:?}: {candidates}")
         }
-    }
-
-    ledger
-}
-
-#[cfg(test)]
-mod tests {
-    use super::build_ledger_from_execution;
-
-    #[test]
-    fn ledger_rebuild_preserves_source_snippets_and_edges() {
-        let mesh = cadmark_kernel::tessellation::TessellatedMesh {
-            vertices: Vec::new(),
-            indices: vec![0, 1, 2],
-            face_ids: vec![0],
-            face_shape_hashes: vec![101],
-            edges: vec![cadmark_kernel::tessellation::MeshEdge {
-                points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
-                shape_hash: 202,
-            }],
-        };
-        let provenance = cadmark_kernel::provenance::RawProvenance {
-            entries: vec![
-                cadmark_kernel::provenance::RawProvenanceEntry {
-                    shape_hash: 101,
-                    source_line: 2,
-                    kind: cadmark_kernel::provenance::ProvenanceRelation::Generated,
-                },
-                cadmark_kernel::provenance::RawProvenanceEntry {
-                    shape_hash: 202,
-                    source_line: 3,
-                    kind: cadmark_kernel::provenance::ProvenanceRelation::Modified,
-                },
-            ],
-        };
-
-        let ledger = build_ledger_from_execution(
-            "from build123d import *\nBox(10, 10, 10)\nfillet(edges(), 1)",
-            &mesh,
-            &provenance,
-        );
-
-        let face = ledger
-            .lookup_face(cadmark_core::geometry::FaceId(0))
-            .unwrap();
-        assert_eq!(face.source.line, 2);
-        assert_eq!(face.source.code, "Box(10, 10, 10)");
-
-        let edge = ledger
-            .lookup_edge(cadmark_core::geometry::EdgeId(0))
-            .unwrap();
-        assert_eq!(edge.source.line, 3);
-        assert_eq!(edge.source.code, "fillet(edges(), 1)");
-        assert_eq!(edge.kind, cadmark_core::ledger::ProvenanceKind::Modified);
     }
 }
 
@@ -1049,16 +973,8 @@ impl eframe::App for CadmarkApp {
             // Show the spatial comment overlay if active.
             let overlay_action = self.overlay.show(ui);
             match overlay_action {
-                cadmark_ui::overlay::OverlayAction::Submit(text) => {
-                    if let SelectionState::Selected(ref element) = self.selection {
-                        // Resolve the geometry context from the current selection.
-                        let context = cadmark_core::context::resolve_context(
-                            element,
-                            &self.ledger,
-                            self.identification_strategy.as_ref(),
-                        );
-                        self.send_spatial_comment(text, context);
-                    }
+                cadmark_ui::overlay::OverlayAction::Submit { text, context } => {
+                    self.send_spatial_comment(text, context);
                     self.overlay.close();
                 }
                 cadmark_ui::overlay::OverlayAction::Cancel => {

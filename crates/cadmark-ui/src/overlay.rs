@@ -3,7 +3,7 @@
 // Positioned in screen space near the selection point. The user writes
 // free text and submits. Escape cancels and returns to default state.
 
-use cadmark_core::geometry::ScreenPosition;
+use cadmark_core::geometry::{GeometryContext, ScreenPosition};
 
 /// State for the spatial comment overlay.
 #[derive(Debug)]
@@ -16,6 +16,8 @@ pub enum OverlayState {
         anchor: ScreenPosition,
         /// The text the user is writing.
         text: String,
+        /// Provenance resolved at pick time and retained through submission.
+        context: GeometryContext,
     },
 }
 
@@ -30,17 +32,21 @@ pub enum OverlayAction {
     /// No action — overlay still open or hidden.
     None,
     /// User submitted a spatial comment.
-    Submit(String),
+    Submit {
+        text: String,
+        context: GeometryContext,
+    },
     /// User cancelled (Escape).
     Cancel,
 }
 
 impl OverlayState {
     /// Open the overlay at the given screen position.
-    pub fn open(&mut self, anchor: ScreenPosition) {
+    pub fn open(&mut self, anchor: ScreenPosition, context: GeometryContext) {
         *self = Self::Active {
             anchor,
             text: String::new(),
+            context,
         };
     }
 
@@ -57,7 +63,11 @@ impl OverlayState {
     pub fn show(&mut self, ui: &mut egui::Ui) -> OverlayAction {
         match self {
             Self::Hidden => OverlayAction::None,
-            Self::Active { anchor, text } => {
+            Self::Active {
+                anchor,
+                text,
+                context,
+            } => {
                 let mut action = OverlayAction::None;
 
                 // Position the overlay near the anchor with an offset.
@@ -81,12 +91,18 @@ impl OverlayState {
                                 && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter))
                                 && !text.trim().is_empty()
                             {
-                                action = OverlayAction::Submit(text.trim().to_string());
+                                action = OverlayAction::Submit {
+                                    text: text.trim().to_string(),
+                                    context: context.clone(),
+                                };
                             }
 
                             ui.horizontal(|ui| {
                                 if ui.button("Submit").clicked() && !text.trim().is_empty() {
-                                    action = OverlayAction::Submit(text.trim().to_string());
+                                    action = OverlayAction::Submit {
+                                        text: text.trim().to_string(),
+                                        context: context.clone(),
+                                    };
                                 }
                                 if ui.button("Cancel").clicked() {
                                     action = OverlayAction::Cancel;

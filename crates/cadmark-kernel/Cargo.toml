@@ -11,3 +11,6 @@ anyhow = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+cadmark-bridge = { workspace = true }

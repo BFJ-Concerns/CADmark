@@ -45,12 +45,13 @@ impl ClaudeCodeBackend {
                 "The user selected a geometry element ({})",
                 describe_element(&ctx.element)
             ));
-            if let Some(line) = ctx.source_line {
-                prompt.push_str(&format!(" generated at line {line}"));
-            }
-            if let Some(code) = &ctx.source_code {
-                prompt.push_str(&format!(": `{code}`"));
-            }
+            prompt.push_str(&format!(
+                " attributed to {:?} ({:?}) at line {}: `{}`",
+                ctx.provenance.operation,
+                ctx.provenance.relation,
+                ctx.provenance.source.line,
+                ctx.provenance.source.code
+            ));
             prompt.push_str(".\n\n");
 
             // Include experimental identification data.
@@ -189,6 +190,19 @@ fn describe_element(element: &cadmark_core::geometry::TopologyElement) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
+
+    fn provenance(line: u32, code: &str) -> ProvenanceEntry {
+        ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: code.to_string(),
+            },
+            operation: SemanticOperation::Box,
+            operation_id: 1,
+            relation: ProvenanceRelation::Generated,
+        }
+    }
 
     #[test]
     fn extract_python_code_block() {
@@ -232,8 +246,7 @@ mod tests {
         let backend = ClaudeCodeBackend::new(PathBuf::from("/tmp"));
         let context = GeometryContext {
             element: TopologyElement::Face(FaceId(3)),
-            source_line: Some(5),
-            source_code: Some("box = Box(10, 10, 10)".to_string()),
+            provenance: provenance(5, "box = Box(10, 10, 10)"),
             identification: std::collections::HashMap::new(),
         };
         let request = AiRequest::from_spatial_comment(
@@ -255,8 +268,7 @@ mod tests {
         identification.insert("position".to_string(), "top face".to_string());
         let context = GeometryContext {
             element: TopologyElement::Face(FaceId(0)),
-            source_line: None,
-            source_code: None,
+            provenance: provenance(1, "box = Box(10, 10, 10)"),
             identification,
         };
         let request =

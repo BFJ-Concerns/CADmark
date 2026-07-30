@@ -634,6 +634,7 @@ name = "cadmark-kernel"
 version = "0.202604.600"
 dependencies = [
  "anyhow",
+ "cadmark-bridge",
  "cadmark-core",
  "log",
  "pyo3",
