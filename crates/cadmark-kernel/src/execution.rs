@@ -274,7 +274,9 @@ mod tests {
     use cadmark_core::context::{NullIdentification, resolve_context};
     use cadmark_core::geometry::GeometryContext;
     use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
-    use cadmark_core::ledger::{LedgerValue, SemanticOperation};
+    use cadmark_core::ledger::{
+        LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+    };
 
     fn activate_test_runtime() {
         discover_and_activate_venv().expect("test virtual environment should activate");
@@ -486,11 +488,22 @@ with BuildPart() as part:
         )
         .unwrap();
         assert_contains_operation(&result, SemanticOperation::Fillet);
-        assert!(resolved_contexts(&result).iter().any(|context| matches!(
-            context.provenance.relation,
-            cadmark_core::ledger::ProvenanceRelation::GeneratedDescendant
-                | cadmark_core::ledger::ProvenanceRelation::ModifiedDescendant
-        )));
+        let contexts = resolved_contexts(&result);
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Fillet
+                && matches!(
+                    context.provenance.relation,
+                    ProvenanceRelation::Generated | ProvenanceRelation::Modified
+                )
+        }));
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Fillet
+                && matches!(
+                    context.provenance.relation,
+                    ProvenanceRelation::GeneratedDescendant
+                        | ProvenanceRelation::ModifiedDescendant
+                )
+        }));
         assert_bridge_consumers(&result);
     }
 
@@ -507,11 +520,41 @@ with BuildPart() as part:
         )
         .unwrap();
         assert_contains_operation(&result, SemanticOperation::Chamfer);
-        assert!(resolved_contexts(&result).iter().any(|context| matches!(
-            context.provenance.relation,
-            cadmark_core::ledger::ProvenanceRelation::GeneratedDescendant
-                | cadmark_core::ledger::ProvenanceRelation::ModifiedDescendant
-        )));
+        let contexts = resolved_contexts(&result);
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Chamfer
+                && matches!(
+                    context.provenance.relation,
+                    ProvenanceRelation::Generated | ProvenanceRelation::Modified
+                )
+        }));
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Chamfer
+                && matches!(
+                    context.provenance.relation,
+                    ProvenanceRelation::GeneratedDescendant
+                        | ProvenanceRelation::ModifiedDescendant
+                )
+        }));
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_locations_transport_primitive_provenance() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    with Locations((0, 0, 0), (10, 0, 0)):
+        Box(2, 2, 2)
+"#,
+        )
+        .unwrap();
+        assert_eq!(result.ledger.face_count(), 12);
+        assert_eq!(result.ledger.edge_count(), 24);
+        assert_eq!(result.ledger.vertex_count(), 16);
+        assert_every_element_resolves(&result, SemanticOperation::Box, 5);
         assert_bridge_consumers(&result);
     }
 
@@ -625,5 +668,36 @@ with BuildPart() as part:
         assert!(!instrumentation.contains("hash("));
         assert!(!tessellation.contains("HashCode"));
         assert!(!tessellation.contains("shape_hash"));
+    }
+
+    #[test]
+    fn tessellation_ids_outside_final_maps_are_rejected() {
+        let entry = LedgerValue::Resolved(ProvenanceEntry {
+            source: SourceRef {
+                line: 1,
+                code: "Box(1, 1, 1)".into(),
+            },
+            operation: SemanticOperation::Box,
+            operation_id: 1,
+            relation: ProvenanceRelation::Generated,
+        });
+        let mut ledger = ProvenanceLedger::new();
+        ledger.record_face(FaceId(0), entry.clone()).unwrap();
+        ledger.record_edge(EdgeId(0), entry).unwrap();
+        let mesh = TessellatedMesh {
+            vertices: Vec::new(),
+            indices: vec![0, 1, 2],
+            face_ids: vec![1],
+            edges: vec![crate::tessellation::MeshEdge {
+                points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+                edge_id: 1,
+            }],
+        };
+        assert!(matches!(
+            validate_tessellation_ids(&mesh, &ledger),
+            Err(ExecutionError::Tessellation(
+                crate::tessellation::TessellationError::InvalidTopologyId { .. }
+            ))
+        ));
     }
 }

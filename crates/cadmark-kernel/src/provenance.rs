@@ -672,6 +672,113 @@ _cadmark_probe_capture = _cadmark_probe_session.finalise(_cadmark_probe_clean)
     }
 
     #[test]
+    fn copy_location_bridge_uses_partner_identity_only_as_a_fallback() {
+        activate();
+        let _guard = crate::execution::PYTHON_EXECUTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Python::with_gil(|py| {
+            let namespace = run_instrumentation_source(py).unwrap();
+            py.run(
+                c"
+from OCP.BRepBuilderAPI import BRepBuilderAPI_Copy as _cadmark_identity_copy
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox as _cadmark_identity_box
+from OCP.gp import gp_Trsf as _cadmark_identity_trsf, gp_Vec as _cadmark_identity_vec
+from OCP.TopLoc import TopLoc_Location as _cadmark_identity_location
+from OCP.TopoDS import (
+    TopoDS_Builder as _cadmark_identity_builder_type,
+    TopoDS_Compound as _cadmark_identity_compound_type,
+)
+
+_cadmark_identity_session = _CadmarkSession('<cadmark-source>')
+_cadmark_identity_operation = _cadmark_identity_session.new_operation(
+    1, 'Box', 'seed'
+)
+_cadmark_identity_original = _cadmark_identity_box(1, 1, 1).Shape()
+for _cadmark_identity_kind, _cadmark_identity_shapes in _cadmark_identity_session.topology(
+    _cadmark_identity_original
+):
+    for _cadmark_identity_shape in _cadmark_identity_shapes:
+        _cadmark_identity_session.register(
+            _cadmark_identity_shape,
+            [{
+                'operation_id': _cadmark_identity_operation,
+                'relation': 'Generated',
+            }],
+            allow_partner=True,
+        )
+_cadmark_identity_copier = _cadmark_identity_copy(_cadmark_identity_original)
+_cadmark_identity_copied = _cadmark_identity_copier.Shape()
+_cadmark_identity_wrapper = type('CopyProbe', (), {})()
+_cadmark_identity_wrapper._cadmark_inputs = [_cadmark_identity_original]
+_cadmark_identity_wrapper.Modified = _cadmark_identity_copier.Modified
+_cadmark_identity_wrapper.Generated = _cadmark_identity_copier.Generated
+_cadmark_identity_session.capture_transport(
+    _cadmark_identity_wrapper, _cadmark_identity_copied, True
+)
+_cadmark_identity_transform = _cadmark_identity_trsf()
+_cadmark_identity_transform.SetTranslation(_cadmark_identity_vec(5, 0, 0))
+_cadmark_identity_moved = _cadmark_identity_copied.Located(
+    _cadmark_identity_location(_cadmark_identity_transform)
+)
+_cadmark_identity_compound = _cadmark_identity_compound_type()
+_cadmark_identity_builder = _cadmark_identity_builder_type()
+_cadmark_identity_builder.MakeCompound(_cadmark_identity_compound)
+_cadmark_identity_builder.Add(
+    _cadmark_identity_compound, _cadmark_identity_copied
+)
+_cadmark_identity_builder.Add(
+    _cadmark_identity_compound, _cadmark_identity_moved
+)
+_cadmark_identity_capture = _cadmark_identity_session.finalise(
+    _cadmark_identity_compound
+)
+_cadmark_identity_is_same = _cadmark_identity_copied.IsSame(
+    _cadmark_identity_moved
+)
+_cadmark_identity_is_partner = _cadmark_identity_copied.IsPartner(
+    _cadmark_identity_moved
+)
+",
+                Some(&namespace),
+                None,
+            )
+            .unwrap();
+            assert!(
+                !namespace
+                    .get_item("_cadmark_identity_is_same")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+            assert!(
+                namespace
+                    .get_item("_cadmark_identity_is_partner")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
+            let capture = namespace
+                .get_item("_cadmark_identity_capture")
+                .unwrap()
+                .unwrap();
+            let raw = parse_capture(&capture).unwrap();
+            assert_eq!(raw.faces.len(), 12);
+            assert_eq!(raw.edges.len(), 24);
+            assert_eq!(raw.vertices.len(), 16);
+            assert!(
+                raw.faces
+                    .iter()
+                    .chain(&raw.edges)
+                    .chain(&raw.vertices)
+                    .all(|element| element.candidates.len() == 1)
+            );
+        });
+    }
+
+    #[test]
     fn malformed_capture_variants_fail_closed() {
         Python::with_gil(|py| {
             let baseline = "{'schema_version': 1, 'operations': [{'operation_id': 1, \

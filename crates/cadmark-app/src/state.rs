@@ -782,6 +782,67 @@ fn format_provenance_resolution_error(
     }
 }
 
+#[cfg(test)]
+mod provenance_tests {
+    use cadmark_core::context::ProvenanceResolutionError;
+    use cadmark_core::geometry::{FaceId, TopologyElement};
+    use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
+
+    use super::format_provenance_resolution_error;
+
+    #[test]
+    fn visible_ambiguity_names_element_and_every_candidate() {
+        let error = ProvenanceResolutionError::Ambiguous {
+            element: TopologyElement::Face(FaceId(4)),
+            candidates: vec![
+                ProvenanceEntry {
+                    source: SourceRef {
+                        line: 3,
+                        code: "Box(1, 1, 1)".into(),
+                    },
+                    operation: SemanticOperation::Box,
+                    operation_id: 1,
+                    relation: ProvenanceRelation::Generated,
+                },
+                ProvenanceEntry {
+                    source: SourceRef {
+                        line: 8,
+                        code: "fillet(part.edges(), 1)".into(),
+                    },
+                    operation: SemanticOperation::Fillet,
+                    operation_id: 2,
+                    relation: ProvenanceRelation::Modified,
+                },
+            ],
+        };
+        let message = format_provenance_resolution_error(&error);
+        assert!(message.contains("Face(FaceId(4))"));
+        assert!(message.contains("Box at line 3"));
+        assert!(message.contains("Fillet at line 8"));
+
+        let request = Result::<cadmark_core::geometry::GeometryContext, _>::Err(error)
+            .ok()
+            .map(|context| {
+                cadmark_bridge::context::AiRequest::from_spatial_comment(
+                    "source".into(),
+                    "comment".into(),
+                    context,
+                )
+            });
+        assert!(request.is_none());
+    }
+
+    #[test]
+    fn visible_missing_error_names_the_selected_element() {
+        let error = ProvenanceResolutionError::MissingElement {
+            element: TopologyElement::Face(FaceId(9)),
+        };
+        let message = format_provenance_resolution_error(&error);
+        assert!(message.contains("Face(FaceId(9))"));
+        assert!(message.contains("no provenance"));
+    }
+}
+
 impl eframe::App for CadmarkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // On first frame, execute any existing script to show its model.

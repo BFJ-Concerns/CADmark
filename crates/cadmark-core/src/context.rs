@@ -132,6 +132,45 @@ mod tests {
     }
 
     #[test]
+    fn resolve_ambiguous_provenance_returns_all_candidates() {
+        let first = ProvenanceEntry {
+            source: SourceRef {
+                line: 2,
+                code: "Box(1, 1, 1)".into(),
+            },
+            operation: SemanticOperation::Box,
+            operation_id: 1,
+            relation: ProvenanceRelation::Generated,
+        };
+        let second = ProvenanceEntry {
+            source: SourceRef {
+                line: 3,
+                code: "Cylinder(1, 1)".into(),
+            },
+            operation: SemanticOperation::Cylinder,
+            operation_id: 2,
+            relation: ProvenanceRelation::Generated,
+        };
+        let mut ledger = ProvenanceLedger::new();
+        ledger
+            .record_face(
+                FaceId(0),
+                LedgerValue::Ambiguous(vec![first.clone(), second.clone()]),
+            )
+            .unwrap();
+
+        let element = TopologyElement::Face(FaceId(0));
+        let error = resolve_context(&element, &ledger, &NullIdentification).unwrap_err();
+        assert_eq!(
+            error,
+            ProvenanceResolutionError::Ambiguous {
+                element,
+                candidates: vec![first, second],
+            }
+        );
+    }
+
+    #[test]
     fn custom_strategy_adds_identification() {
         struct TestStrategy;
         impl IdentificationStrategy for TestStrategy {
