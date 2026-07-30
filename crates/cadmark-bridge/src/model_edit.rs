@@ -206,6 +206,8 @@ mod tests {
             "box = Box(1, 1, 1)",
             "face #3",
             "line 5",
+            "Box",
+            "Generated",
             "position: top face",
             "fillet(objects, radius)",
             "distinctive traceback",
