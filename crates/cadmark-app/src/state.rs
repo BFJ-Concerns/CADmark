@@ -30,10 +30,45 @@ struct ViewportResources {
     readback_pending: bool,
     /// Decoded pick result from the most recent readback, waiting
     /// for `update()` to consume it.
-    pick_result: Option<cadmark_core::geometry::TopologyElement>,
+    pick_result: Option<CompletedPick>,
     /// Last-known viewport size in physical pixels — triggers resize
     /// of the picking texture and depth buffer when it changes.
     viewport_size: (u32, u32),
+}
+
+enum CompletedPick {
+    Hit(cadmark_core::geometry::TopologyElement),
+    Background,
+    ReadbackFailed,
+}
+
+#[derive(Debug, PartialEq)]
+enum PickTransition {
+    Waiting,
+    Hit(cadmark_core::geometry::TopologyElement, (f32, f32)),
+    Background,
+    ReadbackFailed,
+}
+
+fn completed_pick_transition(
+    completed: Option<CompletedPick>,
+    pick_in_flight: &mut Option<(f32, f32)>,
+) -> PickTransition {
+    match completed {
+        None => PickTransition::Waiting,
+        Some(CompletedPick::Hit(element)) => match pick_in_flight.take() {
+            Some(screen_pos) => PickTransition::Hit(element, screen_pos),
+            None => PickTransition::Background,
+        },
+        Some(CompletedPick::Background) => {
+            pick_in_flight.take();
+            PickTransition::Background
+        }
+        Some(CompletedPick::ReadbackFailed) => {
+            pick_in_flight.take();
+            PickTransition::ReadbackFailed
+        }
+    }
 }
 
 /// Per-frame data passed into the egui_wgpu paint callback.
@@ -71,11 +106,21 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                 let _ = tx.send(v);
             });
             device.poll(wgpu::Maintain::Wait);
-            if let Ok(Ok(())) = rx.recv() {
-                let data = slice.get_mapped_range();
-                res.pick_result = cadmark_renderer::viewport::decode_pick_result(&data);
-                drop(data);
-                res.picking.staging_buffer.unmap();
+            match rx.recv() {
+                Ok(Ok(())) => {
+                    let data = slice.get_mapped_range();
+                    res.pick_result = Some(
+                        match cadmark_renderer::viewport::decode_pick_result(&data) {
+                            Some(element) => CompletedPick::Hit(element),
+                            None => CompletedPick::Background,
+                        },
+                    );
+                    drop(data);
+                    res.picking.staging_buffer.unmap();
+                }
+                _ => {
+                    res.pick_result = Some(CompletedPick::ReadbackFailed);
+                }
             }
         }
 
@@ -274,6 +319,9 @@ pub struct CadmarkApp {
     /// execution, consumed in `update()` when the render state is
     /// accessible).
     pending_mesh: Option<cadmark_kernel::tessellation::TessellatedMesh>,
+    /// Bounds of the latest successful mesh, consumed once the viewport aspect
+    /// ratio is known so the camera can frame the complete model.
+    pending_camera_bounds: Option<cadmark_renderer::camera::Bounds3>,
     /// Local click coordinates (relative to viewport rect) for the
     /// pending pick request. Consumed in the same frame to build the
     /// paint callback.
@@ -405,6 +453,7 @@ impl CadmarkApp {
             ledger: cadmark_core::ledger::ProvenanceLedger::new(),
             identification_strategy: Box::new(cadmark_core::context::NullIdentification),
             pending_mesh: None,
+            pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
             has_mesh: false,
@@ -535,6 +584,10 @@ impl CadmarkApp {
                                 // Store the tessellated mesh for GPU upload on
                                 // the next frame (update() has access to the
                                 // wgpu device via the render state).
+                                self.pending_camera_bounds =
+                                    cadmark_renderer::camera::Bounds3::from_positions(
+                                        result.mesh.vertices.iter().map(|vertex| vertex.position),
+                                    );
                                 self.pending_mesh = Some(result.mesh);
                             }
                             Err(e) => {
@@ -570,6 +623,7 @@ impl CadmarkApp {
     /// viewport cannot show stale geometry after a reload failure.
     fn clear_loaded_model(&mut self) {
         self.pending_mesh = None;
+        self.pending_camera_bounds = None;
         self.ledger.clear();
         self.has_mesh = false;
         self.pending_pick = None;
@@ -645,6 +699,9 @@ impl CadmarkApp {
 
                 self.ledger = result.ledger;
 
+                self.pending_camera_bounds = cadmark_renderer::camera::Bounds3::from_positions(
+                    result.mesh.vertices.iter().map(|vertex| vertex.position),
+                );
                 self.pending_mesh = Some(result.mesh);
             }
             Err(e) => {
@@ -736,7 +793,7 @@ impl CadmarkApp {
         };
 
         // Extract the pick result from callback_resources.
-        let element = {
+        let completed = {
             let mut renderer = rs.renderer.write();
             let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() else {
                 return;
@@ -744,15 +801,54 @@ impl CadmarkApp {
             res.pick_result.take()
         };
 
-        if let Some(element) = element {
-            if let Some(screen_pos) = self.pick_in_flight.take() {
+        match completed_pick_transition(completed, &mut self.pick_in_flight) {
+            PickTransition::Waiting | PickTransition::Background => {}
+            PickTransition::Hit(element, screen_pos) => {
                 self.handle_pick_result(element, screen_pos);
             }
-        } else {
-            // Background click (pick ID 0) — clear the in-flight
-            // state so we stop requesting repaints.
-            self.pick_in_flight.take();
+            PickTransition::ReadbackFailed => {
+                self.status_message =
+                    Some("Selection failed: GPU pick readback failed".to_string());
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod pick_state_tests {
+    use cadmark_core::geometry::{FaceId, TopologyElement};
+
+    use super::{CompletedPick, PickTransition, completed_pick_transition};
+
+    #[test]
+    fn incomplete_readback_retains_the_pick_anchor() {
+        let mut in_flight = Some((120.0, 240.0));
+        assert_eq!(
+            completed_pick_transition(None, &mut in_flight),
+            PickTransition::Waiting
+        );
+        assert_eq!(in_flight, Some((120.0, 240.0)));
+    }
+
+    #[test]
+    fn completed_hit_consumes_and_returns_the_pick_anchor() {
+        let element = TopologyElement::Face(FaceId(3));
+        let mut in_flight = Some((120.0, 240.0));
+        assert_eq!(
+            completed_pick_transition(Some(CompletedPick::Hit(element.clone())), &mut in_flight),
+            PickTransition::Hit(element, (120.0, 240.0))
+        );
+        assert_eq!(in_flight, None);
+    }
+
+    #[test]
+    fn completed_background_clears_the_pick_anchor() {
+        let mut in_flight = Some((120.0, 240.0));
+        assert_eq!(
+            completed_pick_transition(Some(CompletedPick::Background), &mut in_flight),
+            PickTransition::Background
+        );
+        assert_eq!(in_flight, None);
     }
 }
 
@@ -1015,6 +1111,15 @@ impl eframe::App for CadmarkApp {
             let viewport_size = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
             let aspect = rect.width() / rect.height().max(1.0);
 
+            if let Some(bounds) = self.pending_camera_bounds.take() {
+                self.renderer.camera.frame_bounds(bounds, aspect);
+                log::info!(
+                    "Camera framed model at {:?}, distance {}",
+                    self.renderer.camera.target,
+                    self.renderer.camera.distance
+                );
+            }
+
             // Consume the pending pick (local coords → pixel coords).
             let pick_request = self
                 .pending_pick
@@ -1076,5 +1181,11 @@ impl eframe::App for CadmarkApp {
                 cadmark_ui::overlay::OverlayAction::None => {}
             }
         });
+
+        // A toolbar reload produces its mesh after the start-of-frame GPU
+        // drain. Ensure one more frame runs so that mesh is uploaded.
+        if self.pending_mesh.is_some() {
+            ctx.request_repaint();
+        }
     }
 }

@@ -5,6 +5,16 @@
 
 use cadmark_core::geometry::{GeometryContext, ScreenPosition};
 
+fn context_summary(context: &GeometryContext) -> String {
+    format!(
+        "{:?} · {:?} · line {} · {:?}",
+        context.element,
+        context.provenance.operation,
+        context.provenance.source.line,
+        context.provenance.relation
+    )
+}
+
 /// State for the spatial comment overlay.
 #[derive(Debug)]
 pub enum OverlayState {
@@ -83,6 +93,7 @@ impl OverlayState {
                                     .strong()
                                     .color(egui::Color32::from_rgb(100, 200, 255)),
                             );
+                            ui.small(context_summary(context));
 
                             let response = ui.text_edit_multiline(text);
 
@@ -126,5 +137,35 @@ impl OverlayState {
                 action
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cadmark_core::geometry::{FaceId, GeometryContext, TopologyElement};
+    use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
+
+    use super::context_summary;
+
+    #[test]
+    fn overlay_summary_exposes_the_retained_resolved_context() {
+        let context = GeometryContext {
+            element: TopologyElement::Face(FaceId(2)),
+            provenance: ProvenanceEntry {
+                source: SourceRef {
+                    line: 4,
+                    code: "Box(20, 15, 10)".into(),
+                },
+                operation: SemanticOperation::Box,
+                operation_id: 1,
+                relation: ProvenanceRelation::Generated,
+            },
+            identification: Default::default(),
+        };
+
+        assert_eq!(
+            context_summary(&context),
+            "Face(FaceId(2)) · Box · line 4 · Generated"
+        );
     }
 }
