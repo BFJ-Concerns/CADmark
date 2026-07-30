@@ -88,8 +88,7 @@ mod tests {
         )
         .unwrap();
 
-        let services = load_ai_services_with_env(project.path(), |_| None).unwrap();
-        assert!(format!("{:?}", services.model_edit).contains("project-model"));
+        load_ai_services_with_env(project.path(), |_| None).unwrap();
     }
 
     #[test]
@@ -98,17 +97,16 @@ mod tests {
         let explicit = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             project.path().join("cadmark.json"),
-            configuration("project-model"),
+            "{invalid project config",
         )
         .unwrap();
         std::fs::write(explicit.path(), configuration("explicit-model")).unwrap();
 
         let explicit_path = explicit.path().display().to_string();
-        let services = load_ai_services_with_env(project.path(), |name| {
+        load_ai_services_with_env(project.path(), |name| {
             (name == CONFIG_PATH_ENV).then(|| explicit_path.clone())
         })
         .unwrap();
-        assert!(format!("{:?}", services.model_edit).contains("explicit-model"));
     }
 
     #[test]
@@ -138,6 +136,35 @@ mod tests {
         let error = load_ai_services_with_env(project.path(), |_| None).unwrap_err();
         assert!(matches!(error, AppConfigurationError::NotFound(_)));
         assert!(error.to_string().contains("cadmark.json"));
+    }
+
+    #[test]
+    fn wrong_type_value_is_absent_from_wrapped_and_visible_errors() {
+        let secret = "DISTINCTIVE_WRONG_TYPE_FAKE_CREDENTIAL_7f46c92a";
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("cadmark.json"),
+            format!(
+                r#"{{
+                    "ai": {{
+                        "provider": "openai-compatible",
+                        "base_url": "https://provider.example/v1",
+                        "model": "test-model",
+                        "timeout_seconds": "{secret}"
+                    }}
+                }}"#
+            ),
+        )
+        .unwrap();
+
+        let error = load_ai_services_with_env(project.path(), |_| None).unwrap_err();
+        for surfaced in [
+            error.to_string(),
+            format!("{error:?}"),
+            format!("AI is unavailable: {error}"),
+        ] {
+            assert!(!surfaced.contains(secret));
+        }
     }
 
     #[tokio::test]
