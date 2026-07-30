@@ -22,6 +22,44 @@ pub struct Camera {
     pub far: f32,
 }
 
+/// Axis-aligned bounds used to frame newly loaded geometry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bounds3 {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+}
+
+impl Bounds3 {
+    pub fn from_positions(positions: impl IntoIterator<Item = [f32; 3]>) -> Option<Self> {
+        let mut min = [f32::INFINITY; 3];
+        let mut max = [f32::NEG_INFINITY; 3];
+        let mut found = false;
+
+        for position in positions {
+            if !position.iter().all(|coordinate| coordinate.is_finite()) {
+                return None;
+            }
+            found = true;
+            for axis in 0..3 {
+                min[axis] = min[axis].min(position[axis]);
+                max[axis] = max[axis].max(position[axis]);
+            }
+        }
+
+        found.then_some(Self { min, max })
+    }
+
+    fn centre(self) -> [f32; 3] {
+        std::array::from_fn(|axis| (self.min[axis] + self.max[axis]) * 0.5)
+    }
+
+    fn radius(self) -> f32 {
+        let half_extent: [f32; 3] =
+            std::array::from_fn(|axis| (self.max[axis] - self.min[axis]) * 0.5);
+        dot(half_extent, half_extent).sqrt()
+    }
+}
+
 impl Default for Camera {
     fn default() -> Self {
         Self {
@@ -37,6 +75,20 @@ impl Default for Camera {
 }
 
 impl Camera {
+    /// Centre and distance the camera so the complete bounding sphere is
+    /// visible in the narrower viewport dimension.
+    pub fn frame_bounds(&mut self, bounds: Bounds3, aspect_ratio: f32) {
+        let radius = bounds.radius().max(0.001);
+        let vertical_half_angle = self.fov * 0.5;
+        let horizontal_half_angle = (vertical_half_angle.tan() * aspect_ratio.max(0.01)).atan();
+        let limiting_half_angle = vertical_half_angle.min(horizontal_half_angle);
+
+        self.target = bounds.centre();
+        self.distance = radius / limiting_half_angle.sin() * 1.15;
+        self.near = (radius * 0.001).max(0.0001);
+        self.far = (self.distance + radius * 3.0).max(self.near + 1.0);
+    }
+
     /// Compute the camera's eye position from orbit parameters.
     pub fn eye_position(&self) -> [f32; 3] {
         let cos_pitch = self.pitch.cos();
@@ -271,5 +323,43 @@ mod tests {
     #[test]
     fn helper_dot_product() {
         assert!(approx_eq(dot([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), 32.0));
+    }
+
+    #[test]
+    fn bounds_reject_non_finite_positions() {
+        assert_eq!(
+            Bounds3::from_positions([[0.0, 0.0, 0.0], [f32::NAN, 1.0, 1.0]]),
+            None
+        );
+    }
+
+    #[test]
+    fn framing_centres_and_places_the_verifier_box_outside_the_model() {
+        let bounds = Bounds3::from_positions([[-10.0, -7.5, -5.0], [10.0, 7.5, 5.0]])
+            .expect("finite non-empty bounds");
+        let mut camera = Camera::default();
+        let initial_eye = camera.eye_position();
+        assert!(
+            initial_eye
+                .iter()
+                .enumerate()
+                .all(|(axis, coordinate)| *coordinate >= bounds.min[axis]
+                    && *coordinate <= bounds.max[axis])
+        );
+
+        camera.frame_bounds(bounds, 0.68);
+
+        assert_eq!(camera.target, [0.0, 0.0, 0.0]);
+        assert!(camera.distance > bounds.radius());
+        assert!(camera.near > 0.0);
+        assert!(camera.far > camera.distance + bounds.radius());
+
+        let eye = camera.eye_position();
+        assert!(
+            eye.iter()
+                .enumerate()
+                .any(|(axis, coordinate)| *coordinate < bounds.min[axis]
+                    || *coordinate > bounds.max[axis])
+        );
     }
 }
