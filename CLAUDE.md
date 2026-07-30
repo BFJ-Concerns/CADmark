@@ -15,7 +15,7 @@ Rust workspace with six crates:
 | `cadmark-kernel` | PyO3 bridge to build123d — script execution, OCP instrumentation, tessellation extraction |
 | `cadmark-renderer` | wgpu pipeline — shaded mesh, wireframe overlay, GPU colour-ID picking, selection glow |
 | `cadmark-ui` | egui panels — chat pane, comment overlay, undo/redo toolbar |
-| `cadmark-bridge` | AI backend trait + Claude Code subprocess implementation |
+| `cadmark-bridge` | AI backend trait, strict configuration, and shared OpenAI-compatible client |
 | `cadmark-app` | Binary entry point, state management, orchestrator, git operations |
 
 ## Build & Run
@@ -34,8 +34,10 @@ the project root is for runtime packages such as `build123d`.
 
 ## Key Decisions
 
-- **Claude Code as AI backend** (ADR-0001): Delegates LLM interaction to
-  `claude --print` subprocess. Behind an `AiBackend` trait for replaceability.
+- **Configured provider boundary**: Both AI consumers share one
+  OpenAI Responses-compatible client behind `AiBackend`. `cadmark.json`
+  selects the endpoint and model; credentials remain machine-local in the
+  named environment variable.
 - **Provenance via OCP instrumentation** (ADR-0002): Wraps OCP builder
   classes to capture which source lines generated which geometry.
 - **Geometry context as experimental layer** (ADR-0003): Three-layer

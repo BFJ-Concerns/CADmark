@@ -5,6 +5,7 @@
 
 use eframe::egui;
 
+mod config;
 pub mod git_ops;
 pub mod orchestrator;
 mod state;

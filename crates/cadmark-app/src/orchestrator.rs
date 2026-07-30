@@ -14,6 +14,7 @@ use std::sync::mpsc;
 
 use cadmark_bridge::backend::{AiBackend, AiResponse};
 use cadmark_bridge::context::AiRequest;
+use cadmark_bridge::{AiServices, doc_lookup::DocLookup};
 use cadmark_core::geometry::GeometryContext;
 use cadmark_core::message::MessageId;
 
@@ -62,15 +63,26 @@ pub struct Orchestrator {
     /// Rolling window of recent user messages, used by the doc lookup
     /// agent to understand conversational context.
     message_history: Vec<String>,
+    backend: Box<dyn AiBackend>,
+    doc_lookup: DocLookup,
+    script_executor: Box<dyn ScriptExecutor>,
 }
 
 impl Orchestrator {
-    pub fn new(project_dir: PathBuf, script_filename: String) -> Self {
+    fn new(
+        project_dir: PathBuf,
+        script_filename: String,
+        services: AiServices,
+        script_executor: Box<dyn ScriptExecutor>,
+    ) -> Self {
         Self {
             current_code: String::new(),
             project_dir,
             script_filename,
             message_history: Vec::new(),
+            backend: Box::new(services.model_edit),
+            doc_lookup: services.doc_lookup,
+            script_executor,
         }
     }
 
@@ -89,20 +101,15 @@ impl Orchestrator {
 
     /// Process a chat message through the AI.
     /// Runs the doc lookup agent first to gather relevant API references.
-    pub async fn handle_chat(
-        &mut self,
-        message: &str,
-        backend: &dyn AiBackend,
-    ) -> OrchestratorResult {
+    pub async fn handle_chat(&mut self, message: &str) -> OrchestratorResult {
+        let doc_context = self.doc_lookup.lookup(message, &self.message_history).await;
         self.push_message(message);
-        let doc_context =
-            cadmark_bridge::doc_lookup::DocLookup::lookup(message, &self.message_history).await;
 
         let mut request = AiRequest::from_chat(self.current_code.clone(), message.to_string());
         if let Some(docs) = doc_context {
             request = request.with_doc_context(docs);
         }
-        self.process_request(request, backend, None).await
+        self.process_request(request, None).await
     }
 
     /// Process a spatial comment through the AI.
@@ -112,30 +119,27 @@ impl Orchestrator {
         id: MessageId,
         text: &str,
         context: GeometryContext,
-        backend: &dyn AiBackend,
     ) -> OrchestratorResult {
+        let doc_context = self.doc_lookup.lookup(text, &self.message_history).await;
         self.push_message(text);
-        let doc_context =
-            cadmark_bridge::doc_lookup::DocLookup::lookup(text, &self.message_history).await;
 
         let mut request =
             AiRequest::from_spatial_comment(self.current_code.clone(), text.to_string(), context);
         if let Some(docs) = doc_context {
             request = request.with_doc_context(docs);
         }
-        self.process_request(request, backend, Some(id)).await
+        self.process_request(request, Some(id)).await
     }
 
     /// Core request processing — send to AI, execute, retry on failure.
     async fn process_request(
         &mut self,
         request: AiRequest,
-        backend: &dyn AiBackend,
         applied_spatial_message_id: Option<MessageId>,
     ) -> OrchestratorResult {
         let trigger_message = request.user_message.clone();
         // Step 1: Send to AI.
-        let response = match backend.request(request.clone()).await {
+        let response = match self.backend.request(request.clone()).await {
             Ok(r) => r,
             Err(e) => return OrchestratorResult::BackendError(e.to_string()),
         };
@@ -149,8 +153,8 @@ impl Orchestrator {
             };
         }
 
-        match cadmark_kernel::execution::execute_script(&script_path) {
-            Ok(_result) => {
+        match self.script_executor.execute(&script_path) {
+            Ok(()) => {
                 // Execution succeeded — update state.
                 self.current_code = response.code.clone();
                 OrchestratorResult::Success {
@@ -165,18 +169,19 @@ impl Orchestrator {
                 let traceback = format!("{first_error}");
                 let retry_request = request.retry_with_traceback(traceback.clone());
 
-                match backend.request(retry_request).await {
+                match self.backend.request(retry_request).await {
                     Ok(retry_response) => {
                         // Write the retry code.
                         if let Err(e) = std::fs::write(&script_path, &retry_response.code) {
+                            self.restore_original(&script_path);
                             return OrchestratorResult::ExecutionFailed {
                                 ai_message: retry_response.message,
                                 error: format!("Failed to write retry script: {e}"),
                             };
                         }
 
-                        match cadmark_kernel::execution::execute_script(&script_path) {
-                            Ok(_result) => {
+                        match self.script_executor.execute(&script_path) {
+                            Ok(()) => {
                                 self.current_code = retry_response.code.clone();
                                 OrchestratorResult::Success {
                                     response: retry_response,
@@ -187,14 +192,7 @@ impl Orchestrator {
                             }
                             Err(retry_error) => {
                                 // Restore the original code on double failure.
-                                if let Err(restore_err) =
-                                    std::fs::write(&script_path, &self.current_code)
-                                {
-                                    log::error!(
-                                        "Failed to restore script after execution error: {restore_err}. \
-                                         File may contain broken AI-generated code."
-                                    );
-                                }
+                                self.restore_original(&script_path);
                                 OrchestratorResult::ExecutionFailed {
                                     ai_message: retry_response.message,
                                     error: format!(
@@ -206,12 +204,7 @@ impl Orchestrator {
                     }
                     Err(e) => {
                         // Restore the original code.
-                        if let Err(restore_err) = std::fs::write(&script_path, &self.current_code) {
-                            log::error!(
-                                "Failed to restore script after backend error: {restore_err}. \
-                                 File may contain broken AI-generated code."
-                            );
-                        }
+                        self.restore_original(&script_path);
                         OrchestratorResult::BackendError(format!(
                             "Retry failed: {e}\n\nOriginal error:\n{traceback}"
                         ))
@@ -238,6 +231,29 @@ impl Orchestrator {
             self.message_history.remove(0);
         }
     }
+
+    fn restore_original(&self, script_path: &std::path::Path) {
+        if let Err(error) = std::fs::write(script_path, &self.current_code) {
+            log::error!(
+                "Failed to restore script after request failure: {error}. \
+                 File may contain broken AI-generated code."
+            );
+        }
+    }
+}
+
+trait ScriptExecutor: Send + Sync {
+    fn execute(&self, script_path: &std::path::Path) -> Result<(), String>;
+}
+
+struct KernelScriptExecutor;
+
+impl ScriptExecutor for KernelScriptExecutor {
+    fn execute(&self, script_path: &std::path::Path) -> Result<(), String> {
+        cadmark_kernel::execution::execute_script(script_path)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
 }
 
 /// Spawn the orchestrator on a tokio runtime with channel communication.
@@ -245,6 +261,7 @@ impl Orchestrator {
 pub fn spawn_orchestrator(
     project_dir: PathBuf,
     script_filename: String,
+    services: AiServices,
 ) -> (
     mpsc::Sender<OrchestratorCommand>,
     mpsc::Receiver<OrchestratorResult>,
@@ -255,15 +272,18 @@ pub fn spawn_orchestrator(
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
         rt.block_on(async {
-            let mut orchestrator = Orchestrator::new(project_dir.clone(), script_filename);
+            let mut orchestrator = Orchestrator::new(
+                project_dir,
+                script_filename,
+                services,
+                Box::new(KernelScriptExecutor),
+            );
             if let Err(e) = orchestrator.load_current_code() {
                 log::error!("Failed to load existing script: {e}");
                 let _ = result_tx.send(OrchestratorResult::BackendError(format!(
                     "Could not read project script: {e}"
                 )));
             }
-
-            let backend = cadmark_bridge::claude_code::ClaudeCodeBackend::new(project_dir);
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
@@ -275,11 +295,11 @@ pub fn spawn_orchestrator(
                     cmd => {
                         let result = match cmd {
                             OrchestratorCommand::ChatMessage(msg) => {
-                                orchestrator.handle_chat(&msg, &backend).await
+                                orchestrator.handle_chat(&msg).await
                             }
                             OrchestratorCommand::SpatialComment { id, text, context } => {
                                 orchestrator
-                                    .handle_spatial_comment(id, &text, context, &backend)
+                                    .handle_spatial_comment(id, &text, context)
                                     .await
                             }
                             OrchestratorCommand::UpdateCode(_) => unreachable!(),
