@@ -316,3 +316,486 @@ pub fn spawn_orchestrator(
 
     (cmd_tx, result_rx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use cadmark_bridge::config::AiConfiguration;
+    use serde_json::Value;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const FAKE_CREDENTIAL: &str = "fake-recording-credential";
+
+    #[derive(Debug)]
+    struct RecordedRequest {
+        path: String,
+        authenticated: bool,
+        body: Value,
+    }
+
+    struct ScriptedResponse {
+        status: u16,
+        body: String,
+    }
+
+    async fn recording_server(
+        responses: Vec<ScriptedResponse>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let server_records = Arc::clone(&records);
+        let handle = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let record = read_request(&mut stream).await;
+                server_records.lock().unwrap().push(record);
+                let reason = if response.status == 200 {
+                    "OK"
+                } else {
+                    "Error"
+                };
+                let wire_response = format!(
+                    "HTTP/1.1 {} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.status,
+                    response.body.len(),
+                    response.body
+                );
+                stream.write_all(wire_response.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{address}/v1"), records, handle)
+    }
+
+    async fn read_request(stream: &mut tokio::net::TcpStream) -> RecordedRequest {
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0);
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+        };
+        let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.split_once(':').and_then(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+            })
+            .unwrap();
+        while bytes.len() < header_end + content_length {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert!(read > 0);
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+
+        let path = headers
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .to_string();
+        let authenticated = headers.lines().any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization")
+                    && value
+                        .trim()
+                        .strip_prefix("Bearer ")
+                        .is_some_and(|token| !token.is_empty())
+            })
+        });
+        let body = serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap();
+        RecordedRequest {
+            path,
+            authenticated,
+            body,
+        }
+    }
+
+    fn completed(text: &str) -> ScriptedResponse {
+        ScriptedResponse {
+            status: 200,
+            body: serde_json::json!({
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]
+                }]
+            })
+            .to_string(),
+        }
+    }
+
+    fn provider_failure(message: &str) -> ScriptedResponse {
+        ScriptedResponse {
+            status: 500,
+            body: serde_json::json!({
+                "error": {
+                    "type": "provider_error",
+                    "code": "scripted_failure",
+                    "message": message
+                }
+            })
+            .to_string(),
+        }
+    }
+
+    fn services(base_url: &str) -> AiServices {
+        let configuration = AiConfiguration::parse(&format!(
+            r#"{{
+                "ai": {{
+                    "provider": "openai-compatible",
+                    "base_url": "{base_url}",
+                    "model": "recording-model",
+                    "credential_env": "CADMARK_RECORDING_KEY",
+                    "timeout_seconds": 5,
+                    "allow_insecure_http": true
+                }}
+            }}"#
+        ))
+        .unwrap();
+        cadmark_bridge::build_ai_services_with_env(configuration, |name| {
+            (name == "CADMARK_RECORDING_KEY").then(|| FAKE_CREDENTIAL.to_string())
+        })
+        .unwrap()
+    }
+
+    #[derive(Clone)]
+    struct FakeExecutor {
+        state: Arc<Mutex<FakeExecutorState>>,
+    }
+
+    struct FakeExecutorState {
+        results: VecDeque<Result<(), String>>,
+        executed_code: Vec<String>,
+    }
+
+    impl FakeExecutor {
+        fn new(results: impl IntoIterator<Item = Result<(), String>>) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(FakeExecutorState {
+                    results: results.into_iter().collect(),
+                    executed_code: Vec::new(),
+                })),
+            }
+        }
+
+        fn executed_code(&self) -> Vec<String> {
+            self.state.lock().unwrap().executed_code.clone()
+        }
+    }
+
+    impl ScriptExecutor for FakeExecutor {
+        fn execute(&self, script_path: &std::path::Path) -> Result<(), String> {
+            let code = std::fs::read_to_string(script_path).unwrap();
+            let mut state = self.state.lock().unwrap();
+            state.executed_code.push(code);
+            state.results.pop_front().unwrap_or(Ok(()))
+        }
+    }
+
+    fn orchestrator(
+        project_dir: &std::path::Path,
+        services: AiServices,
+        executor: FakeExecutor,
+    ) -> Orchestrator {
+        let mut orchestrator = Orchestrator::new(
+            project_dir.to_path_buf(),
+            "part.py".to_string(),
+            services,
+            Box::new(executor),
+        );
+        orchestrator.load_current_code().unwrap();
+        orchestrator
+    }
+
+    #[tokio::test]
+    async fn joined_two_consumer_request_reaches_script_and_final_result() {
+        let lookup_text = "DISTINCTIVE_DOCUMENTATION_REFERENCE";
+        let edit_text = "```python\nDISTINCTIVE_CODE = 42\n```\nSummary: Distinctive summary\nNotes: Distinctive message";
+        let (base_url, records, server) =
+            recording_server(vec![completed(lookup_text), completed(edit_text)]).await;
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+        let executor = FakeExecutor::new([Ok(())]);
+        let mut orchestrator = orchestrator(project.path(), services(&base_url), executor.clone());
+        orchestrator.push_message("genuinely previous request");
+
+        let result = orchestrator.handle_chat("current request").await;
+        server.await.unwrap();
+        let records = records.lock().unwrap();
+
+        assert_eq!(records.len(), 2);
+        for record in records.iter() {
+            assert_eq!(record.path, "/v1/responses");
+            assert!(record.authenticated);
+            assert_eq!(record.body["model"], "recording-model");
+            assert_eq!(record.body["store"], false);
+        }
+        let lookup_input = records[0].body["input"].as_str().unwrap();
+        assert!(
+            records[0].body["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("API reference lookup tool")
+        );
+        assert!(lookup_input.contains("genuinely previous request"));
+        assert!(lookup_input.contains("current request"));
+        assert_eq!(lookup_input.matches("current request").count(), 1);
+        assert!(lookup_input.contains("<build123d_documentation>"));
+
+        let edit_input = records[1].body["input"].as_str().unwrap();
+        assert!(
+            records[1].body["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("build123d")
+        );
+        assert!(edit_input.contains("current request"));
+        assert!(edit_input.contains("ORIGINAL_CODE = 1"));
+        assert!(edit_input.contains(lookup_text));
+
+        assert_eq!(executor.executed_code(), vec!["DISTINCTIVE_CODE = 42"]);
+        assert_eq!(
+            std::fs::read_to_string(&script_path).unwrap(),
+            "DISTINCTIVE_CODE = 42"
+        );
+        match result {
+            OrchestratorResult::Success { response, .. } => {
+                assert_eq!(response.code, "DISTINCTIVE_CODE = 42");
+                assert_eq!(response.summary, "Distinctive summary");
+                assert!(response.message.contains("Distinctive message"));
+            }
+            _ => panic!("expected successful orchestrator result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_and_unparseable_edit_responses_preserve_original_script() {
+        let invalid_responses = [
+            "{not-json".to_string(),
+            serde_json::json!({"status": "completed", "output": []}).to_string(),
+            serde_json::json!({
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "no Python block"}]
+                }]
+            })
+            .to_string(),
+        ];
+
+        for invalid in invalid_responses {
+            let (base_url, _, server) = recording_server(vec![
+                completed("No relevant documentation found."),
+                ScriptedResponse {
+                    status: 200,
+                    body: invalid,
+                },
+            ])
+            .await;
+            let project = tempfile::tempdir().unwrap();
+            let script_path = project.path().join("part.py");
+            std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+            let mut orchestrator =
+                orchestrator(project.path(), services(&base_url), FakeExecutor::new([]));
+
+            let result = orchestrator.handle_chat("request").await;
+            server.await.unwrap();
+            assert!(matches!(result, OrchestratorResult::BackendError(_)));
+            assert_eq!(
+                std::fs::read_to_string(script_path).unwrap(),
+                "ORIGINAL_CODE = 1"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn structured_provider_error_reaches_consumer_without_credential() {
+        let (base_url, _, server) = recording_server(vec![
+            completed("No relevant documentation found."),
+            provider_failure(&format!("rejected {FAKE_CREDENTIAL}")),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+        let mut orchestrator =
+            orchestrator(project.path(), services(&base_url), FakeExecutor::new([]));
+
+        let result = orchestrator.handle_chat("request").await;
+        server.await.unwrap();
+        match result {
+            OrchestratorResult::BackendError(error) => {
+                assert!(error.contains("scripted_failure"));
+                assert!(error.contains("[REDACTED]"));
+                assert!(!error.contains(FAKE_CREDENTIAL));
+            }
+            _ => panic!("expected provider failure"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(script_path).unwrap(),
+            "ORIGINAL_CODE = 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn documentation_failure_degrades_to_successful_edit_without_context() {
+        let edit_text = "```python\nEDIT_WITHOUT_DOCS = True\n```\nSummary: Edit without lookup";
+        let (base_url, records, server) = recording_server(vec![
+            provider_failure("DISTINCTIVE_LOOKUP_FAILURE"),
+            completed(edit_text),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("part.py"), "ORIGINAL_CODE = 1").unwrap();
+        let mut orchestrator = orchestrator(
+            project.path(),
+            services(&base_url),
+            FakeExecutor::new([Ok(())]),
+        );
+
+        let result = orchestrator.handle_chat("request").await;
+        server.await.unwrap();
+        assert!(matches!(result, OrchestratorResult::Success { .. }));
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 2);
+        assert!(
+            !records[1].body["input"]
+                .as_str()
+                .unwrap()
+                .contains("Relevant build123d API reference")
+        );
+    }
+
+    #[tokio::test]
+    async fn traceback_retry_preserves_context_and_succeeds() {
+        let first_edit = "```python\nFIRST_BAD_CODE = True\n```\nSummary: First";
+        let retry_edit = "```python\nRETRY_GOOD_CODE = True\n```\nSummary: Retry";
+        let (base_url, records, server) = recording_server(vec![
+            completed("DISTINCTIVE_RETRY_DOCS"),
+            completed(first_edit),
+            completed(retry_edit),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+        let executor = FakeExecutor::new([Err("DISTINCTIVE_TRACEBACK".to_string()), Ok(())]);
+        let mut orchestrator = orchestrator(project.path(), services(&base_url), executor.clone());
+
+        let result = orchestrator.handle_chat("retry request").await;
+        server.await.unwrap();
+        assert!(matches!(result, OrchestratorResult::Success { .. }));
+        assert_eq!(
+            executor.executed_code(),
+            vec!["FIRST_BAD_CODE = True", "RETRY_GOOD_CODE = True"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(script_path).unwrap(),
+            "RETRY_GOOD_CODE = True"
+        );
+
+        let records = records.lock().unwrap();
+        let retry = &records[2];
+        assert_eq!(retry.path, "/v1/responses");
+        assert!(retry.authenticated);
+        assert_eq!(retry.body["model"], "recording-model");
+        let input = retry.body["input"].as_str().unwrap();
+        for expected in [
+            "DISTINCTIVE_TRACEBACK",
+            "DISTINCTIVE_RETRY_DOCS",
+            "ORIGINAL_CODE = 1",
+            "retry request",
+        ] {
+            assert!(input.contains(expected), "retry missing `{expected}`");
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_execution_failure_restores_original_script_and_reports_both_errors() {
+        let (base_url, _, server) = recording_server(vec![
+            completed("retry docs"),
+            completed("```python\nFIRST_BAD = True\n```\nSummary: First"),
+            completed("```python\nSECOND_BAD = True\n```\nSummary: Second"),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+        let mut orchestrator = orchestrator(
+            project.path(),
+            services(&base_url),
+            FakeExecutor::new([
+                Err("FIRST_EXECUTION_ERROR".to_string()),
+                Err("SECOND_EXECUTION_ERROR".to_string()),
+            ]),
+        );
+
+        let result = orchestrator.handle_chat("request").await;
+        server.await.unwrap();
+        match result {
+            OrchestratorResult::ExecutionFailed { error, .. } => {
+                assert!(error.contains("FIRST_EXECUTION_ERROR"));
+                assert!(error.contains("SECOND_EXECUTION_ERROR"));
+            }
+            _ => panic!("expected terminal execution failure"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(script_path).unwrap(),
+            "ORIGINAL_CODE = 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_provider_failure_restores_original_script() {
+        let (base_url, _, server) = recording_server(vec![
+            completed("retry docs"),
+            completed("```python\nFIRST_BAD = True\n```\nSummary: First"),
+            provider_failure(&format!("retry rejected {FAKE_CREDENTIAL}")),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+        let mut orchestrator = orchestrator(
+            project.path(),
+            services(&base_url),
+            FakeExecutor::new([Err("FIRST_EXECUTION_ERROR".to_string())]),
+        );
+
+        let result = orchestrator.handle_chat("request").await;
+        server.await.unwrap();
+        match result {
+            OrchestratorResult::BackendError(error) => {
+                assert!(error.contains("Retry failed"));
+                assert!(error.contains("FIRST_EXECUTION_ERROR"));
+                assert!(!error.contains(FAKE_CREDENTIAL));
+            }
+            _ => panic!("expected retry provider failure"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(script_path).unwrap(),
+            "ORIGINAL_CODE = 1"
+        );
+    }
+}
