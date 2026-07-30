@@ -689,6 +689,8 @@ mod tests {
 
     #[tokio::test]
     async fn traceback_retry_preserves_context_and_succeeds() {
+        use cadmark_core::geometry::{FaceId, TopologyElement};
+
         let first_edit = "```python\nFIRST_BAD_CODE = True\n```\nSummary: First";
         let retry_edit = "```python\nRETRY_GOOD_CODE = True\n```\nSummary: Retry";
         let (base_url, records, server) = recording_server(vec![
@@ -703,9 +705,29 @@ mod tests {
         let executor = FakeExecutor::new([Err("DISTINCTIVE_TRACEBACK".to_string()), Ok(())]);
         let mut orchestrator = orchestrator(project.path(), services(&base_url), executor.clone());
 
-        let result = orchestrator.handle_chat("retry request").await;
+        let mut identification = std::collections::HashMap::new();
+        identification.insert("feature".to_string(), "DISTINCTIVE_FEATURE".to_string());
+        let spatial_message_id = MessageId::new();
+        let result = orchestrator
+            .handle_spatial_comment(
+                spatial_message_id,
+                "retry request",
+                GeometryContext {
+                    element: TopologyElement::Face(FaceId(7)),
+                    source_line: Some(23),
+                    source_code: Some("DISTINCTIVE_SOURCE_SNIPPET".to_string()),
+                    identification,
+                },
+            )
+            .await;
         server.await.unwrap();
-        assert!(matches!(result, OrchestratorResult::Success { .. }));
+        assert!(matches!(
+            result,
+            OrchestratorResult::Success {
+                applied_spatial_message_id: Some(id),
+                ..
+            } if id == spatial_message_id
+        ));
         assert_eq!(
             executor.executed_code(),
             vec!["FIRST_BAD_CODE = True", "RETRY_GOOD_CODE = True"]
@@ -726,6 +748,10 @@ mod tests {
             "DISTINCTIVE_RETRY_DOCS",
             "ORIGINAL_CODE = 1",
             "retry request",
+            "face #7",
+            "line 23",
+            "DISTINCTIVE_SOURCE_SNIPPET",
+            "DISTINCTIVE_FEATURE",
         ] {
             assert!(input.contains(expected), "retry missing `{expected}`");
         }
