@@ -1,13 +1,23 @@
-// Main shaded mesh pass — Blinn-Phong lighting with selection glow.
+// Main shaded mesh pass — a studio light rig that travels with the camera,
+// so the model reads the same from every angle, plus selection and hover
+// highlights.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
     eye_pos: vec3<f32>,
+    // Non-zero when the colour target is not an sRGB format, so the shader
+    // must gamma-encode its linear result itself.
+    encode_srgb: u32,
+    // Key light direction (towards the light), world space, unit length.
+    key_light_dir: vec3<f32>,
     _pad0: f32,
+    // Fill light direction (towards the light), world space, unit length.
+    fill_light_dir: vec3<f32>,
+    _pad1: f32,
     selected_id: u32,
     hover_id: u32,
-    _pad1: u32,
     _pad2: u32,
+    _pad3: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }
@@ -38,23 +48,51 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+// Machined light-grey material, linear colour.
+const BASE_COLOUR: vec3<f32> = vec3<f32>(0.62, 0.64, 0.67);
+// Hemisphere ambient: cool sky above, warm dim ground below.
+const SKY_COLOUR: vec3<f32> = vec3<f32>(0.30, 0.33, 0.38);
+const GROUND_COLOUR: vec3<f32> = vec3<f32>(0.12, 0.11, 0.10);
+const KEY_COLOUR: vec3<f32> = vec3<f32>(1.00, 0.97, 0.92);
+const FILL_COLOUR: vec3<f32> = vec3<f32>(0.45, 0.50, 0.60);
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Blinn-Phong shading.
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let normal = normalize(in.world_normal);
+fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    var normal = normalize(in.world_normal);
+    // Both sides are lit: looking into an open shell or a section shows a
+    // shaded interior, not a black one.
+    if !front_facing {
+        normal = -normal;
+    }
     let view_dir = normalize(uniforms.eye_pos - in.world_pos);
-    let half_dir = normalize(light_dir + view_dir);
 
-    let ambient = 0.15;
-    let diffuse = max(dot(normal, light_dir), 0.0) * 0.7;
-    let specular = pow(max(dot(normal, half_dir), 0.0), 32.0) * 0.3;
+    // Ambient from the sky/ground hemisphere, keyed on world up (Y).
+    let hemisphere = normal.y * 0.5 + 0.5;
+    var colour = BASE_COLOUR * mix(GROUND_COLOUR, SKY_COLOUR, hemisphere);
 
-    // Base colour — neutral grey for CAD models.
-    let base_colour = vec3<f32>(0.7, 0.72, 0.75);
-    var colour = base_colour * (ambient + diffuse) + vec3<f32>(specular);
+    // Key light: diffuse plus a tight Blinn-Phong highlight.
+    let key_ndl = max(dot(normal, uniforms.key_light_dir), 0.0);
+    let key_half = normalize(uniforms.key_light_dir + view_dir);
+    let key_spec = pow(max(dot(normal, key_half), 0.0), 48.0) * 0.35;
+    colour += BASE_COLOUR * KEY_COLOUR * key_ndl * 0.85 + KEY_COLOUR * key_spec;
 
-    // Selection glow — additive blend on the selected face.
+    // Fill light: soft, cool, from the opposite side.
+    let fill_ndl = max(dot(normal, uniforms.fill_light_dir), 0.0);
+    colour += BASE_COLOUR * FILL_COLOUR * fill_ndl * 0.45;
+
+    // Rim: lifts silhouettes so the outline stays legible against the
+    // background whichever way the model is turned.
+    let facing = max(dot(normal, view_dir), 0.0);
+    let rim = pow(1.0 - facing, 3.0) * 0.18;
+    colour += SKY_COLOUR * rim;
+
+    // Selection and hover tints.
     let fid = u32(in.face_id + 0.5);
     if fid == uniforms.selected_id && uniforms.selected_id != 0u {
         colour = mix(colour, uniforms.selected_colour.rgb, uniforms.selected_colour.a);
@@ -62,5 +100,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a);
     }
 
+    colour = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
+    if uniforms.encode_srgb != 0u {
+        colour = linear_to_srgb(colour);
+    }
     return vec4<f32>(colour, 1.0);
 }

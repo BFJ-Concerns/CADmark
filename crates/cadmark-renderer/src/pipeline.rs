@@ -18,29 +18,36 @@ pub struct SelectionStyle {
 
 impl Default for SelectionStyle {
     fn default() -> Self {
+        // Linear colour; the shader display-encodes when the target needs it.
         Self {
-            selected_colour: [0.3, 0.6, 1.0, 0.8],
-            hover_colour: [0.5, 0.7, 1.0, 0.4],
+            selected_colour: [0.12, 0.42, 1.0, 0.7],
+            hover_colour: [0.3, 0.6, 1.0, 0.35],
         }
     }
 }
 
-/// Uniforms for the main mesh shader.
+/// Uniforms shared by the mesh and wireframe shaders.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct MeshUniforms {
     pub view_proj: [[f32; 4]; 4],
     pub eye_pos: [f32; 3],
+    /// Non-zero when the shader must gamma-encode its linear result because
+    /// the colour target is not an sRGB format.
+    pub encode_srgb: u32,
+    pub key_light_dir: [f32; 3],
     pub _pad0: f32,
+    pub fill_light_dir: [f32; 3],
+    pub _pad1: f32,
     pub selected_id: u32,
     pub hover_id: u32,
-    pub _pad1: u32,
     pub _pad2: u32,
+    pub _pad3: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
 }
 
-/// Uniforms for the picking and wireframe shaders (just view_proj).
+/// Uniforms for the picking shader (just view_proj).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimpleUniforms {
@@ -59,12 +66,11 @@ pub struct RenderPipelines {
     pub picking_bind_group: wgpu::BindGroup,
     pub edge_picking_pipeline: wgpu::RenderPipeline,
 
+    /// Wireframe overlay; reads `mesh_uniform_buffer` through `mesh_bind_group`.
     pub wireframe_pipeline: wgpu::RenderPipeline,
-    pub wireframe_uniform_buffer: wgpu::Buffer,
-    pub wireframe_bind_group: wgpu::BindGroup,
 
-    /// Shared bind group layout for picking and wireframe passes
-    /// (single uniform buffer at binding 0, vertex-stage visibility).
+    /// Bind group layout for the picking passes (single uniform buffer at
+    /// binding 0, vertex-stage visibility).
     pub simple_bind_group_layout: wgpu::BindGroupLayout,
 
     pub depth_texture: wgpu::TextureView,
@@ -180,8 +186,8 @@ impl RenderPipelines {
             cache: None,
         });
 
-        // Shared layout for picking and wireframe — both need a single
-        // uniform buffer at binding 0 with vertex-stage visibility.
+        // Picking layout — a single uniform buffer at binding 0 with
+        // vertex-stage visibility.
         let simple_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("simple_bind_group_layout"),
@@ -320,26 +326,10 @@ impl RenderPipelines {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/wireframe.wgsl").into()),
         });
 
-        let wireframe_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wireframe_uniforms"),
-            size: std::mem::size_of::<SimpleUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let wireframe_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("wireframe_bind_group"),
-            layout: &simple_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wireframe_uniform_buffer.as_entire_binding(),
-            }],
-        });
-
         let wireframe_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("wireframe_pipeline_layout"),
-                bind_group_layouts: &[&simple_bind_group_layout],
+                bind_group_layouts: &[&mesh_bind_group_layout],
                 push_constant_ranges: &[],
             });
 
@@ -485,8 +475,6 @@ impl RenderPipelines {
             picking_bind_group,
             edge_picking_pipeline,
             wireframe_pipeline,
-            wireframe_uniform_buffer,
-            wireframe_bind_group,
             simple_bind_group_layout,
             depth_texture,
             viewport_colour_view,
@@ -575,6 +563,9 @@ pub struct Renderer {
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
+    /// Whether the colour target stores sRGB-encoded values itself. When it
+    /// does not, the shader gamma-encodes its output.
+    pub target_is_srgb: bool,
 }
 
 impl Renderer {
@@ -587,6 +578,7 @@ impl Renderer {
             mesh: None,
             selected_id: 0,
             hover_id: 0,
+            target_is_srgb: false,
         }
     }
 
@@ -618,14 +610,20 @@ impl Renderer {
         let proj = self.camera.projection_matrix(aspect_ratio);
         let view_proj = mat4_mul(proj, view);
 
+        let lights = self.camera.light_rig();
+
         MeshUniforms {
             view_proj,
             eye_pos: self.camera.eye_position(),
+            encode_srgb: u32::from(!self.target_is_srgb),
+            key_light_dir: lights.key,
             _pad0: 0.0,
+            fill_light_dir: lights.fill,
+            _pad1: 0.0,
             selected_id: self.selected_id,
             hover_id: self.hover_id,
-            _pad1: 0,
             _pad2: 0,
+            _pad3: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
         }
