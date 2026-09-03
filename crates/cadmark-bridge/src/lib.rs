@@ -18,6 +18,11 @@ pub struct AiServices {
 }
 
 impl AiServices {
+    /// The model name both consumers send requests to.
+    pub fn model_name(&self) -> &str {
+        self.model_edit.model_name()
+    }
+
     /// Make a minimal credential-safe provider request for the ignored live smoke test.
     #[doc(hidden)]
     pub async fn smoke_test_exact_sentinel(

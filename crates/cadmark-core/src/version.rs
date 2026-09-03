@@ -97,6 +97,25 @@ impl VersionHistory {
         self.current_index + 1 < self.versions.len()
     }
 
+    /// The version undo would restore, without moving.
+    pub fn peek_undo(&self) -> Option<&Microversion> {
+        self.can_undo()
+            .then(|| self.versions.get(self.current_index + 1))
+            .flatten()
+    }
+
+    /// The version redo would restore, without moving.
+    pub fn peek_redo(&self) -> Option<&Microversion> {
+        self.can_redo()
+            .then(|| self.versions.get(self.current_index - 1))
+            .flatten()
+    }
+
+    /// Index of the active version within `recent()` (0 = newest).
+    pub fn current_index(&self) -> usize {
+        self.current_index
+    }
+
     pub fn can_redo(&self) -> bool {
         self.current_index > 0
     }
@@ -130,6 +149,22 @@ impl Default for VersionHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peeking_reports_the_neighbours_without_moving() {
+        let mut history = VersionHistory::new();
+        history.push(make_version("a", "first"));
+        history.push(make_version("b", "second"));
+        history.push(make_version("c", "third"));
+        assert_eq!(history.peek_undo().unwrap().summary, "second");
+        assert!(history.peek_redo().is_none());
+        assert_eq!(history.current_index(), 0);
+
+        history.undo();
+        assert_eq!(history.current_index(), 1);
+        assert_eq!(history.peek_undo().unwrap().summary, "first");
+        assert_eq!(history.peek_redo().unwrap().summary, "third");
+    }
 
     fn make_version(hash: &str, summary: &str) -> Microversion {
         Microversion {

@@ -6,8 +6,9 @@
 // egui_wgpu's callback_resources so the paint callback can access
 // them without lifetime gymnastics.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant, SystemTime};
 
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification};
 use cadmark_core::export::ExportFormat;
@@ -19,11 +20,15 @@ use cadmark_kernel::execution::ExecutionResult;
 use cadmark_kernel::export::ModelHandle;
 use cadmark_renderer::camera::Bounds3;
 use cadmark_renderer::pipeline::Renderer;
-use cadmark_ui::chat::ChatPane;
+use cadmark_ui::chat::{ChatActivity, ChatPane};
+use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::OverlayState;
+use cadmark_ui::status::{Status, StatusView};
 use cadmark_ui::toolbar::{ToolbarAction, ToolbarState};
+use cadmark_ui::version_dialog::{VersionDialog, VersionDialogAction};
 
 use crate::orchestrator::{ModelOrigin, OrchestratorCommand, OrchestratorResult};
+use crate::user_settings::RecentProjects;
 
 // ── Viewport GPU resources ──────────────────────────────────────────
 
@@ -191,6 +196,8 @@ struct ViewportCallback {
     hover_request: Option<(u32, u32)>,
     /// Viewport size in physical pixels (for resize detection).
     viewport_size: (u32, u32),
+    /// Background colour in the offscreen target's own colour space.
+    clear_colour: wgpu::Color,
 }
 
 impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
@@ -346,38 +353,36 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                 queue.submit(std::iter::once(hover_encoder.finish()));
                 res.hover.begin_readback();
             }
+        }
 
-            // ── Offscreen main viewport pass (with depth) ──
-            // The egui paint callback's render pass has no depth attachment,
-            // so we render the shaded mesh + wireframe here with our own
-            // depth texture, then blit the result in paint().
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("viewport_main_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &res.pipelines.viewport_colour_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color {
-                                r: 30.0 / 255.0,
-                                g: 30.0 / 255.0,
-                                b: 35.0 / 255.0,
-                                a: 1.0,
-                            }),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &res.pipelines.depth_texture,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
+        // ── Offscreen main viewport pass (with depth) ──
+        // The egui paint callback's render pass has no depth attachment,
+        // so we render the shaded mesh + wireframe here with our own
+        // depth texture, then blit the result in paint(). The pass always
+        // runs so that clearing the model leaves no stale render behind.
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport_main_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &res.pipelines.viewport_colour_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(self.clear_colour),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &res.pipelines.depth_texture,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
                     }),
-                    ..Default::default()
-                });
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
 
+            if let Some(mesh) = &res.mesh {
                 // Shaded mesh pass.
                 pass.set_pipeline(&res.pipelines.mesh_pipeline);
                 pass.set_bind_group(0, &res.pipelines.mesh_bind_group, &[]);
@@ -431,7 +436,10 @@ fn encode_picking_passes(
                 view: &picking.texture_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    // Every channel must clear to zero: the texture is
+                    // Rgba8Uint, so an alpha of 1.0 would land as the byte
+                    // 1 and decode as a vertex rather than the background.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -486,6 +494,9 @@ fn encode_picking_passes(
 
 const SCRIPT_FILENAME: &str = "part.py";
 
+/// How often the script on disk is compared with the model on screen.
+const SCRIPT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
+
 /// What the worker thread is doing, for the status bar and chat spinner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Busy {
@@ -502,27 +513,11 @@ impl Busy {
             Self::Building => "Building model\u{2026}",
         }
     }
-}
 
-/// A line for the status bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Status {
-    text: String,
-    is_error: bool,
-}
-
-impl Status {
-    fn info(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            is_error: false,
-        }
-    }
-
-    fn error(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            is_error: true,
+    fn chat_activity(self) -> ChatActivity {
+        match self {
+            Self::Generating => ChatActivity::Generating,
+            Self::Building => ChatActivity::Building,
         }
     }
 }
@@ -559,6 +554,97 @@ fn edit_chat_message(
     message
 }
 
+/// The offscreen target's clear colour for the theme's viewport background.
+/// An sRGB target stores linear values and encodes on write; any other
+/// target stores what it is given and the shader encodes its own output.
+fn viewport_clear_colour(target_is_srgb: bool) -> wgpu::Color {
+    let channel = |value: u8| {
+        let gamma = f64::from(value) / 255.0;
+        if target_is_srgb {
+            if gamma <= 0.04045 {
+                gamma / 12.92
+            } else {
+                ((gamma + 0.055) / 1.055).powf(2.4)
+            }
+        } else {
+            gamma
+        }
+    };
+    let colour = cadmark_ui::theme::VIEWPORT;
+    wgpu::Color {
+        r: channel(colour.r()),
+        g: channel(colour.g()),
+        b: channel(colour.b()),
+        a: 1.0,
+    }
+}
+
+/// Everything that is replaced when a different project folder is opened.
+struct ProjectSession {
+    project_dir: PathBuf,
+    cmd_tx: mpsc::Sender<OrchestratorCommand>,
+    result_rx: mpsc::Receiver<OrchestratorResult<ExecutionResult>>,
+    history: VersionHistory,
+    conversation: Conversation,
+    ai_model: Option<String>,
+}
+
+/// Prepare a project folder and start a worker for it.
+fn start_project(project_dir: PathBuf) -> ProjectSession {
+    let project_dir = project_dir.canonicalize().unwrap_or(project_dir);
+
+    // Ensure the project directory has a git repo for microversioning.
+    if let Err(e) = crate::git_ops::ensure_repo(&project_dir) {
+        log::error!(
+            "Failed to initialise git repo in {}: {e}",
+            project_dir.display()
+        );
+    }
+
+    let mut conversation = Conversation::new();
+    conversation.push(Message::notice(
+        "Describe what you'd like to build, or click a face, edge or vertex of the \
+         model to comment on it. Every accepted edit is saved to part.py in the \
+         project folder and recorded as a design step.",
+    ));
+
+    let services = crate::config::load_ai_services(&project_dir).map_err(|error| {
+        let reason = error.to_string();
+        log::warn!("{reason}");
+        conversation.push(Message::notice(format!(
+            "AI is unavailable: {reason}. The model still loads, and you can edit \
+             {SCRIPT_FILENAME} by hand and press Rebuild."
+        )));
+        reason
+    });
+    let ai_model = services
+        .as_ref()
+        .ok()
+        .map(|services| services.model_name().to_string());
+    let (cmd_tx, result_rx) = crate::orchestrator::spawn_orchestrator(
+        project_dir.clone(),
+        SCRIPT_FILENAME.to_string(),
+        services,
+    );
+
+    let history = match crate::git_ops::list_microversions(&project_dir, 100) {
+        Ok(versions) => VersionHistory::from_versions(versions),
+        Err(e) => {
+            log::warn!("Failed to load microversion history: {e}");
+            VersionHistory::new()
+        }
+    };
+
+    ProjectSession {
+        project_dir,
+        cmd_tx,
+        result_rx,
+        history,
+        conversation,
+        ai_model,
+    }
+}
+
 /// Top-level application state.
 pub struct CadmarkApp {
     /// Conversation history displayed in the chat pane.
@@ -585,6 +671,8 @@ pub struct CadmarkApp {
     export_tx: mpsc::Sender<ExportOutcome>,
     export_rx: mpsc::Receiver<ExportOutcome>,
     exports_in_flight: usize,
+    /// A folder picker running on its own thread reports here.
+    folder_pick_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: ProvenanceLedger,
     /// Active identification strategy for geometry context. Rebuilt from the
@@ -592,6 +680,28 @@ pub struct CadmarkApp {
     pub identification_strategy: Box<dyn IdentificationStrategy>,
     /// The model on screen, if a script has executed successfully.
     model: Option<LoadedModel>,
+    /// The source that produced the model on screen.
+    script_source: Option<String>,
+    /// Whether the script exists on disk, whether or not it runs.
+    has_script: bool,
+    /// Modification time of the script when the model was last built, and
+    /// when it was last compared with disk.
+    script_mtime: Option<SystemTime>,
+    script_checked_at: Instant,
+    /// Whether the script on disk differs from the model on screen.
+    script_modified_on_disk: bool,
+    /// Code panel state and visibility.
+    code_panel: CodePanel,
+    code_visible: bool,
+    /// Source line of the selected element, when its provenance is known.
+    highlighted_line: Option<u32>,
+    /// The version-naming dialog.
+    version_dialog: VersionDialog,
+    /// Recently opened project folders and where they are stored.
+    recent_projects: RecentProjects,
+    recent_projects_path: Option<PathBuf>,
+    /// The AI model in use, for the toolbar badge.
+    ai_model: Option<String>,
     /// Tessellated mesh waiting for GPU upload (set after script
     /// execution, consumed in `update()` when the render state is
     /// accessible).
@@ -625,12 +735,7 @@ pub struct CadmarkApp {
 
 impl CadmarkApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // On first launch, add an initial AI message.
-        let mut conversation = Conversation::new();
-        conversation.push(Message::ai_response(
-            "Welcome to CADmark. Describe what you'd like to build, or click a \
-             face, edge or vertex of the model to comment on it.",
-        ));
+        cadmark_ui::theme::apply(&cc.egui_ctx);
 
         // If a project dir was passed as a CLI argument, use it;
         // otherwise default to the current working directory.
@@ -645,28 +750,7 @@ impl CadmarkApp {
             log::error!("Failed to activate Python venv: {e}");
         }
 
-        // Ensure the project directory has a git repo for microversioning.
-        if let Err(e) = crate::git_ops::ensure_repo(&project_dir) {
-            log::error!(
-                "Failed to initialise git repo in {}: {e}",
-                project_dir.display()
-            );
-        }
-
-        let services = crate::config::load_ai_services(&project_dir).map_err(|error| {
-            let reason = error.to_string();
-            log::warn!("{reason}");
-            conversation.push(Message::ai_response(format!(
-                "AI is unavailable: {reason}. The model still loads, and you can \
-                 edit {SCRIPT_FILENAME} by hand and press Refresh."
-            )));
-            reason
-        });
-        let (cmd_tx, result_rx) = crate::orchestrator::spawn_orchestrator(
-            project_dir.clone(),
-            SCRIPT_FILENAME.to_string(),
-            services,
-        );
+        let session = start_project(project_dir);
 
         // Initialise GPU resources and insert into callback_resources
         // so the paint callback can reach them.
@@ -709,32 +793,49 @@ impl CadmarkApp {
             rs.renderer.write().callback_resources.insert(resources);
         }
 
-        let history = match crate::git_ops::list_microversions(&project_dir, 100) {
-            Ok(versions) => VersionHistory::from_versions(versions),
-            Err(e) => {
-                log::warn!("Failed to load microversion history: {e}");
-                VersionHistory::new()
-            }
-        };
+        let recent_projects_path = RecentProjects::default_path();
+        let mut recent_projects = recent_projects_path
+            .as_deref()
+            .map(RecentProjects::load)
+            .unwrap_or_default();
+        recent_projects.remember(&session.project_dir);
+        if let Some(path) = &recent_projects_path
+            && let Err(error) = recent_projects.save(path)
+        {
+            log::warn!("Could not save the recent-projects list: {error}");
+        }
 
         let (export_tx, export_rx) = mpsc::channel();
         let mut app = Self {
-            conversation,
+            conversation: session.conversation,
             chat: ChatPane::new(),
             overlay: OverlayState::default(),
-            history,
+            history: session.history,
             renderer: Renderer::new(),
             selection: SelectionState::None,
-            project_dir,
+            project_dir: session.project_dir,
             busy: None,
-            cmd_tx,
-            result_rx,
+            cmd_tx: session.cmd_tx,
+            result_rx: session.result_rx,
             export_tx,
             export_rx,
             exports_in_flight: 0,
+            folder_pick_rx: None,
             ledger: ProvenanceLedger::new(),
             identification_strategy: Box::new(cadmark_core::context::NullIdentification),
             model: None,
+            script_source: None,
+            has_script: false,
+            script_mtime: None,
+            script_checked_at: Instant::now(),
+            script_modified_on_disk: false,
+            code_panel: CodePanel::default(),
+            code_visible: false,
+            highlighted_line: None,
+            version_dialog: VersionDialog::default(),
+            recent_projects,
+            recent_projects_path,
+            ai_model: session.ai_model,
             pending_mesh: None,
             pending_camera_bounds: None,
             pending_pick: None,
@@ -749,8 +850,79 @@ impl CadmarkApp {
             .wgpu_render_state
             .as_ref()
             .is_some_and(|rs| rs.target_format.is_srgb());
+        app.chat.ai_available = app.ai_model.is_some();
+        app.apply_window_title(&cc.egui_ctx);
         app.request_reload();
         app
+    }
+
+    fn script_path(&self) -> PathBuf {
+        self.project_dir.join(SCRIPT_FILENAME)
+    }
+
+    fn apply_window_title(&self, ctx: &egui::Context) {
+        let name = cadmark_ui::toolbar::project_display_name(&self.project_dir);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "{name} \u{2014} CADmark"
+        )));
+    }
+
+    /// Switch to another project folder: a new worker, history and
+    /// conversation, with the viewport cleared until its script has run.
+    fn open_project(&mut self, ctx: &egui::Context, project_dir: PathBuf) {
+        if self.busy.is_some() {
+            return;
+        }
+        let session = start_project(project_dir);
+        self.project_dir = session.project_dir;
+        self.cmd_tx = session.cmd_tx;
+        self.result_rx = session.result_rx;
+        self.history = session.history;
+        self.conversation = session.conversation;
+        self.ai_model = session.ai_model;
+        self.chat = ChatPane::new();
+        self.chat.ai_available = self.ai_model.is_some();
+        self.script_source = None;
+        self.has_script = false;
+        self.script_mtime = None;
+        self.script_modified_on_disk = false;
+        self.status = None;
+        self.clear_loaded_model();
+        self.renderer.camera = cadmark_renderer::camera::Camera::default();
+
+        self.recent_projects.remember(&self.project_dir);
+        if let Some(path) = &self.recent_projects_path
+            && let Err(error) = self.recent_projects.save(path)
+        {
+            log::warn!("Could not save the recent-projects list: {error}");
+        }
+        self.apply_window_title(ctx);
+        self.request_reload();
+    }
+
+    /// Show the system folder picker on its own thread; the choice is
+    /// collected in `poll_results`.
+    fn pick_project_folder(&mut self) {
+        if self.folder_pick_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let start_in = self
+            .project_dir
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.project_dir.clone());
+        std::thread::Builder::new()
+            .name("cadmark-folder-picker".into())
+            .spawn(move || {
+                let choice = rfd::FileDialog::new()
+                    .set_title("Open a CADmark project folder")
+                    .set_directory(start_in)
+                    .pick_folder();
+                let _ = tx.send(choice);
+            })
+            .expect("failed to spawn the folder picker thread");
+        self.folder_pick_rx = Some(rx);
     }
 
     /// Hand a command to the worker and record what it is now doing.
@@ -791,21 +963,30 @@ impl CadmarkApp {
     }
 
     /// Poll for worker results (non-blocking).
-    fn poll_results(&mut self) {
+    fn poll_results(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.result_rx.try_recv() {
             self.busy = None;
             match result {
-                OrchestratorResult::ModelReady { model, origin } => {
-                    self.install_model(model, origin);
+                OrchestratorResult::ModelReady {
+                    model,
+                    origin,
+                    source,
+                } => {
+                    self.install_model(model, origin, source);
                 }
                 OrchestratorResult::ExecutionFailed { ai_message, error } => {
-                    self.conversation.push(Message::ai_response(format!(
-                        "{ai_message}\n\nThat code failed to run, so the previous model \
-                         was kept:\n{error}"
+                    self.conversation.push(Message::ai_response(ai_message));
+                    self.conversation.push(Message::error_notice(format!(
+                        "That code failed to run, so the previous model was kept.\n\n{error}"
                     )));
+                    self.record_script_state();
                 }
                 OrchestratorResult::NoScript => {
                     self.clear_loaded_model();
+                    self.script_source = None;
+                    self.has_script = false;
+                    self.script_mtime = None;
+                    self.script_modified_on_disk = false;
                     self.status = Some(Status::info(format!(
                         "No {SCRIPT_FILENAME} yet \u{2014} describe a part to get started"
                     )));
@@ -813,14 +994,16 @@ impl CadmarkApp {
                 OrchestratorResult::ReloadFailed { error } => {
                     log::error!("Script execution failed: {error}");
                     self.clear_loaded_model();
+                    self.has_script = true;
+                    self.record_script_state();
                     self.status = Some(Status::error(format!("Execution error: {error}")));
-                    self.conversation.push(Message::ai_response(format!(
-                        "{SCRIPT_FILENAME} failed to run:\n{error}"
+                    self.conversation.push(Message::error_notice(format!(
+                        "{SCRIPT_FILENAME} failed to run.\n\n{error}"
                     )));
                 }
                 OrchestratorResult::BackendError(error) => {
                     self.conversation
-                        .push(Message::ai_response(format!("AI error: {error}")));
+                        .push(Message::error_notice(format!("AI error: {error}")));
                 }
             }
         }
@@ -838,10 +1021,46 @@ impl CadmarkApp {
                 }
             });
         }
+
+        if let Some(rx) = &self.folder_pick_rx {
+            match rx.try_recv() {
+                Ok(Some(folder)) => {
+                    self.folder_pick_rx = None;
+                    self.open_project(ctx, folder);
+                }
+                Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
+                    self.folder_pick_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    /// Remember the script's modification time so later edits on disk can
+    /// be noticed.
+    fn record_script_state(&mut self) {
+        self.script_mtime = std::fs::metadata(self.script_path())
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        self.script_modified_on_disk = false;
+        self.script_checked_at = Instant::now();
+    }
+
+    /// Compare the script on disk with the model on screen, at most once
+    /// per watch interval.
+    fn watch_script(&mut self) {
+        if !self.has_script || self.script_checked_at.elapsed() < SCRIPT_WATCH_INTERVAL {
+            return;
+        }
+        self.script_checked_at = Instant::now();
+        let on_disk = std::fs::metadata(self.script_path())
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        self.script_modified_on_disk = on_disk != self.script_mtime;
     }
 
     /// Take a freshly executed model on screen.
-    fn install_model(&mut self, result: ExecutionResult, origin: ModelOrigin) {
+    fn install_model(&mut self, result: ExecutionResult, origin: ModelOrigin, source: String) {
         let previous_summary = self.model.as_ref().map(|model| model.summary.clone());
         let first_model = self.model.is_none();
 
@@ -875,7 +1094,7 @@ impl CadmarkApp {
             result.mesh.vertices.len(),
             result.ledger.len(),
         );
-        let mut status = format!("Model loaded: {}", result.summary.describe());
+        let mut status = format!("Built {SCRIPT_FILENAME}");
         let untraced = result.ledger.untraced_count();
         if untraced > 0 {
             status.push_str(&format!(
@@ -901,12 +1120,16 @@ impl CadmarkApp {
             handle: result.model,
         });
         self.pending_mesh = Some(result.mesh);
+        self.script_source = Some(source);
+        self.has_script = true;
+        self.record_script_state();
     }
 
     fn clear_selection(&mut self) {
         self.selection = SelectionState::None;
         self.renderer.selected_id = 0;
         self.renderer.hover_id = 0;
+        self.highlighted_line = None;
         self.overlay.close();
     }
 
@@ -951,6 +1174,22 @@ impl CadmarkApp {
         }
     }
 
+    /// Record the current script as a named version.
+    fn save_named_version(&mut self, name: String) {
+        match crate::git_ops::create_snapshot(&self.project_dir, &name, SCRIPT_FILENAME) {
+            Ok(version) => {
+                self.history.push(version);
+                self.status = Some(Status::info(format!(
+                    "Saved version \u{201C}{name}\u{201D}"
+                )));
+            }
+            Err(e) => {
+                log::error!("Naming a version failed: {e}");
+                self.status = Some(Status::error(format!("Could not save the version: {e}")));
+            }
+        }
+    }
+
     /// Write the current model next to the script, on a background thread.
     fn export(&mut self, format: ExportFormat) {
         let Some(model) = &self.model else {
@@ -972,6 +1211,14 @@ impl CadmarkApp {
                 .map_err(|error| error.to_string());
             let _ = tx.send(ExportOutcome { format, result });
         });
+    }
+
+    /// Open a path with the system's default handler, reporting failure in
+    /// the status bar.
+    fn open_externally(&mut self, path: &Path, what: &str) {
+        if let Err(error) = open::that_detached(path) {
+            self.status = Some(Status::error(format!("Could not open {what}: {error}")));
+        }
     }
 
     /// Handle a completed pick result — resolve to selection and open the
@@ -1000,6 +1247,8 @@ impl CadmarkApp {
                     element.display_label(),
                     context.provenance.describe()
                 );
+                self.highlighted_line =
+                    context.provenance.resolved().map(|entry| entry.source.line);
                 self.overlay.open(
                     ScreenPosition {
                         x: screen_pos.0,
@@ -1060,13 +1309,445 @@ impl CadmarkApp {
         }
 
         match completed_pick_transition(completed, &mut self.pick_in_flight) {
-            PickTransition::Waiting | PickTransition::Background => {}
+            PickTransition::Waiting => {}
+            PickTransition::Background => {
+                // A click on empty space puts the selection down.
+                if self.overlay.is_active() {
+                    self.clear_selection();
+                }
+            }
             PickTransition::Hit(element, screen_pos) => {
                 self.handle_pick_result(element, screen_pos);
             }
             PickTransition::ReadbackFailed => {
                 self.status = Some(Status::error("Selection failed: GPU pick readback failed"));
             }
+        }
+    }
+
+    // ── Frame composition ───────────────────────────────────────────
+
+    /// Keyboard shortcuts that act on the whole window. Shortcuts with a
+    /// modifier are honoured everywhere except where a text field claims
+    /// them; bare keys only when no text field has focus.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) -> ToolbarAction {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let typing = ctx.wants_keyboard_input();
+        let idle = self.busy.is_none() && !self.version_dialog.is_open();
+        let mut action = ToolbarAction::None;
+        ctx.input_mut(|input| {
+            if !typing
+                && idle
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z))
+            {
+                action = ToolbarAction::Undo;
+            } else if !typing
+                && idle
+                && input.consume_shortcut(&KeyboardShortcut::new(
+                    Modifiers::COMMAND | Modifiers::SHIFT,
+                    Key::Z,
+                ))
+            {
+                action = ToolbarAction::Redo;
+            } else if idle
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O))
+            {
+                action = ToolbarAction::OpenProject;
+            } else if idle
+                && self.has_script
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S))
+            {
+                action = ToolbarAction::NameVersion;
+            } else if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::E)) {
+                action = ToolbarAction::ToggleCode;
+            } else if idle
+                && self.has_script
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F5))
+            {
+                action = ToolbarAction::Refresh;
+            } else if !typing
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F))
+            {
+                action = ToolbarAction::FitView;
+            }
+        });
+        action
+    }
+
+    fn apply_toolbar_action(&mut self, ctx: &egui::Context, action: ToolbarAction) {
+        match action {
+            ToolbarAction::Undo => {
+                if let Some(version) = self.history.undo() {
+                    let hash = version.commit_hash.clone();
+                    self.restore_version(hash);
+                }
+            }
+            ToolbarAction::Redo => {
+                if let Some(version) = self.history.redo() {
+                    let hash = version.commit_hash.clone();
+                    self.restore_version(hash);
+                }
+            }
+            ToolbarAction::JumpToVersion(idx) => {
+                if let Some(version) = self.history.jump_to(idx) {
+                    let hash = version.commit_hash.clone();
+                    self.restore_version(hash);
+                }
+            }
+            ToolbarAction::NameVersion => self.version_dialog.open(),
+            ToolbarAction::OpenProject => self.pick_project_folder(),
+            ToolbarAction::OpenRecent(path) => self.open_project(ctx, path),
+            ToolbarAction::RevealProject => {
+                let dir = self.project_dir.clone();
+                self.open_externally(&dir, "the project folder");
+            }
+            ToolbarAction::OpenScriptInEditor => {
+                let path = self.script_path();
+                self.open_externally(&path, SCRIPT_FILENAME);
+            }
+            ToolbarAction::Refresh => {
+                log::info!("Manual refresh requested");
+                self.request_reload();
+            }
+            ToolbarAction::FitView => {
+                self.pending_camera_bounds = self.model.as_ref().and_then(|model| model.bounds);
+            }
+            ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
+            ToolbarAction::Export(format) => self.export(format),
+            ToolbarAction::None => {}
+        }
+    }
+
+    fn show_code_panel(&mut self, ctx: &egui::Context) {
+        let mut action = CodePanelAction::None;
+        egui::TopBottomPanel::bottom("code_panel")
+            .resizable(true)
+            .default_height(240.0)
+            .height_range(120.0..=600.0)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
+            .show(ctx, |ui| {
+                action = self.code_panel.show(
+                    ui,
+                    CodeView {
+                        script_filename: SCRIPT_FILENAME,
+                        source: self.script_source.as_deref(),
+                        highlighted_line: self.highlighted_line,
+                        modified_on_disk: self.script_modified_on_disk,
+                        controls_enabled: self.busy.is_none(),
+                    },
+                );
+            });
+        match action {
+            CodePanelAction::Copy => {
+                if let Some(source) = &self.script_source {
+                    ctx.copy_text(source.clone());
+                    self.status = Some(Status::info(format!("Copied {SCRIPT_FILENAME}")));
+                }
+            }
+            CodePanelAction::OpenInEditor => {
+                let path = self.script_path();
+                self.open_externally(&path, SCRIPT_FILENAME);
+            }
+            CodePanelAction::Refresh => self.request_reload(),
+            CodePanelAction::None => {}
+        }
+    }
+
+    fn show_viewport(&mut self, ctx: &egui::Context) {
+        let frame = egui::Frame::NONE.fill(cadmark_ui::theme::VIEWPORT);
+        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+            let available = ui.available_size();
+            let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+
+            // Handle viewport input — CAD navigation.
+            if response.dragged_by(egui::PointerButton::Secondary) {
+                let delta = response.drag_delta();
+                self.renderer.camera.orbit(delta.x, delta.y);
+            }
+
+            if response.dragged_by(egui::PointerButton::Middle) {
+                let delta = response.drag_delta();
+                self.renderer.camera.pan(delta.x, delta.y);
+            }
+
+            let scroll = ui.input(|i| i.raw_scroll_delta.y);
+            if response.hovered() && scroll.abs() > 0.1 {
+                self.renderer.camera.zoom(scroll * 0.01);
+            }
+
+            // Left click for selection — request a pick readback.
+            if response.clicked()
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                let local_pos = pos - rect.min;
+                // Local coordinates feed the GPU picking texture.
+                self.pending_pick = Some((local_pos.x, local_pos.y));
+                // Absolute coordinates position the overlay on result.
+                self.pick_in_flight = Some((pos.x, pos.y));
+                log::debug!("Pick requested at ({}, {})", local_pos.x, local_pos.y);
+            }
+
+            // Escape cancels selection and overlay.
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.clear_selection();
+            }
+
+            // Hover: pick under the cursor while it rests over the model,
+            // but not mid-drag, when the view is moving under it.
+            let hover_local = if self.has_mesh && response.hovered() && !response.dragged() {
+                response.hover_pos().map(|pos| pos - rect.min)
+            } else {
+                None
+            };
+            if hover_local.is_none() {
+                self.renderer.hover_id = 0;
+            }
+            if self.renderer.hover_id != 0 {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+
+            // ── Viewport rendering ──────────────────────────────────
+
+            // Background rect — always drawn so the viewport has a
+            // consistent fill even before any mesh is loaded.
+            ui.painter()
+                .rect_filled(rect, 0.0, cadmark_ui::theme::VIEWPORT);
+
+            // Build the paint callback that drives the wgpu renderer.
+            let ppp = ctx.pixels_per_point();
+            let viewport_size = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
+            let aspect = rect.width() / rect.height().max(1.0);
+
+            if let Some(bounds) = self.pending_camera_bounds.take() {
+                self.renderer.camera.frame_bounds(bounds, aspect);
+                log::info!(
+                    "Camera framed model at {:?}, distance {}",
+                    self.renderer.camera.target,
+                    self.renderer.camera.distance
+                );
+            }
+
+            // Consume the pending pick (local coords → pixel coords).
+            let to_pixels = |local: egui::Vec2| ((local.x * ppp) as u32, (local.y * ppp) as u32);
+            let pick_request = self
+                .pending_pick
+                .take()
+                .map(|(x, y)| to_pixels(egui::vec2(x, y)));
+            let hover_request = hover_local.map(to_pixels).filter(|&pixel| {
+                let probe = (pixel, self.renderer.camera.clone());
+                if self.last_hover_probe.as_ref() == Some(&probe) {
+                    return false;
+                }
+                self.last_hover_probe = Some(probe);
+                true
+            });
+            if hover_request.is_some() {
+                self.hover_readback_pending = true;
+            }
+
+            let callback = eframe::egui_wgpu::Callback::new_paint_callback(
+                rect,
+                ViewportCallback {
+                    mesh_uniforms: self.renderer.mesh_uniforms(aspect),
+                    simple_uniforms: self.renderer.simple_uniforms(aspect),
+                    pick_request,
+                    hover_request,
+                    viewport_size,
+                    clear_colour: viewport_clear_colour(self.renderer.target_is_srgb),
+                },
+            );
+            ui.painter().add(callback);
+
+            // Placeholder when no mesh is loaded yet — show the status
+            // (including errors) so issues are visible without checking logs.
+            if !self.has_mesh {
+                self.paint_viewport_placeholder(ui, rect);
+            }
+
+            // Show the spatial comment overlay if active.
+            let overlay_action = self.overlay.show(ui, rect);
+            match overlay_action {
+                cadmark_ui::overlay::OverlayAction::Submit { text, context } => {
+                    self.send_spatial_comment(text, context);
+                    self.overlay.close();
+                }
+                cadmark_ui::overlay::OverlayAction::Cancel => {
+                    self.clear_selection();
+                }
+                cadmark_ui::overlay::OverlayAction::None => {}
+            }
+        });
+    }
+
+    /// What the empty viewport says: what is happening, what went wrong, or
+    /// how to begin.
+    fn paint_viewport_placeholder(&self, ui: &egui::Ui, rect: egui::Rect) {
+        use cadmark_ui::theme;
+        let (headline, detail, colour) = match (&self.busy, &self.status) {
+            (Some(busy), _) => (busy.label().to_string(), String::new(), theme::TEXT_MUTED),
+            (None, Some(status)) if status.is_error => (
+                "The script did not run".to_string(),
+                status.text.clone(),
+                theme::ERROR,
+            ),
+            (None, _) if !self.has_script => (
+                "No part yet".to_string(),
+                if self.ai_model.is_some() {
+                    "Describe what to build in the chat, and the model will appear here."
+                        .to_string()
+                } else {
+                    format!("Write {SCRIPT_FILENAME} in the project folder and press Rebuild.")
+                },
+                theme::TEXT_MUTED,
+            ),
+            (None, Some(status)) => (status.text.clone(), String::new(), theme::TEXT_MUTED),
+            (None, None) => (
+                "Loading\u{2026}".to_string(),
+                String::new(),
+                theme::TEXT_MUTED,
+            ),
+        };
+        let painter = ui.painter();
+        let centre = rect.center();
+        painter.text(
+            centre - egui::vec2(0.0, 12.0),
+            egui::Align2::CENTER_CENTER,
+            &headline,
+            egui::FontId::proportional(theme::HEADING_SIZE + 2.0),
+            colour,
+        );
+        if !detail.is_empty() {
+            let galley = painter.layout(
+                detail,
+                egui::FontId::proportional(theme::BODY_SIZE),
+                colour.gamma_multiply(0.8),
+                (rect.width() * 0.6).max(200.0),
+            );
+            let size = galley.size();
+            painter.galley(
+                egui::pos2(centre.x - size.x * 0.5, centre.y + 10.0),
+                galley,
+                colour,
+            );
+        }
+    }
+}
+
+impl eframe::App for CadmarkApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll for async results from the worker.
+        self.poll_results(ctx);
+        self.watch_script();
+
+        // Drain pending GPU work before building the frame.
+        self.consume_pick_result();
+        self.drain_pending_mesh();
+
+        // Request continuous repaints while the worker is busy (to poll
+        // results) or when a pick readback is in flight.
+        if self.busy.is_some()
+            || self.exports_in_flight > 0
+            || self.pick_in_flight.is_some()
+            || self.folder_pick_rx.is_some()
+        {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
+        if self.hover_readback_pending {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+        if self.has_script {
+            ctx.request_repaint_after(SCRIPT_WATCH_INTERVAL);
+        }
+
+        let shortcut_action = self.handle_shortcuts(ctx);
+        self.apply_toolbar_action(ctx, shortcut_action);
+
+        // Top toolbar.
+        let mut toolbar_action = ToolbarAction::None;
+        egui::TopBottomPanel::top("toolbar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ctx, |ui| {
+                let recent = self.recent_projects.others(&self.project_dir);
+                let toolbar_state = ToolbarState {
+                    project_dir: &self.project_dir,
+                    script_filename: SCRIPT_FILENAME,
+                    has_script: self.has_script,
+                    recent_projects: &recent,
+                    controls_enabled: self.busy.is_none(),
+                    has_model: self.model.is_some(),
+                    code_visible: self.code_visible,
+                    ai_model: self.ai_model.as_deref(),
+                };
+                toolbar_action =
+                    cadmark_ui::toolbar::show_toolbar(ui, &self.history, toolbar_state);
+            });
+        self.apply_toolbar_action(ctx, toolbar_action);
+
+        // Bottom status bar — worker activity, else the last result.
+        egui::TopBottomPanel::bottom("status_bar")
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(10, 4)),
+            )
+            .show(ctx, |ui| {
+                let selection = match &self.selection {
+                    SelectionState::Selected(element) | SelectionState::Hovering(element) => {
+                        Some(element.display_label())
+                    }
+                    SelectionState::None => None,
+                };
+                cadmark_ui::status::show_status_bar(
+                    ui,
+                    StatusView {
+                        activity: self.busy.map(Busy::label),
+                        status: self.status.as_ref(),
+                        summary: self.model.as_ref().map(|model| &model.summary),
+                        selection,
+                    },
+                );
+            });
+
+        // Right panel: chat pane.
+        egui::SidePanel::right("chat_panel")
+            .resizable(true)
+            .default_width(380.0)
+            .width_range(300.0..=700.0)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
+            .show(ctx, |ui| {
+                self.chat.activity = self
+                    .busy
+                    .map(Busy::chat_activity)
+                    .unwrap_or(ChatActivity::Idle);
+                if let Some(message) = self.chat.show(ui, &self.conversation) {
+                    self.send_chat_message(message);
+                }
+            });
+
+        if self.code_visible {
+            self.show_code_panel(ctx);
+        }
+
+        // Central panel: 3D viewport.
+        self.show_viewport(ctx);
+
+        match self.version_dialog.show(ctx) {
+            VersionDialogAction::Save(name) => self.save_named_version(name),
+            VersionDialogAction::Cancel | VersionDialogAction::None => {}
+        }
+
+        // A model arriving this frame produces its mesh after the
+        // start-of-frame GPU drain. Ensure one more frame runs so it uploads.
+        if self.pending_mesh.is_some() {
+            ctx.request_repaint();
         }
     }
 }
@@ -1140,7 +1821,7 @@ mod pick_state_tests {
 mod chat_message_tests {
     use cadmark_core::geometry::ModelSummary;
 
-    use super::edit_chat_message;
+    use super::{edit_chat_message, viewport_clear_colour};
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -1175,242 +1856,16 @@ mod chat_message_tests {
             "Renamed a parameter\n\nModel unchanged: same volume, size and face count."
         );
     }
-}
 
-impl eframe::App for CadmarkApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll for async results from the worker.
-        self.poll_results();
-
-        // Drain pending GPU work before building the frame.
-        self.consume_pick_result();
-        self.drain_pending_mesh();
-
-        // Request continuous repaints while the worker is busy (to poll
-        // results) or when a pick readback is in flight.
-        if self.busy.is_some() || self.exports_in_flight > 0 || self.pick_in_flight.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-        if self.hover_readback_pending {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
-        }
-
-        // Top toolbar.
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            let toolbar_state = ToolbarState {
-                controls_enabled: self.busy.is_none(),
-                has_model: self.model.is_some(),
-            };
-            match cadmark_ui::toolbar::show_toolbar(ui, &self.history, toolbar_state) {
-                ToolbarAction::Undo => {
-                    if let Some(version) = self.history.undo() {
-                        let hash = version.commit_hash.clone();
-                        self.restore_version(hash);
-                    }
-                }
-                ToolbarAction::Redo => {
-                    if let Some(version) = self.history.redo() {
-                        let hash = version.commit_hash.clone();
-                        self.restore_version(hash);
-                    }
-                }
-                ToolbarAction::JumpToVersion(idx) => {
-                    if let Some(version) = self.history.jump_to(idx) {
-                        let hash = version.commit_hash.clone();
-                        self.restore_version(hash);
-                    }
-                }
-                ToolbarAction::Refresh => {
-                    log::info!("Manual refresh requested");
-                    self.request_reload();
-                }
-                ToolbarAction::FitView => {
-                    self.pending_camera_bounds = self.model.as_ref().and_then(|model| model.bounds);
-                }
-                ToolbarAction::Export(format) => self.export(format),
-                ToolbarAction::None => {}
-            }
-        });
-
-        // Bottom status bar — worker activity, else the last result.
-        egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(busy) = self.busy {
-                    ui.spinner();
-                    ui.colored_label(egui::Color32::from_rgb(180, 180, 200), busy.label());
-                } else if let Some(status) = &self.status {
-                    let colour = if status.is_error {
-                        egui::Color32::from_rgb(220, 80, 80)
-                    } else {
-                        egui::Color32::from_rgb(130, 180, 130)
-                    };
-                    ui.colored_label(colour, &status.text);
-                } else {
-                    ui.colored_label(egui::Color32::from_rgb(100, 100, 110), "No script loaded");
-                }
-            });
-        });
-
-        // Right panel: chat pane.
-        egui::SidePanel::right("chat_panel")
-            .default_width(350.0)
-            .show(ctx, |ui| {
-                self.chat.is_loading = self.busy.is_some();
-                if let Some(message) = self.chat.show(ui, &self.conversation) {
-                    self.send_chat_message(message);
-                }
-            });
-
-        // Central panel: 3D viewport.
-        egui::CentralPanel::default().show(ctx, |ui| {
-            let available = ui.available_size();
-            let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
-
-            // Handle viewport input — CAD navigation.
-            if response.dragged_by(egui::PointerButton::Secondary) {
-                let delta = response.drag_delta();
-                self.renderer.camera.orbit(delta.x, delta.y);
-            }
-
-            if response.dragged_by(egui::PointerButton::Middle) {
-                let delta = response.drag_delta();
-                self.renderer.camera.pan(delta.x, delta.y);
-            }
-
-            let scroll = ui.input(|i| i.raw_scroll_delta.y);
-            if response.hovered() && scroll.abs() > 0.1 {
-                self.renderer.camera.zoom(scroll * 0.01);
-            }
-
-            // Left click for selection — request a pick readback.
-            if response.clicked()
-                && let Some(pos) = response.interact_pointer_pos()
-            {
-                let local_pos = pos - rect.min;
-                // Local coordinates feed the GPU picking texture.
-                self.pending_pick = Some((local_pos.x, local_pos.y));
-                // Absolute coordinates position the overlay on result.
-                self.pick_in_flight = Some((pos.x, pos.y));
-                log::debug!("Pick requested at ({}, {})", local_pos.x, local_pos.y);
-            }
-
-            // Escape cancels selection and overlay.
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.clear_selection();
-            }
-
-            // Hover: pick under the cursor while it rests over the model,
-            // but not mid-drag, when the view is moving under it.
-            let hover_local = if self.has_mesh && response.hovered() && !response.dragged() {
-                response.hover_pos().map(|pos| pos - rect.min)
-            } else {
-                None
-            };
-            if hover_local.is_none() {
-                self.renderer.hover_id = 0;
-            }
-            if self.renderer.hover_id != 0 {
-                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-
-            // ── Viewport rendering ──────────────────────────────────
-
-            // Background rect — always drawn so the viewport has a
-            // consistent dark fill even before any mesh is loaded.
-            ui.painter()
-                .rect_filled(rect, 0.0, egui::Color32::from_rgb(30, 30, 35));
-
-            // Build the paint callback that drives the wgpu renderer.
-            let ppp = ctx.pixels_per_point();
-            let viewport_size = ((rect.width() * ppp) as u32, (rect.height() * ppp) as u32);
-            let aspect = rect.width() / rect.height().max(1.0);
-
-            if let Some(bounds) = self.pending_camera_bounds.take() {
-                self.renderer.camera.frame_bounds(bounds, aspect);
-                log::info!(
-                    "Camera framed model at {:?}, distance {}",
-                    self.renderer.camera.target,
-                    self.renderer.camera.distance
-                );
-            }
-
-            // Consume the pending pick (local coords → pixel coords).
-            let to_pixels = |local: egui::Vec2| ((local.x * ppp) as u32, (local.y * ppp) as u32);
-            let pick_request = self
-                .pending_pick
-                .take()
-                .map(|(x, y)| to_pixels(egui::vec2(x, y)));
-            let hover_request = hover_local.map(to_pixels).filter(|&pixel| {
-                let probe = (pixel, self.renderer.camera.clone());
-                if self.last_hover_probe.as_ref() == Some(&probe) {
-                    return false;
-                }
-                self.last_hover_probe = Some(probe);
-                true
-            });
-            if hover_request.is_some() {
-                self.hover_readback_pending = true;
-            }
-
-            let callback = eframe::egui_wgpu::Callback::new_paint_callback(
-                rect,
-                ViewportCallback {
-                    mesh_uniforms: self.renderer.mesh_uniforms(aspect),
-                    simple_uniforms: self.renderer.simple_uniforms(aspect),
-                    pick_request,
-                    hover_request,
-                    viewport_size,
-                },
-            );
-            ui.painter().add(callback);
-
-            // Placeholder text when no mesh is loaded yet — show the
-            // status (including errors) so issues are visible without
-            // checking logs.
-            if !self.has_mesh {
-                let (text, colour) = match (&self.busy, &self.status) {
-                    (Some(busy), _) => (
-                        busy.label().to_string(),
-                        egui::Color32::from_rgb(80, 80, 90),
-                    ),
-                    (None, Some(status)) if status.is_error => {
-                        (status.text.clone(), egui::Color32::from_rgb(200, 80, 80))
-                    }
-                    (None, Some(status)) => {
-                        (status.text.clone(), egui::Color32::from_rgb(80, 80, 90))
-                    }
-                    (None, None) => (
-                        "3D Viewport \u{2014} describe a part to get started".into(),
-                        egui::Color32::from_rgb(80, 80, 90),
-                    ),
-                };
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    &text,
-                    egui::FontId::proportional(16.0),
-                    colour,
-                );
-            }
-
-            // Show the spatial comment overlay if active.
-            let overlay_action = self.overlay.show(ui);
-            match overlay_action {
-                cadmark_ui::overlay::OverlayAction::Submit { text, context } => {
-                    self.send_spatial_comment(text, context);
-                    self.overlay.close();
-                }
-                cadmark_ui::overlay::OverlayAction::Cancel => {
-                    self.clear_selection();
-                }
-                cadmark_ui::overlay::OverlayAction::None => {}
-            }
-        });
-
-        // A model arriving this frame produces its mesh after the
-        // start-of-frame GPU drain. Ensure one more frame runs so it uploads.
-        if self.pending_mesh.is_some() {
-            ctx.request_repaint();
-        }
+    #[test]
+    fn viewport_clear_matches_the_theme_in_either_colour_space() {
+        let linear = viewport_clear_colour(true);
+        let gamma = viewport_clear_colour(false);
+        // Linear values are darker than their gamma encoding for a dark grey.
+        assert!(linear.r < gamma.r);
+        let theme = cadmark_ui::theme::VIEWPORT;
+        assert!((gamma.r - f64::from(theme.r()) / 255.0).abs() < 1e-9);
+        assert!((gamma.g - f64::from(theme.g()) / 255.0).abs() < 1e-9);
+        assert!((gamma.b - f64::from(theme.b()) / 255.0).abs() < 1e-9);
     }
 }

@@ -1,126 +1,370 @@
-// Toolbar — design-step navigation, refresh, view framing, and export.
+// Toolbar — project, design-step navigation, view controls, code and export.
+//
+// One row across the top of the window. Reading left to right: which
+// project is open, where you are in its history, what you can do to the
+// view, and how to get the model out.
+
+use std::path::Path;
 
 use cadmark_core::export::ExportFormat;
-use cadmark_core::version::VersionHistory;
+use cadmark_core::version::{Microversion, VersionHistory};
+
+use crate::theme;
 
 /// Action taken by the toolbar controls.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ToolbarAction {
     None,
     Undo,
     Redo,
-    /// User selected a specific microversion from the dropdown.
+    /// User selected a specific design step from the history menu.
     JumpToVersion(usize),
+    /// Open the version-naming dialog.
+    NameVersion,
+    /// Choose another project folder.
+    OpenProject,
+    /// Open one of the recently used project folders.
+    OpenRecent(std::path::PathBuf),
+    /// Show the project folder in the system file manager.
+    RevealProject,
+    /// Open the script in the system's default editor.
+    OpenScriptInEditor,
     /// Re-execute the current script and reload the model.
     Refresh,
     /// Frame the whole model in the viewport.
     FitView,
+    /// Show or hide the code panel.
+    ToggleCode,
     /// Write the current model to a file in the given format.
     Export(ExportFormat),
 }
 
 /// What the toolbar may offer right now.
-#[derive(Debug, Clone, Copy)]
-pub struct ToolbarState {
-    /// Undo, redo and refresh are held while the worker is busy so a
-    /// checkout cannot race an edit being written.
+#[derive(Debug, Clone)]
+pub struct ToolbarState<'a> {
+    /// The open project folder.
+    pub project_dir: &'a Path,
+    /// Name of the script file inside the project.
+    pub script_filename: &'a str,
+    /// Whether the script exists on disk yet.
+    pub has_script: bool,
+    /// Recently opened project folders, most recent first, excluding the
+    /// current one.
+    pub recent_projects: &'a [std::path::PathBuf],
+    /// Undo, redo, refresh and project switching are held while the worker
+    /// is busy so a checkout cannot race an edit being written.
     pub controls_enabled: bool,
     /// Fit-view and export need a loaded model.
     pub has_model: bool,
+    /// Whether the code panel is showing.
+    pub code_visible: bool,
+    /// The AI model in use, or `None` when AI is unavailable.
+    pub ai_model: Option<&'a str>,
+}
+
+/// The name a project folder is shown under: its final path component.
+pub fn project_display_name(project_dir: &Path) -> String {
+    project_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| project_dir.display().to_string())
+}
+
+/// One line describing a design step for menus and tooltips.
+fn version_line(version: &Microversion) -> String {
+    match &version.snapshot {
+        Some(snapshot) => snapshot.name.clone(),
+        None => version.summary.clone(),
+    }
 }
 
 /// Render the toolbar.
 pub fn show_toolbar(
     ui: &mut egui::Ui,
     history: &VersionHistory,
-    state: ToolbarState,
+    state: ToolbarState<'_>,
 ) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 
     ui.horizontal(|ui| {
-        // Undo button with dropdown.
-        ui.add_enabled_ui(state.controls_enabled && history.can_undo(), |ui| {
-            let undo_response = ui.button("Undo");
+        ui.spacing_mut().item_spacing.x = 6.0;
 
-            if undo_response.clicked() {
-                action = ToolbarAction::Undo;
-            }
-
-            // Dropdown on right-click or long-press showing recent versions.
-            undo_response.context_menu(|ui| {
-                ui.label(egui::RichText::new("Recent versions").strong().small());
+        // ── Project ────────────────────────────────────────────────
+        let project_name = project_display_name(state.project_dir);
+        let project_title =
+            egui::RichText::new(format!("\u{1F4C1} {project_name}")).color(theme::TEXT_STRONG);
+        ui.add_enabled_ui(state.controls_enabled, |ui| {
+            ui.menu_button(project_title, |ui| {
+                ui.set_min_width(260.0);
+                ui.label(
+                    egui::RichText::new(state.project_dir.display().to_string())
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Every accepted edit is saved to {} and recorded as a design step.",
+                        state.script_filename
+                    ))
+                    .small()
+                    .color(theme::TEXT_MUTED),
+                );
                 ui.separator();
-                for (i, version) in history.recent(10).iter().enumerate() {
-                    let label = format!(
-                        "{} — {}",
-                        version.summary,
-                        truncate(&version.trigger_message, 40),
-                    );
-                    if ui.button(&label).clicked() {
-                        action = ToolbarAction::JumpToVersion(i);
-                        ui.close_menu();
-                    }
+                if ui
+                    .add(egui::Button::new("Open project folder\u{2026}").shortcut_text("Ctrl+O"))
+                    .clicked()
+                {
+                    action = ToolbarAction::OpenProject;
+                    ui.close_menu();
+                }
+                if !state.recent_projects.is_empty() {
+                    ui.menu_button("Open recent", |ui| {
+                        ui.set_min_width(240.0);
+                        for path in state.recent_projects {
+                            let name = project_display_name(path);
+                            if ui
+                                .button(name)
+                                .on_hover_text(path.display().to_string())
+                                .clicked()
+                            {
+                                action = ToolbarAction::OpenRecent(path.clone());
+                                ui.close_menu();
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        state.has_script,
+                        egui::Button::new(format!("Open {} in editor", state.script_filename)),
+                    )
+                    .clicked()
+                {
+                    action = ToolbarAction::OpenScriptInEditor;
+                    ui.close_menu();
+                }
+                if ui.button("Show folder in file manager").clicked() {
+                    action = ToolbarAction::RevealProject;
+                    ui.close_menu();
                 }
             });
         });
 
-        // Redo button.
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // ── History ────────────────────────────────────────────────
+        let undo_hint = history
+            .peek_undo()
+            .map(|version| format!("Undo: {}", version_line(version)))
+            .unwrap_or_else(|| "Nothing to undo".to_string());
+        if ui
+            .add_enabled(
+                state.controls_enabled && history.can_undo(),
+                egui::Button::new("\u{21B6}"),
+            )
+            .on_hover_text(format!("{undo_hint}\nCtrl+Z"))
+            .on_disabled_hover_text(&undo_hint)
+            .clicked()
+        {
+            action = ToolbarAction::Undo;
+        }
+
+        let redo_hint = history
+            .peek_redo()
+            .map(|version| format!("Redo: {}", version_line(version)))
+            .unwrap_or_else(|| "Nothing to redo".to_string());
         if ui
             .add_enabled(
                 state.controls_enabled && history.can_redo(),
-                egui::Button::new("Redo"),
+                egui::Button::new("\u{21B7}"),
             )
+            .on_hover_text(format!("{redo_hint}\nCtrl+Shift+Z"))
+            .on_disabled_hover_text(&redo_hint)
             .clicked()
         {
             action = ToolbarAction::Redo;
         }
 
-        ui.separator();
+        let step_count = history.len();
+        let history_title = match history.current() {
+            Some(current) => format!(
+                "{}/{} · {} \u{25BE}",
+                step_count - history.current_index(),
+                step_count,
+                truncate(&version_line(current), 28)
+            ),
+            None => "History \u{25BE}".to_string(),
+        };
+        ui.add_enabled_ui(state.controls_enabled, |ui| {
+            ui.menu_button(history_title, |ui| {
+                ui.set_min_width(320.0);
+                if ui
+                    .add_enabled(
+                        state.has_script,
+                        egui::Button::new("Name this version\u{2026}").shortcut_text("Ctrl+S"),
+                    )
+                    .on_hover_text("Mark the current model as a named version you can return to")
+                    .clicked()
+                {
+                    action = ToolbarAction::NameVersion;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if step_count == 0 {
+                    ui.label(
+                        egui::RichText::new("No design steps yet")
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                } else {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{step_count} design step{}, newest first",
+                            if step_count == 1 { "" } else { "s" }
+                        ))
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                    );
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(360.0)
+                    .show(ui, |ui| {
+                        for (index, version) in history.recent(50).iter().enumerate() {
+                            let is_current = index == history.current_index();
+                            let marker = if is_current { "\u{25CF}" } else { "\u{2007}" };
+                            let mut title = egui::RichText::new(format!(
+                                "{marker} {}",
+                                truncate(&version_line(version), 72)
+                            ));
+                            if version.snapshot.is_some() {
+                                title = title.strong().color(theme::WARNING);
+                            }
+                            if is_current {
+                                title = title.color(theme::ACCENT);
+                            }
+                            let response = ui
+                                .add(egui::Button::new(title).frame(false).selected(is_current))
+                                .on_hover_text(version_tooltip(version));
+                            if response.clicked() && !is_current {
+                                action = ToolbarAction::JumpToVersion(index);
+                                ui.close_menu();
+                            }
+                        }
+                    });
+            });
+        });
 
-        // Refresh button — re-execute the script from disk.
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        // ── View ───────────────────────────────────────────────────
         if ui
             .add_enabled(
-                state.controls_enabled,
-                egui::Button::new("\u{21BB} Refresh"),
+                state.controls_enabled && state.has_script,
+                egui::Button::new("\u{21BB} Rebuild"),
             )
-            .on_hover_text("Re-execute part.py and reload the model")
+            .on_hover_text(format!(
+                "Run {} again and reload the model\nF5",
+                state.script_filename
+            ))
             .clicked()
         {
             action = ToolbarAction::Refresh;
         }
 
         if ui
-            .add_enabled(state.has_model, egui::Button::new("Fit view"))
-            .on_hover_text("Frame the whole model")
+            .add_enabled(state.has_model, egui::Button::new("\u{22A1} Fit"))
+            .on_hover_text("Frame the whole model\nF")
             .clicked()
         {
             action = ToolbarAction::FitView;
         }
 
-        ui.separator();
-        ui.label(egui::RichText::new("Export").small());
-        for format in ExportFormat::ALL {
-            if ui
-                .add_enabled(state.has_model, egui::Button::new(format.label()))
-                .on_hover_text(format!("Write part.{} next to part.py", format.extension()))
-                .clicked()
-            {
-                action = ToolbarAction::Export(format);
-            }
+        if ui
+            .add(egui::Button::new("Code").selected(state.code_visible))
+            .on_hover_text(format!(
+                "Show the {} that builds this model\nCtrl+E",
+                state.script_filename
+            ))
+            .clicked()
+        {
+            action = ToolbarAction::ToggleCode;
         }
+
+        ui.add_enabled_ui(state.has_model, |ui| {
+            ui.menu_button("Export \u{25BE}", |ui| {
+                ui.set_min_width(220.0);
+                for format in ExportFormat::ALL {
+                    if ui
+                        .button(format!("{} (part.{})", format.label(), format.extension()))
+                        .on_hover_text(format!(
+                            "Write part.{} next to {}",
+                            format.extension(),
+                            state.script_filename
+                        ))
+                        .clicked()
+                    {
+                        action = ToolbarAction::Export(format);
+                        ui.close_menu();
+                    }
+                }
+            });
+        });
+
+        // ── AI badge, right-aligned ────────────────────────────────
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| match state.ai_model {
+                Some(model) => {
+                    theme::chip(ui, model, theme::AI)
+                        .on_hover_text("AI model configured in cadmark.json");
+                }
+                None => {
+                    theme::chip(ui, "AI off", theme::TEXT_MUTED).on_hover_text(
+                        "No usable AI configuration was found. The model still loads and \
+                         rebuilds; add a cadmark.json to chat.",
+                    );
+                }
+            },
+        );
     });
 
     action
 }
 
-/// Truncate a string to at most `max` characters, appending "..." if shortened.
-/// Operates on char boundaries to avoid panicking on multi-byte UTF-8.
-fn truncate(s: &str, max: usize) -> String {
+fn version_tooltip(version: &Microversion) -> String {
+    let mut lines = vec![version.summary.clone()];
+    if !version.trigger_message.is_empty() {
+        lines.push(format!(
+            "\u{201C}{}\u{201D}",
+            truncate(&version.trigger_message, 120)
+        ));
+    }
+    lines.push(
+        version
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .format("%-d %b %Y, %H:%M")
+            .to_string(),
+    );
+    lines.join("\n")
+}
+
+/// Truncate a string to at most `max` characters, appending an ellipsis if
+/// shortened. Operates on char boundaries to avoid panicking on multi-byte
+/// UTF-8.
+pub fn truncate(s: &str, max: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max {
         s.to_string()
     } else {
         let end = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
-        format!("{}...", &s[..end])
+        format!("{}\u{2026}", &s[..end])
     }
 }
 
@@ -135,7 +379,7 @@ mod tests {
 
     #[test]
     fn truncate_long_ascii() {
-        assert_eq!(truncate("hello world", 5), "hello...");
+        assert_eq!(truncate("hello world", 5), "hello\u{2026}");
     }
 
     #[test]
@@ -143,11 +387,36 @@ mod tests {
         // Each emoji is 4 bytes — byte-level slicing would panic.
         let emoji = "\u{1F600}\u{1F601}\u{1F602}";
         let result = truncate(emoji, 2);
-        assert_eq!(result, "\u{1F600}\u{1F601}...");
+        assert_eq!(result, "\u{1F600}\u{1F601}\u{2026}");
     }
 
     #[test]
     fn truncate_exact_length() {
         assert_eq!(truncate("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn project_name_is_the_folder_name() {
+        assert_eq!(
+            project_display_name(Path::new("/home/someone/parts/bracket")),
+            "bracket"
+        );
+        assert_eq!(project_display_name(Path::new("/")), "/");
+    }
+
+    #[test]
+    fn named_versions_show_their_name_not_the_summary() {
+        let mut version = Microversion {
+            commit_hash: "abc1234".into(),
+            summary: "Snapshot: Ready for print".into(),
+            trigger_message: String::new(),
+            timestamp: chrono::Utc::now(),
+            snapshot: None,
+        };
+        assert_eq!(version_line(&version), "Snapshot: Ready for print");
+        version.snapshot = Some(cadmark_core::version::SnapshotInfo {
+            name: "Ready for print".into(),
+        });
+        assert_eq!(version_line(&version), "Ready for print");
     }
 }

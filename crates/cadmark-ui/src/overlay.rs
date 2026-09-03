@@ -1,9 +1,12 @@
 // Comment overlay — appears near selected geometry with a connecting line.
 //
-// Positioned in screen space near the selection point. The user writes
-// free text and submits. Escape cancels and returns to default state.
+// Positioned in screen space near the selection point and kept inside the
+// viewport. The user writes free text and submits with Enter; Escape
+// cancels and returns to the default state.
 
 use cadmark_core::geometry::{GeometryContext, ScreenPosition};
+
+use crate::theme;
 
 fn context_summary(context: &GeometryContext) -> String {
     let mut summary = format!(
@@ -35,6 +38,8 @@ pub enum OverlayState {
         text: String,
         /// Provenance resolved at pick time and retained through submission.
         context: GeometryContext,
+        /// Whether the text field has been given focus since opening.
+        focused: bool,
     },
 }
 
@@ -51,6 +56,8 @@ pub enum OverlayAction {
     Cancel,
 }
 
+const OVERLAY_WIDTH: f32 = 300.0;
+
 impl OverlayState {
     /// Open the overlay at the given screen position.
     pub fn open(&mut self, anchor: ScreenPosition, context: GeometryContext) {
@@ -58,6 +65,7 @@ impl OverlayState {
             anchor,
             text: String::new(),
             context,
+            focused: false,
         };
     }
 
@@ -70,70 +78,174 @@ impl OverlayState {
         matches!(self, Self::Active { .. })
     }
 
-    /// Render the overlay. Returns the action the user took.
-    pub fn show(&mut self, ui: &mut egui::Ui) -> OverlayAction {
+    /// Render the overlay within `bounds` (the viewport rectangle). Returns
+    /// the action the user took.
+    pub fn show(&mut self, ui: &mut egui::Ui, bounds: egui::Rect) -> OverlayAction {
         match self {
             Self::Hidden => OverlayAction::None,
             Self::Active {
                 anchor,
                 text,
                 context,
+                focused,
             } => {
                 let mut action = OverlayAction::None;
+                let anchor_pos = egui::pos2(anchor.x, anchor.y);
 
-                // Position the overlay near the anchor with an offset.
-                let overlay_pos = egui::pos2(anchor.x + 20.0, anchor.y - 10.0);
+                // Prefer the right of the anchor; flip left near the edge.
+                let estimated_height = 150.0;
+                let mut overlay_pos = egui::pos2(anchor.x + 24.0, anchor.y - 12.0);
+                if overlay_pos.x + OVERLAY_WIDTH > bounds.right() - 8.0 {
+                    overlay_pos.x = anchor.x - 24.0 - OVERLAY_WIDTH;
+                }
+                overlay_pos.x = overlay_pos.x.max(bounds.left() + 8.0);
+                overlay_pos.y = overlay_pos
+                    .y
+                    .min(bounds.bottom() - estimated_height - 8.0)
+                    .max(bounds.top() + 8.0);
 
-                egui::Area::new(egui::Id::new("spatial_comment_overlay"))
+                let area = egui::Area::new(egui::Id::new("spatial_comment_overlay"))
+                    .order(egui::Order::Foreground)
                     .fixed_pos(overlay_pos)
+                    .constrain_to(bounds)
                     .show(ui.ctx(), |ui| {
-                        egui::Frame::popup(ui.style()).show(ui, |ui| {
-                            ui.set_min_width(200.0);
-                            ui.label(
-                                egui::RichText::new("Spatial Comment")
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(100, 200, 255)),
-                            );
-                            ui.small(context_summary(context));
+                        theme::tinted_card(theme::SPATIAL)
+                            .shadow(ui.style().visuals.popup_shadow)
+                            .show(ui, |ui| {
+                                ui.set_width(OVERLAY_WIDTH);
+                                ui.horizontal(|ui| {
+                                    theme::chip(
+                                        ui,
+                                        &context.element.display_label(),
+                                        theme::SPATIAL,
+                                    );
+                                    ui.label(
+                                        egui::RichText::new("Comment on this")
+                                            .small()
+                                            .color(theme::TEXT_MUTED),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("\u{00D7}")
+                                                            .color(theme::TEXT_MUTED),
+                                                    )
+                                                    .frame(false),
+                                                )
+                                                .on_hover_text("Cancel (Esc)")
+                                                .clicked()
+                                            {
+                                                action = OverlayAction::Cancel;
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(context_summary(context))
+                                            .small()
+                                            .color(theme::TEXT_MUTED),
+                                    )
+                                    .wrap(),
+                                );
 
-                            let response = ui.text_edit_multiline(text);
+                                let response = egui::Frame::new()
+                                    .fill(theme::SUNKEN)
+                                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                                    .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+                                    .inner_margin(egui::Margin::symmetric(6, 4))
+                                    .show(ui, |ui| {
+                                        ui.add(
+                                            egui::TextEdit::multiline(text)
+                                                .id_salt("spatial_comment_text")
+                                                .frame(false)
+                                                .desired_width(f32::INFINITY)
+                                                .desired_rows(2)
+                                                .hint_text("What should change here?")
+                                                .return_key(egui::KeyboardShortcut::new(
+                                                    egui::Modifiers::SHIFT,
+                                                    egui::Key::Enter,
+                                                )),
+                                        )
+                                    })
+                                    .inner;
 
-                            // Submit on Ctrl+Enter.
-                            if response.has_focus()
-                                && ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Enter))
-                                && !text.trim().is_empty()
-                            {
-                                action = OverlayAction::Submit {
-                                    text: text.trim().to_string(),
-                                    context: context.clone(),
-                                };
-                            }
+                                if !*focused {
+                                    response.request_focus();
+                                    *focused = true;
+                                }
 
-                            ui.horizontal(|ui| {
-                                if ui.button("Submit").clicked() && !text.trim().is_empty() {
+                                let has_text = !text.trim().is_empty();
+                                let enter = response.has_focus()
+                                    && ui.input_mut(|input| {
+                                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                    });
+                                if enter && has_text {
                                     action = OverlayAction::Submit {
                                         text: text.trim().to_string(),
                                         context: context.clone(),
                                     };
                                 }
-                                if ui.button("Cancel").clicked() {
+
+                                ui.horizontal(|ui| {
+                                    theme::key_hint(ui, "Enter");
+                                    ui.label(
+                                        egui::RichText::new("send")
+                                            .small()
+                                            .color(theme::TEXT_MUTED),
+                                    );
+                                    theme::key_hint(ui, "Esc");
+                                    ui.label(
+                                        egui::RichText::new("cancel")
+                                            .small()
+                                            .color(theme::TEXT_MUTED),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add_enabled(
+                                                    has_text,
+                                                    egui::Button::new(
+                                                        egui::RichText::new("Send")
+                                                            .color(theme::TEXT_STRONG),
+                                                    )
+                                                    .fill(theme::ACCENT.gamma_multiply(0.55)),
+                                                )
+                                                .clicked()
+                                            {
+                                                action = OverlayAction::Submit {
+                                                    text: text.trim().to_string(),
+                                                    context: context.clone(),
+                                                };
+                                            }
+                                        },
+                                    );
+                                });
+
+                                // Escape cancels.
+                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                                     action = OverlayAction::Cancel;
                                 }
                             });
-
-                            // Escape cancels.
-                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                action = OverlayAction::Cancel;
-                            }
-                        });
                     });
 
-                // Draw connecting line from overlay to anchor.
+                // Connecting line from the card's nearest edge to the anchor.
+                let card = area.response.rect;
+                let attach = egui::pos2(
+                    anchor_pos.x.clamp(card.left(), card.right()),
+                    anchor_pos.y.clamp(card.top(), card.bottom()),
+                );
                 let painter = ui.painter();
                 painter.line_segment(
-                    [egui::pos2(anchor.x, anchor.y), overlay_pos],
-                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 200, 255)),
+                    [anchor_pos, attach],
+                    egui::Stroke::new(1.5_f32, theme::SPATIAL),
                 );
+                painter.circle_filled(anchor_pos, 4.0, theme::SPATIAL);
+                painter.circle_stroke(anchor_pos, 6.0, egui::Stroke::new(1.0_f32, theme::SPATIAL));
 
                 action
             }
