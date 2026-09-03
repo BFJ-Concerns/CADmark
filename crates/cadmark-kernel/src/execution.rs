@@ -621,6 +621,73 @@ with BuildPart() as part:
     }
 
     #[test]
+    fn real_sketch_extrude_resolves_all_final_topology() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+"#,
+        )
+        .unwrap();
+        assert_eq!(result.ledger.face_count(), 6);
+        assert_every_element_resolves(&result, SemanticOperation::Extrude, 6);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_sketch_cut_extrude_through_box_resolves_all_surviving_topology() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+hole_diameter_mm = 3.4
+hole_inset_mm = 5
+
+with BuildPart() as part:
+    Box(40, 25, 12)
+    top_face = part.faces().sort_by(Axis.Z)[-1]
+    with BuildSketch(top_face):
+        with GridLocations(30, 15, 2, 2):
+            Circle(hole_diameter_mm / 2)
+    extrude(amount=-12, mode=Mode.SUBTRACT)
+"#,
+        )
+        .unwrap();
+        assert_eq!(result.ledger.face_count(), 10);
+        assert_contains_operation(&result, SemanticOperation::BooleanCut);
+        assert_contains_operation(&result, SemanticOperation::Box);
+        let contexts = resolved_contexts(&result);
+        assert!(contexts.iter().any(|context| {
+            context.provenance.operation == SemanticOperation::Extrude
+                && matches!(context.element, TopologyElement::Face(_))
+                && context.provenance.source.line == 12
+        }));
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_revolve_resolves_all_final_topology() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch(Plane.XZ) as profile:
+        with Locations((6, 0)):
+            Rectangle(4, 4)
+    revolve(axis=Axis.Z)
+"#,
+        )
+        .unwrap();
+        assert_every_element_resolves(&result, SemanticOperation::Revolve, 7);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
     fn unsupported_sphere_fails_with_missing_history() {
         activate_test_runtime();
         let error = execute_script_source(
