@@ -26,6 +26,7 @@ use cadmark_ui::overlay::OverlayState;
 use cadmark_ui::status::{Status, StatusView};
 use cadmark_ui::toolbar::{ToolbarAction, ToolbarState};
 use cadmark_ui::version_dialog::{VersionDialog, VersionDialogAction};
+use cadmark_ui::view_gizmo::GizmoAction;
 
 use crate::orchestrator::{ModelOrigin, OrchestratorCommand, OrchestratorResult};
 use crate::user_settings::RecentProjects;
@@ -1565,6 +1566,18 @@ impl CadmarkApp {
             // (including errors) so issues are visible without checking logs.
             if !self.has_mesh {
                 self.paint_viewport_placeholder(ui, rect);
+            }
+
+            // The axis triad: which way the model's axes run, with a click
+            // turning the camera to look along one.
+            if self.has_mesh {
+                let view = self.renderer.camera.view_matrix();
+                let axes = std::array::from_fn(|axis| [view[axis][0], view[axis][1], view[axis][2]]);
+                match cadmark_ui::view_gizmo::show(ui, rect, axes) {
+                    GizmoAction::LookFrom(direction) => self.renderer.camera.look_from(direction),
+                    GizmoAction::Orbit(delta) => self.renderer.camera.orbit(delta.x, delta.y),
+                    GizmoAction::None => {}
+                }
             }
 
             // Show the spatial comment overlay if active.
