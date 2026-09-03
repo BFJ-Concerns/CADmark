@@ -909,6 +909,23 @@ with BuildPart() as part:
     }
 
     #[test]
+    fn model_bounds_are_exact_for_curved_geometry() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    Cylinder(10, 5)
+"#,
+        )
+        .unwrap();
+        let size = result.summary.size();
+        assert!((size[0] - 20.0).abs() < 1e-6, "{size:?}");
+        assert!((size[1] - 20.0).abs() < 1e-6, "{size:?}");
+        assert!((size[2] - 5.0).abs() < 1e-6, "{size:?}");
+    }
+
+    #[test]
     fn tessellation_carries_outward_surface_normals() {
         activate_test_runtime();
         let result = execute_script_source(
