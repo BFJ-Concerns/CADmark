@@ -36,13 +36,112 @@ pub enum ProvenanceRelation {
 pub enum SemanticOperation {
     Box,
     Cylinder,
+    Sphere,
+    Cone,
+    Torus,
+    Wedge,
     Extrude,
     Revolve,
+    Loft,
+    Sweep,
+    Thicken,
+    Shell,
+    Draft,
+    Split,
     BooleanFuse,
     BooleanCut,
     BooleanCommon,
     Fillet,
     Chamfer,
+}
+
+impl SemanticOperation {
+    /// Plain-language name for people reading the chat pane or overlay.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Box => "box",
+            Self::Cylinder => "cylinder",
+            Self::Sphere => "sphere",
+            Self::Cone => "cone",
+            Self::Torus => "torus",
+            Self::Wedge => "wedge",
+            Self::Extrude => "extrude",
+            Self::Revolve => "revolve",
+            Self::Loft => "loft",
+            Self::Sweep => "sweep",
+            Self::Thicken => "thicken",
+            Self::Shell => "shell",
+            Self::Draft => "draft",
+            Self::Split => "split",
+            Self::BooleanFuse => "union",
+            Self::BooleanCut => "cut",
+            Self::BooleanCommon => "intersection",
+            Self::Fillet => "fillet",
+            Self::Chamfer => "chamfer",
+        }
+    }
+}
+
+impl LedgerValue {
+    /// The single source line when exactly one operation claims the element.
+    pub fn resolved(&self) -> Option<&ProvenanceEntry> {
+        match self {
+            Self::Resolved(entry) => Some(entry),
+            Self::Ambiguous(_) | Self::Untraced => None,
+        }
+    }
+
+    /// Every candidate source, in ledger order: one for a resolved element,
+    /// several for an ambiguous one, none for an untraced one.
+    pub fn candidates(&self) -> &[ProvenanceEntry] {
+        match self {
+            Self::Resolved(entry) => std::slice::from_ref(entry),
+            Self::Ambiguous(candidates) => candidates,
+            Self::Untraced => &[],
+        }
+    }
+
+    /// Plain-language description of the element's source for the UI.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Resolved(entry) => entry.describe(),
+            Self::Ambiguous(candidates) => format!(
+                "source is ambiguous: {}",
+                candidates
+                    .iter()
+                    .map(ProvenanceEntry::describe)
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ),
+            Self::Untraced => {
+                "no source line (made by an operation CADmark cannot trace yet)".to_string()
+            }
+        }
+    }
+}
+
+impl ProvenanceEntry {
+    /// Plain-language description such as "created by box at line 4".
+    pub fn describe(&self) -> String {
+        format!(
+            "{} {} at line {}",
+            self.relation.display_phrase(),
+            self.operation.display_name(),
+            self.source.line
+        )
+    }
+}
+
+impl ProvenanceRelation {
+    /// Plain-language phrase describing how the operation touched the element.
+    pub fn display_phrase(&self) -> &'static str {
+        match self {
+            Self::Generated => "created by",
+            Self::Modified => "modified by",
+            Self::GeneratedDescendant => "part of geometry created by",
+            Self::ModifiedDescendant => "part of geometry modified by",
+        }
+    }
 }
 
 /// A single provenance record linking an element to its generating code.
@@ -55,10 +154,13 @@ pub struct ProvenanceEntry {
 }
 
 /// The provenance state for one final topology element.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LedgerValue {
     Resolved(ProvenanceEntry),
     Ambiguous(Vec<ProvenanceEntry>),
+    /// The element exists in the final model but no instrumented operation
+    /// claimed it, so no source line can be offered for it.
+    Untraced,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -162,6 +264,16 @@ impl ProvenanceLedger {
     /// Total number of entries across all element types.
     pub fn len(&self) -> usize {
         self.faces.len() + self.edges.len() + self.vertices.len()
+    }
+
+    /// Number of elements across all types that no operation claimed.
+    pub fn untraced_count(&self) -> usize {
+        self.faces
+            .values()
+            .chain(self.edges.values())
+            .chain(self.vertices.values())
+            .filter(|value| matches!(value, LedgerValue::Untraced))
+            .count()
     }
 
     pub fn is_empty(&self) -> bool {

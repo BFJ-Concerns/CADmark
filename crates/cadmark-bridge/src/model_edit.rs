@@ -3,6 +3,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use cadmark_core::ledger::LedgerValue;
+
 use crate::backend::{AiBackend, AiResponse, BackendError};
 use crate::context::AiRequest;
 use crate::openai_compatible::OpenAiCompatibleClient;
@@ -43,25 +45,52 @@ impl ModelEditBackend {
 
         if let Some(context) = &request.geometry_context {
             prompt.push_str(&format!(
-                "The user selected a geometry element ({})",
-                describe_element(&context.element)
+                "The user selected a geometry element in the viewport: {}.\n",
+                context.element.display_label()
             ));
-            prompt.push_str(&format!(
-                " attributed to {:?} ({:?}) at line {}: `{}`",
-                context.provenance.operation,
-                context.provenance.relation,
-                context.provenance.source.line,
-                context.provenance.source.code
-            ));
-            prompt.push_str(".\n\n");
+            match &context.provenance {
+                LedgerValue::Resolved(entry) => {
+                    prompt.push_str(&format!(
+                        "It was {} {} at line {}: `{}`\n",
+                        entry.relation.display_phrase(),
+                        entry.operation.display_name(),
+                        entry.source.line,
+                        entry.source.code
+                    ));
+                }
+                LedgerValue::Ambiguous(candidates) => {
+                    prompt.push_str(
+                        "Its source is ambiguous; it was produced by one of these lines \
+                         (decide from the measurements and the user's words, and say \
+                         which you chose in the summary):\n",
+                    );
+                    for candidate in candidates {
+                        prompt.push_str(&format!(
+                            "- {} {} at line {}: `{}`\n",
+                            candidate.relation.display_phrase(),
+                            candidate.operation.display_name(),
+                            candidate.source.line,
+                            candidate.source.code
+                        ));
+                    }
+                }
+                LedgerValue::Untraced => {
+                    prompt.push_str(
+                        "No source line is known for it (it came from an operation \
+                         CADmark cannot trace). Locate it from the measurements below.\n",
+                    );
+                }
+            }
 
             if !context.identification.is_empty() {
-                prompt.push_str("Additional context:\n");
-                for (key, value) in &context.identification {
+                prompt.push_str("Measured geometry of the selected element:\n");
+                let mut identification: Vec<_> = context.identification.iter().collect();
+                identification.sort();
+                for (key, value) in identification {
                     prompt.push_str(&format!("- {key}: {value}\n"));
                 }
-                prompt.push('\n');
             }
+            prompt.push('\n');
         }
 
         if let Some(documentation) = &request.doc_context {
@@ -80,27 +109,31 @@ impl ModelEditBackend {
              followed by a one-line summary of the change prefixed with 'Summary: '. \
              If you had any difficulty understanding the request, lacked context, or \
              are uncertain about part of the code, add a line prefixed with 'Notes: ' \
-             explaining the issue.",
+             explaining the issue. Write nothing else outside the code block, the \
+             summary line, and the optional notes line.",
         );
 
         prompt
     }
 
+    /// The chat message is the summary plus any notes: the code itself is
+    /// visible in the viewport and the script, so repeating it in chat only
+    /// buries the sentence the user needs.
     fn parse_response(raw: &str) -> Result<AiResponse, BackendError> {
         let code = extract_code_block(raw, "python")
             .ok_or_else(|| BackendError::ParseError("no Python code block in response".into()))?;
-        let summary = raw
-            .lines()
-            .find(|line| line.starts_with("Summary: "))
-            .map(|line| line.trim_start_matches("Summary: ").to_string())
-            .unwrap_or_else(|| "AI modification".to_string());
-        let notes = raw
-            .lines()
-            .find(|line| line.starts_with("Notes: "))
-            .map(|line| line.trim_start_matches("Notes: ").to_string());
+        let field = |name: &str| {
+            raw.lines()
+                .map(str::trim)
+                .find_map(|line| line.strip_prefix(name))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        let summary = field("Summary:").unwrap_or_else(|| "AI modification".to_string());
+        let notes = field("Notes:");
         let message = match notes {
-            Some(notes) => format!("{raw}\n\n**AI notes:** {notes}"),
-            None => raw.to_string(),
+            Some(notes) => format!("{summary}\n\nNotes: {notes}"),
+            None => summary.clone(),
         };
 
         Ok(AiResponse {
@@ -149,14 +182,6 @@ fn extract_code_block(text: &str, language: &str) -> Option<String> {
     Some(text[content_start..end].trim_end().to_string())
 }
 
-fn describe_element(element: &cadmark_core::geometry::TopologyElement) -> String {
-    match element {
-        cadmark_core::geometry::TopologyElement::Face(id) => format!("face #{}", id.0),
-        cadmark_core::geometry::TopologyElement::Edge(id) => format!("edge #{}", id.0),
-        cadmark_core::geometry::TopologyElement::Vertex(id) => format!("vertex #{}", id.0),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,17 +200,17 @@ mod tests {
     fn prompt_preserves_chat_retry_geometry_and_documentation_context() {
         use cadmark_core::geometry::{FaceId, GeometryContext, TopologyElement};
         use cadmark_core::ledger::{
-            ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+            LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
         };
 
         let mut identification = std::collections::HashMap::new();
-        identification.insert("position".to_string(), "top face".to_string());
+        identification.insert("surface".to_string(), "plane".to_string());
         let request = AiRequest::from_spatial_comment(
             "box = Box(1, 1, 1)".to_string(),
             "round this".to_string(),
             GeometryContext {
                 element: TopologyElement::Face(FaceId(3)),
-                provenance: ProvenanceEntry {
+                provenance: LedgerValue::Resolved(ProvenanceEntry {
                     source: SourceRef {
                         line: 5,
                         code: "box = Box(1, 1, 1)".to_string(),
@@ -193,7 +218,7 @@ mod tests {
                     operation: SemanticOperation::Box,
                     operation_id: 1,
                     relation: ProvenanceRelation::Generated,
-                },
+                }),
                 identification,
             },
         )
@@ -204,11 +229,9 @@ mod tests {
         for expected in [
             "round this",
             "box = Box(1, 1, 1)",
-            "face #3",
-            "line 5",
-            "Box",
-            "Generated",
-            "position: top face",
+            "face 3",
+            "created by box at line 5",
+            "surface: plane",
             "fillet(objects, radius)",
             "distinctive traceback",
         ] {
@@ -217,12 +240,67 @@ mod tests {
     }
 
     #[test]
+    fn prompt_states_ambiguous_and_untraced_sources_honestly() {
+        use cadmark_core::geometry::{EdgeId, FaceId, GeometryContext, TopologyElement};
+        use cadmark_core::ledger::{
+            LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+        };
+
+        let entry = |line: u32, operation: SemanticOperation| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation,
+            operation_id: u64::from(line),
+            relation: ProvenanceRelation::Modified,
+        };
+        let ambiguous = AiRequest::from_spatial_comment(
+            "code".into(),
+            "comment".into(),
+            GeometryContext {
+                element: TopologyElement::Face(FaceId(1)),
+                provenance: LedgerValue::Ambiguous(vec![
+                    entry(2, SemanticOperation::Box),
+                    entry(3, SemanticOperation::Fillet),
+                ]),
+                identification: Default::default(),
+            },
+        );
+        let prompt = ModelEditBackend::build_prompt(&ambiguous);
+        assert!(prompt.contains("ambiguous"));
+        assert!(prompt.contains("modified by box at line 2"));
+        assert!(prompt.contains("modified by fillet at line 3"));
+
+        let untraced = AiRequest::from_spatial_comment(
+            "code".into(),
+            "comment".into(),
+            GeometryContext {
+                element: TopologyElement::Edge(EdgeId(4)),
+                provenance: LedgerValue::Untraced,
+                identification: Default::default(),
+            },
+        );
+        let prompt = ModelEditBackend::build_prompt(&untraced);
+        assert!(prompt.contains("edge 4"));
+        assert!(prompt.contains("No source line is known"));
+    }
+
+    #[test]
     fn parses_response_code_summary_and_notes() {
         let raw = "```python\nresult = Box(2, 2, 2)\n```\nSummary: Resize\nNotes: Check fit";
         let response = ModelEditBackend::parse_response(raw).unwrap();
         assert_eq!(response.code, "result = Box(2, 2, 2)");
         assert_eq!(response.summary, "Resize");
-        assert!(response.message.contains("**AI notes:** Check fit"));
+        assert_eq!(response.message, "Resize\n\nNotes: Check fit");
+    }
+
+    #[test]
+    fn chat_message_omits_the_code_and_repeats_nothing() {
+        let raw = "Here you go:\n```python\nresult = Box(2, 2, 2)\n```\n  Summary: Made a box\n";
+        let response = ModelEditBackend::parse_response(raw).unwrap();
+        assert_eq!(response.message, "Made a box");
+        assert!(!response.message.contains("```"));
     }
 
     #[test]
