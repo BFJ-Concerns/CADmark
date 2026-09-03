@@ -56,20 +56,35 @@ pub struct TessellatedMesh {
 /// Python source for tessellation extraction.
 /// Uses OCP's BRepMesh and topology explorers.
 const TESSELLATION_SOURCE: &std::ffi::CStr = c"
+from OCP.BRepLib import BRepLib
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.TopExp import TopExp_Explorer
-from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE
+from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_REVERSED
 from OCP.BRep import BRep_Tool
+from OCP.gp import gp_Vec
 from OCP.TopLoc import TopLoc_Location
 from OCP.GCPnts import GCPnts_TangentialDeflection
 from OCP.BRepAdaptor import BRepAdaptor_Curve
 from OCP.TopoDS import TopoDS
 import math
 
+def _cadmark_node_normal(triangulation, index, transform, flip):
+    if not triangulation.HasNormals():
+        return None
+    try:
+        normal = gp_Vec(triangulation.Normal(index)).Transformed(transform)
+    except Exception:
+        return None
+    return [flip * normal.X(), flip * normal.Y(), flip * normal.Z()]
+
+
 def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
     \"\"\"Tessellate an OCP shape into vertices, normals, indices, and face IDs.\"\"\"
     mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
     mesh.Perform()
+    # Meshing alone stores no per-node normals; this derives them from the
+    # surfaces so curved faces shade smoothly instead of flat.
+    BRepLib.EnsureNormalConsistency_s(shape)
 
     all_vertices = []
     all_normals = []
@@ -90,17 +105,28 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
             transform = location.Transformation()
             nb_triangles = triangulation.NbTriangles()
             nb_nodes = triangulation.NbNodes()
+            # Stored normals follow the surface; a reversed face points the
+            # other way, so flip them to face outward.
+            flip = -1.0 if face.Orientation() == TopAbs_REVERSED else 1.0
 
+            face_normals = []
             for i in range(1, nb_nodes + 1):
                 node = triangulation.Node(i)
                 node = node.Transformed(transform)
                 all_vertices.append([node.X(), node.Y(), node.Z()])
+                face_normals.append(_cadmark_node_normal(triangulation, i, transform, flip))
 
-                if triangulation.HasNormals():
-                    normal = triangulation.Normal(i)
-                    all_normals.append([normal.X(), normal.Y(), normal.Z()])
-                else:
-                    all_normals.append([0.0, 0.0, 1.0])
+            # A node on a surface singularity (a loft apex, a sweep seam)
+            # stores no usable normal; give it the face's average so the
+            # triangle still shades rather than going black.
+            valid = [n for n in face_normals if n is not None]
+            if valid:
+                average = [sum(n[axis] for n in valid) / len(valid) for axis in range(3)]
+                length = math.sqrt(sum(component * component for component in average)) or 1.0
+                average = [component / length for component in average]
+            else:
+                average = [0.0, 0.0, 1.0]
+            all_normals.extend(n if n is not None else average for n in face_normals)
 
             for i in range(1, nb_triangles + 1):
                 tri = triangulation.Triangle(i)
@@ -295,11 +321,15 @@ fn is_internal_namespace_name(name: &str) -> bool {
             | "_cadmark_result_shape"
             | "_cadmark_ocp_shape"
             | "_cadmark_tess_result"
+            | "_cadmark_node_normal"
+            | "BRepLib"
             | "BRepMesh_IncrementalMesh"
             | "TopExp_Explorer"
             | "TopAbs_FACE"
             | "TopAbs_EDGE"
+            | "TopAbs_REVERSED"
             | "BRep_Tool"
+            | "gp_Vec"
             | "TopLoc_Location"
             | "GCPnts_TangentialDeflection"
             | "BRepAdaptor_Curve"

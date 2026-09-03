@@ -132,19 +132,22 @@ impl ModelSummary {
     pub fn describe_change_from(&self, before: &ModelSummary) -> Option<String> {
         let mut parts = Vec::new();
         if before.face_count != self.face_count {
-            parts.push(format!("faces {} → {}", before.face_count, self.face_count));
+            parts.push(format!(
+                "faces {} to {}",
+                before.face_count, self.face_count
+            ));
         }
         if !close(before.volume, self.volume) {
             let percent = if before.volume.abs() > f64::EPSILON {
                 format!(
-                    " ({:+.0}%)",
+                    " ({:+.1}%)",
                     (self.volume - before.volume) / before.volume * 100.0
                 )
             } else {
                 String::new()
             };
             parts.push(format!(
-                "volume {} → {} mm³{percent}",
+                "volume {} to {} mm³{percent}",
                 compact(before.volume),
                 compact(self.volume)
             ));
@@ -152,7 +155,7 @@ impl ModelSummary {
         let (before_size, after_size) = (before.size(), self.size());
         if (0..3).any(|axis| !close(before_size[axis], after_size[axis])) {
             parts.push(format!(
-                "size {} × {} × {} → {} × {} × {} mm",
+                "size {} × {} × {} to {} × {} × {} mm",
                 compact(before_size[0]),
                 compact(before_size[1]),
                 compact(before_size[2]),
@@ -168,7 +171,7 @@ impl ModelSummary {
         let large = before.volume.abs() > f64::EPSILON
             && ((self.volume - before.volume) / before.volume).abs() > 0.5;
         if large || self.volume.abs() < f64::EPSILON {
-            report.push_str(" — a large change; check the model is still what you intended");
+            report.push_str(". This is a large change; check the model is still what you intended");
         }
         Some(report)
     }
@@ -249,7 +252,7 @@ mod tests {
         let after = summary(1200.0, [20.0, 10.0, 8.0], 10);
         assert_eq!(
             after.describe_change_from(&before).unwrap(),
-            "faces 6 → 10; volume 1000 → 1200 mm³ (+20%); size 20 × 10 × 5 → 20 × 10 × 8 mm"
+            "faces 6 to 10; volume 1000 to 1200 mm³ (+20.0%); size 20 × 10 × 5 to 20 × 10 × 8 mm"
         );
     }
 
@@ -258,7 +261,7 @@ mod tests {
         let before = summary(1000.0, [20.0, 10.0, 5.0], 6);
         let after = summary(100.0, [20.0, 10.0, 5.0], 6);
         let report = after.describe_change_from(&before).unwrap();
-        assert!(report.starts_with("volume 1000 → 100 mm³ (-90%)"));
+        assert!(report.starts_with("volume 1000 to 100 mm³ (-90.0%)"));
         assert!(report.contains("large change"));
     }
 

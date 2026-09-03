@@ -909,6 +909,38 @@ with BuildPart() as part:
     }
 
     #[test]
+    fn tessellation_carries_outward_surface_normals() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    Cylinder(5, 10)
+"#,
+        )
+        .unwrap();
+        let outward = result
+            .mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.normal[2].abs() < 0.01)
+            .filter(|vertex| {
+                let radial = [vertex.position[0], vertex.position[1]];
+                let dot = radial[0] * vertex.normal[0] + radial[1] * vertex.normal[1];
+                dot > 0.0
+            })
+            .count();
+        let side = result
+            .mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.normal[2].abs() < 0.01)
+            .count();
+        assert!(side > 0, "cylinder wall vertices carry sideways normals");
+        assert_eq!(outward, side, "every wall normal points away from the axis");
+    }
+
+    #[test]
     fn exports_step_stl_and_3mf_from_the_executed_model() {
         activate_test_runtime();
         let result = execute_script_source(

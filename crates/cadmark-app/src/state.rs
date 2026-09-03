@@ -1040,7 +1040,7 @@ mod chat_message_tests {
         let before = summary(1000.0, 6);
         let changed = edit_chat_message("Added a hole", Some(&before), &summary(900.0, 9));
         assert!(changed.starts_with(
-            "Added a hole\n\nModel change: faces 6 → 9; volume 1000 → 900 mm³ (-10%)"
+            "Added a hole\n\nModel change: faces 6 to 9; volume 1000 to 900 mm³ (-10.0%)"
         ));
         let same = edit_chat_message("Renamed a parameter", Some(&before), &before);
         assert_eq!(
