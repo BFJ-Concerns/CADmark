@@ -5,6 +5,8 @@
 // and tessellation extraction for the renderer.
 
 pub mod execution;
+pub mod export;
+pub mod measurement;
 pub mod provenance;
 mod python_runtime;
 pub mod tessellation;

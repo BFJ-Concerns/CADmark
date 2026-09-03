@@ -3,17 +3,23 @@
 use std::path::Path;
 use std::sync::{Mutex, Once};
 
+use cadmark_core::geometry::{GeometryDescriptors, ModelSummary};
 use cadmark_core::ledger::ProvenanceLedger;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
 
+use crate::export::ModelHandle;
 use crate::tessellation::TessellatedMesh;
 
 #[derive(Error, Debug)]
 pub enum ExecutionError {
     #[error("Python error: {0}")]
     Python(#[from] PyErr),
+    /// A failure raised by the user's script, formatted as the traceback the
+    /// script author (or the AI) needs to fix it.
+    #[error("{0}")]
+    Script(String),
     #[error("Script not found: {0}")]
     ScriptNotFound(String),
     #[error("No solid produced by script")]
@@ -109,13 +115,13 @@ pub fn discover_and_activate_venv() -> Result<(), ExecutionError> {
 
     // .venv near the executable — walk up from the binary's directory
     // to handle target/debug/ during development.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for ancestor in exe_dir.ancestors().take(4) {
-                let candidate = ancestor.join(".venv");
-                if candidate.is_dir() {
-                    return activate_venv(&candidate);
-                }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        for ancestor in exe_dir.ancestors().take(4) {
+            let candidate = ancestor.join(".venv");
+            if candidate.is_dir() {
+                return activate_venv(&candidate);
             }
         }
     }
@@ -139,6 +145,12 @@ pub struct ExecutionResult {
     pub mesh: TessellatedMesh,
     /// Complete kernel-neutral provenance ledger.
     pub ledger: ProvenanceLedger,
+    /// Measured geometry of every element, in ledger order.
+    pub descriptors: GeometryDescriptors,
+    /// Whole-model measurements.
+    pub summary: ModelSummary,
+    /// The built model, retained for export.
+    pub model: ModelHandle,
 }
 
 /// Execute a build123d script and return the tessellated result.
@@ -183,14 +195,14 @@ fn execute_script_source_named(
 
     Python::with_gil(|py| {
         // Log the Python version and sys.path for environment diagnostics.
-        if log::log_enabled!(log::Level::Debug) {
-            if let Ok(sys) = py.import("sys") {
-                if let Ok(version) = sys.getattr("version") {
-                    log::debug!("Python version: {version}");
-                }
-                if let Ok(path) = sys.getattr("path") {
-                    log::debug!("sys.path: {path}");
-                }
+        if log::log_enabled!(log::Level::Debug)
+            && let Ok(sys) = py.import("sys")
+        {
+            if let Ok(version) = sys.getattr("version") {
+                log::debug!("Python version: {version}");
+            }
+            if let Ok(path) = sys.getattr("path") {
+                log::debug!("sys.path: {path}");
             }
         }
 
@@ -204,8 +216,9 @@ fn execute_script_source_named(
             builtins
                 .call_method1("exec", (&code, &globals, &globals))
                 .map_err(|error| {
-                    log::error!("Python execution failed: {error}");
-                    ExecutionError::Python(error)
+                    let message = format_script_error(py, &error, filename);
+                    log::error!("Python execution failed: {message}");
+                    ExecutionError::Script(message)
                 })?;
 
             let keys: Vec<String> = globals
@@ -224,7 +237,17 @@ fn execute_script_source_named(
             let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
             let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
             validate_tessellation_ids(&mesh, &ledger)?;
-            Ok(ExecutionResult { mesh, ledger })
+            let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
+            let (descriptors, summary) =
+                crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
+            log::info!("Model measured: {}", summary.describe());
+            Ok(ExecutionResult {
+                mesh,
+                ledger,
+                descriptors,
+                summary,
+                model: ModelHandle::new(shape.unbind()),
+            })
         })();
 
         let restoration = crate::provenance::restore(py, &session);
@@ -233,6 +256,51 @@ fn execute_script_source_named(
         }
         execution
     })
+}
+
+/// Render a script failure as the traceback frames that belong to the user's
+/// script, so the reader sees their own line numbers rather than build123d
+/// internals. Falls back to the bare exception when no user frame exists.
+fn format_script_error(py: Python<'_>, error: &PyErr, filename: &str) -> String {
+    let rendered = (|| -> PyResult<String> {
+        let traceback = py.import("traceback")?;
+        let exception = error.value(py);
+        let frames: Vec<String> = match error.traceback(py) {
+            Some(trace) => traceback
+                .call_method1("extract_tb", (trace,))?
+                .try_iter()?
+                .map(|frame| -> PyResult<Option<String>> {
+                    let frame = frame?;
+                    let frame_file: String = frame.getattr("filename")?.extract()?;
+                    if frame_file != filename {
+                        return Ok(None);
+                    }
+                    let line: u32 = frame.getattr("lineno")?.extract()?;
+                    let code: Option<String> = frame.getattr("line")?.extract()?;
+                    Ok(Some(match code {
+                        Some(code) if !code.trim().is_empty() => {
+                            format!("  line {line}: {}", code.trim())
+                        }
+                        _ => format!("  line {line}"),
+                    }))
+                })
+                .filter_map(|frame| frame.transpose())
+                .collect::<PyResult<_>>()?,
+            None => Vec::new(),
+        };
+        let summary: String = traceback
+            .call_method1("format_exception_only", (exception.get_type(), exception))?
+            .try_iter()?
+            .map(|line| line?.extract::<String>())
+            .collect::<PyResult<Vec<_>>>()?
+            .concat();
+        Ok(if frames.is_empty() {
+            summary.trim_end().to_string()
+        } else {
+            format!("{}\n{}", frames.join("\n"), summary.trim_end())
+        })
+    })();
+    rendered.unwrap_or_else(|_| error.to_string())
 }
 
 fn validate_tessellation_ids(
@@ -295,8 +363,9 @@ mod tests {
                 &strategy,
             )
             .unwrap();
-            assert_eq!(context.provenance.operation, operation);
-            assert_eq!(context.provenance.source.line, line);
+            let entry = context.provenance.resolved().expect("resolved provenance");
+            assert_eq!(entry.operation, operation);
+            assert_eq!(entry.source.line, line);
         }
         for index in 0..result.ledger.edge_count() {
             let context = resolve_context(
@@ -305,8 +374,9 @@ mod tests {
                 &strategy,
             )
             .unwrap();
-            assert_eq!(context.provenance.operation, operation);
-            assert_eq!(context.provenance.source.line, line);
+            let entry = context.provenance.resolved().expect("resolved provenance");
+            assert_eq!(entry.operation, operation);
+            assert_eq!(entry.source.line, line);
         }
         for index in 0..result.ledger.vertex_count() {
             let context = resolve_context(
@@ -315,8 +385,9 @@ mod tests {
                 &strategy,
             )
             .unwrap();
-            assert_eq!(context.provenance.operation, operation);
-            assert_eq!(context.provenance.source.line, line);
+            let entry = context.provenance.resolved().expect("resolved provenance");
+            assert_eq!(entry.operation, operation);
+            assert_eq!(entry.source.line, line);
         }
     }
 
@@ -378,11 +449,19 @@ mod tests {
 
     fn assert_contains_operation(result: &ExecutionResult, operation: SemanticOperation) {
         assert!(
-            resolved_contexts(result)
-                .iter()
-                .any(|context| context.provenance.operation == operation),
+            resolved_contexts(result).iter().any(|context| {
+                context
+                    .provenance
+                    .resolved()
+                    .is_some_and(|entry| entry.operation == operation)
+            }),
             "no final topology resolved to {operation:?}"
         );
+    }
+
+    /// The resolved entry of a context, for assertions on single-source elements.
+    fn entry(context: &GeometryContext) -> &ProvenanceEntry {
+        context.provenance.resolved().expect("resolved provenance")
     }
 
     #[test]
@@ -490,28 +569,28 @@ with BuildPart() as part:
         assert_contains_operation(&result, SemanticOperation::Fillet);
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Fillet
+            entry(context).operation == SemanticOperation::Fillet
                 && matches!(context.element, TopologyElement::Face(_))
-                && context.provenance.relation == ProvenanceRelation::Generated
+                && entry(context).relation == ProvenanceRelation::Generated
         }));
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Fillet
-                && context.provenance.relation == ProvenanceRelation::Modified
+            entry(context).operation == SemanticOperation::Fillet
+                && entry(context).relation == ProvenanceRelation::Modified
         }));
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Fillet
+            entry(context).operation == SemanticOperation::Fillet
                 && matches!(context.element, TopologyElement::Edge(_))
                 && matches!(
-                    context.provenance.relation,
+                    entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
                         | ProvenanceRelation::ModifiedDescendant
                 )
         }));
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Fillet
+            entry(context).operation == SemanticOperation::Fillet
                 && matches!(context.element, TopologyElement::Vertex(_))
                 && matches!(
-                    context.provenance.relation,
+                    entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
                         | ProvenanceRelation::ModifiedDescendant
                 )
@@ -534,28 +613,28 @@ with BuildPart() as part:
         assert_contains_operation(&result, SemanticOperation::Chamfer);
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Chamfer
+            entry(context).operation == SemanticOperation::Chamfer
                 && matches!(context.element, TopologyElement::Face(_))
-                && context.provenance.relation == ProvenanceRelation::Generated
+                && entry(context).relation == ProvenanceRelation::Generated
         }));
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Chamfer
-                && context.provenance.relation == ProvenanceRelation::Modified
+            entry(context).operation == SemanticOperation::Chamfer
+                && entry(context).relation == ProvenanceRelation::Modified
         }));
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Chamfer
+            entry(context).operation == SemanticOperation::Chamfer
                 && matches!(context.element, TopologyElement::Edge(_))
                 && matches!(
-                    context.provenance.relation,
+                    entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
                         | ProvenanceRelation::ModifiedDescendant
                 )
         }));
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Chamfer
+            entry(context).operation == SemanticOperation::Chamfer
                 && matches!(context.element, TopologyElement::Vertex(_))
                 && matches!(
-                    context.provenance.relation,
+                    entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
                         | ProvenanceRelation::ModifiedDescendant
                 )
@@ -662,9 +741,9 @@ with BuildPart() as part:
         assert_contains_operation(&result, SemanticOperation::Box);
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
-            context.provenance.operation == SemanticOperation::Extrude
+            entry(context).operation == SemanticOperation::Extrude
                 && matches!(context.element, TopologyElement::Face(_))
-                && context.provenance.source.line == 12
+                && entry(context).source.line == 12
         }));
         assert_bridge_consumers(&result);
     }
@@ -688,20 +767,174 @@ with BuildPart() as part:
     }
 
     #[test]
-    fn unsupported_sphere_fails_with_missing_history() {
+    fn real_sphere_cone_torus_and_wedge_resolve_all_final_topology() {
         activate_test_runtime();
-        let error = execute_script_source(
+        let result = execute_script_source(
             r#"from build123d import *
 
 with BuildPart() as part:
     Sphere(5)
+    with Locations((20, 0, 0)):
+        Cone(4, 2, 8)
+    with Locations((0, 20, 0)):
+        Torus(4, 1)
+    with Locations((0, -20, 0)):
+        Wedge(4, 4, 4, 1, 1, 3, 3)
 "#,
         )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            ExecutionError::Provenance(crate::provenance::ProvenanceError::MissingHistory { .. })
+        .unwrap();
+        assert_eq!(result.ledger.untraced_count(), 0);
+        for operation in [
+            SemanticOperation::Sphere,
+            SemanticOperation::Cone,
+            SemanticOperation::Torus,
+            SemanticOperation::Wedge,
+        ] {
+            assert_contains_operation(&result, operation);
+        }
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_loft_and_sweep_resolve_all_final_topology() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch(Plane.XY) as base:
+        Rectangle(6, 6)
+    with BuildSketch(Plane.XY.offset(8)) as top:
+        Circle(2)
+    loft()
+    with BuildLine() as path:
+        Polyline((20, 0, 0), (20, 0, 10), (25, 0, 15))
+    with BuildSketch(Plane.XZ):
+        with Locations((20, 0)):
+            Circle(1)
+    sweep(path=path.line)
+"#,
+        )
+        .unwrap();
+        assert_eq!(result.ledger.untraced_count(), 0);
+        assert_contains_operation(&result, SemanticOperation::Loft);
+        assert_contains_operation(&result, SemanticOperation::Sweep);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_shell_mirror_split_and_taper_resolve_all_final_topology() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    Box(20, 20, 10)
+    offset(amount=-2, openings=part.faces().sort_by(Axis.Z)[-1])
+    mirror(about=Plane.YZ)
+    split(bisect_by=Plane.XZ, keep=Keep.TOP)
+    with BuildSketch(part.faces().sort_by(Axis.Y)[-1]):
+        Circle(3)
+    extrude(amount=4, taper=10)
+"#,
+        )
+        .unwrap();
+        assert_eq!(result.ledger.untraced_count(), 0);
+        assert_contains_operation(&result, SemanticOperation::Split);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn untraced_geometry_still_renders_and_reports_untraced_on_selection() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
+
+with BuildPart() as part:
+    add(Solid(BRepPrimAPI_MakeSphere(5).Shape()))
+"#,
+        )
+        .unwrap();
+        assert!(!result.mesh.indices.is_empty());
+        assert_eq!(result.ledger.face_count(), 1);
+        assert_eq!(result.ledger.untraced_count(), result.ledger.len());
+        let context = resolve_context(
+            &TopologyElement::Face(FaceId(0)),
+            &result.ledger,
+            &NullIdentification,
+        )
+        .unwrap();
+        assert_eq!(context.provenance, LedgerValue::Untraced);
+    }
+
+    #[test]
+    fn execution_measures_every_final_element_and_the_whole_model() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    Box(20, 10, 5)
+"#,
+        )
+        .unwrap();
+        assert_eq!(result.descriptors.faces.len(), result.ledger.face_count());
+        assert_eq!(result.descriptors.edges.len(), result.ledger.edge_count());
+        assert_eq!(
+            result.descriptors.vertices.len(),
+            result.ledger.vertex_count()
+        );
+        assert!(
+            result
+                .descriptors
+                .faces
+                .iter()
+                .all(|face| face.surface_type == "plane")
+        );
+        let top = result
+            .descriptors
+            .faces
+            .iter()
+            .find(|face| face.normal[2] > 0.99)
+            .expect("box has an upward face");
+        assert!((top.area - 200.0).abs() < 1e-6);
+        assert!((top.centre[2] - 2.5).abs() < 1e-6);
+        assert!((result.summary.volume - 1000.0).abs() < 1e-6);
+        let size = result.summary.size();
+        assert!((size[0] - 20.0).abs() < 1e-3);
+        assert!((size[1] - 10.0).abs() < 1e-3);
+        assert!((size[2] - 5.0).abs() < 1e-3);
+        assert_eq!(result.summary.face_count, 6);
+    }
+
+    #[test]
+    fn exports_step_stl_and_3mf_from_the_executed_model() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    Box(20, 10, 5)
+"#,
+        )
+        .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "cadmark-export-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
         ));
+        std::fs::create_dir_all(&directory).unwrap();
+        for format in [
+            cadmark_core::export::ExportFormat::Step,
+            cadmark_core::export::ExportFormat::Stl,
+            cadmark_core::export::ExportFormat::ThreeMf,
+        ] {
+            let path = directory.join(format!("part.{}", format.extension()));
+            crate::export::export_model(&result.model, format, &path).unwrap();
+            assert!(std::fs::metadata(&path).unwrap().len() > 0, "{path:?}");
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
@@ -716,7 +949,12 @@ raise RuntimeError("deliberate execution failure")
 "#,
         )
         .unwrap_err();
-        assert!(matches!(error, ExecutionError::Python(_)));
+        let ExecutionError::Script(message) = error else {
+            panic!("expected a script failure, got {error:?}");
+        };
+        assert!(message.contains("line 5"));
+        assert!(message.contains("deliberate execution failure"));
+        assert!(message.contains("RuntimeError"));
 
         let result = execute_script_source(
             r#"from build123d import *
