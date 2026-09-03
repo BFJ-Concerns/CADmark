@@ -21,16 +21,20 @@ Rust workspace with six crates:
 ## Build & Run
 
 ```bash
+scripts/bootstrap-python-runtime   # One-off: create .venv with build123d + OCP
 cargo check          # Type-check
-cargo test           # Run all tests
+cargo test           # Run all tests (kernel tests need the .venv)
 cargo run -- [dir]   # Run with a project directory (defaults to cwd)
 ```
 
 Requires Python 3.12 (cadquery-ocp). The `.cargo/config.toml` points PyO3
 at the uv-managed Python 3.12 installation. `cadmark-app` embeds an rpath
 to that runtime's `lib/` directory, and `cadmark-kernel` sets `PYTHONHOME`
-from the configured interpreter before Python initialises. The `.venv/` in
-the project root is for runtime packages such as `build123d`.
+from the configured interpreter before Python initialises. The gitignored
+`.venv/` in the project root holds the runtime packages (`build123d`, OCP)
+pinned in `requirements.txt`; `scripts/bootstrap-python-runtime` creates it.
+Without it the kernel tests fail with `No module named 'OCP'` and the app
+cannot execute scripts.
 
 ## Key Decisions
 
