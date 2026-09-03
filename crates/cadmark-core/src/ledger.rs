@@ -36,6 +36,8 @@ pub enum ProvenanceRelation {
 pub enum SemanticOperation {
     Box,
     Cylinder,
+    Extrude,
+    Revolve,
     BooleanFuse,
     BooleanCut,
     BooleanCommon,
