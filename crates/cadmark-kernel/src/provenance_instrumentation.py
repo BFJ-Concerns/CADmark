@@ -18,6 +18,8 @@ from OCP.BRepFilletAPI import (
 from OCP.BRepPrimAPI import (
     BRepPrimAPI_MakeBox as _cadmark_expected_box,
     BRepPrimAPI_MakeCylinder as _cadmark_expected_cylinder,
+    BRepPrimAPI_MakePrism as _cadmark_expected_prism,
+    BRepPrimAPI_MakeRevol as _cadmark_expected_revol,
 )
 from OCP.ShapeUpgrade import (
     ShapeUpgrade_UnifySameDomain as _cadmark_expected_cleanup,
@@ -47,6 +49,8 @@ class UnsupportedProvenanceCapture(RuntimeError):
 _cadmark_manifest = (
     ("build123d.topology.three_d", "BRepPrimAPI_MakeBox", _cadmark_expected_box, "Box", "primitive"),
     ("build123d.topology.three_d", "BRepPrimAPI_MakeCylinder", _cadmark_expected_cylinder, "Cylinder", "primitive"),
+    ("build123d.topology.utils", "BRepPrimAPI_MakePrism", _cadmark_expected_prism, "Extrude", "sweep"),
+    ("build123d.topology.three_d", "BRepPrimAPI_MakeRevol", _cadmark_expected_revol, "Revolve", "sweep"),
     ("build123d.topology.shape_core", "BRepAlgoAPI_Fuse", _cadmark_expected_fuse, "BooleanFuse", "history"),
     ("build123d.topology.shape_core", "BRepAlgoAPI_Cut", _cadmark_expected_cut, "BooleanCut", "history"),
     ("build123d.topology.three_d", "BRepAlgoAPI_Common", _cadmark_expected_common, "BooleanCommon", "history"),
@@ -324,6 +328,20 @@ class _CadmarkSession:
                     self.register(output, candidates, replace=True)
                 else:
                     self.register(output, self.lookup(output))
+        return operation_id
+
+    def capture_sweep(self, builder, result, operation, api_class):
+        # A sweep (prism or revolve) reports the topology it generates from
+        # each profile element, but the profile itself survives as the base of
+        # the result with no history entry. The profile usually comes from a
+        # sketch, which is outside the instrumented set, so any output the
+        # history left unattributed is credited to the sweep as Generated.
+        operation_id = self.capture_history(builder, result, operation, api_class)
+        candidate = {"operation_id": operation_id, "relation": "Generated"}
+        for _kind, outputs in self.topology(result):
+            for output in outputs:
+                if not self.lookup(output):
+                    self.register(output, [candidate])
 
     def capture_transport(self, builder, result, allow_partner):
         inputs_by_kind = {"face": [], "edge": [], "vertex": []}
@@ -360,6 +378,8 @@ class _CadmarkSession:
             self.capture_primitive(builder, result, operation, api_class)
         elif adapter == "history":
             self.capture_history(builder, result, operation, api_class)
+        elif adapter == "sweep":
+            self.capture_sweep(builder, result, operation, api_class)
         elif adapter == "copy":
             self.capture_transport(builder, result, allow_partner=True)
         elif adapter == "cleanup":

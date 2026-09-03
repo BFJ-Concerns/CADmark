@@ -224,13 +224,17 @@ pub(crate) fn find_result_shape<'py>(
                     build_part_shape = Some(part);
                 }
             }
+            // Builders hold their result in `_obj`. The public `sketch` and
+            // `line` properties rebuild the result in global coordinates
+            // through OCP copies, which the provenance wrapper refuses
+            // outside a user frame, so only the stored object is inspected.
             "BuildSketch" => {
-                if get_non_none_attr(&value, "sketch")?.is_some() {
+                if get_non_none_attr(&value, "_obj")?.is_some() {
                     unsupported_outputs.push(format!("{name}: BuildSketch (2D output)"));
                 }
             }
             "BuildLine" => {
-                if get_non_none_attr(&value, "line")?.is_some() {
+                if get_non_none_attr(&value, "_obj")?.is_some() {
                     unsupported_outputs.push(format!("{name}: BuildLine (1D output)"));
                 }
             }
@@ -423,7 +427,7 @@ class DirectShape:
 
 class BuildSketch:
     def __init__(self):
-        self.sketch = DirectShape()
+        self._obj = DirectShape()
 
 sketch = BuildSketch()
 ",

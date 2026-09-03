@@ -262,6 +262,8 @@ fn parse_operation(value: &str) -> Result<SemanticOperation, ProvenanceError> {
     match value {
         "Box" => Ok(SemanticOperation::Box),
         "Cylinder" => Ok(SemanticOperation::Cylinder),
+        "Extrude" => Ok(SemanticOperation::Extrude),
+        "Revolve" => Ok(SemanticOperation::Revolve),
         "BooleanFuse" => Ok(SemanticOperation::BooleanFuse),
         "BooleanCut" => Ok(SemanticOperation::BooleanCut),
         "BooleanCommon" => Ok(SemanticOperation::BooleanCommon),
@@ -428,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_has_exactly_the_nine_supported_bindings() {
+    fn manifest_has_exactly_the_eleven_supported_bindings() {
         activate();
         let _guard = crate::execution::PYTHON_EXECUTION_LOCK
             .lock()
@@ -436,7 +438,7 @@ mod tests {
         Python::with_gil(|py| {
             let namespace = run_instrumentation_source(py).unwrap();
             let manifest = namespace.get_item("_cadmark_manifest").unwrap().unwrap();
-            assert_eq!(manifest.len().unwrap(), 9);
+            assert_eq!(manifest.len().unwrap(), 11);
             let bindings: Vec<(String, String)> = manifest
                 .try_iter()
                 .unwrap()
@@ -451,6 +453,10 @@ mod tests {
             assert!(bindings.contains(&(
                 "build123d.topology.three_d".into(),
                 "BRepAlgoAPI_Common".into()
+            )));
+            assert!(bindings.contains(&(
+                "build123d.topology.utils".into(),
+                "BRepPrimAPI_MakePrism".into()
             )));
         });
     }
