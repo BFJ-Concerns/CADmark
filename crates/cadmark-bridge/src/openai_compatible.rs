@@ -68,7 +68,13 @@ impl OpenAiCompatibleClient {
         let body = ResponsesRequest {
             model: &self.model,
             instructions,
-            input,
+            input: vec![InputMessage {
+                role: "user",
+                content: vec![InputContent {
+                    kind: "input_text",
+                    text: input,
+                }],
+            }],
             store: false,
         };
         let mut request = self.client.post(self.responses_url.clone()).json(&body);
@@ -120,12 +126,30 @@ impl fmt::Debug for OpenAiCompatibleClient {
     }
 }
 
+/// Request body for the Responses API.
+///
+/// `input` is always the explicit message-array form rather than a bare
+/// string: OpenAI accepts both, but Anthropic-translating gateways reject
+/// the bare string with "cache_control cannot be set for empty text blocks".
 #[derive(Serialize)]
 struct ResponsesRequest<'a> {
     model: &'a str,
     instructions: &'a str,
-    input: &'a str,
+    input: Vec<InputMessage<'a>>,
     store: bool,
+}
+
+#[derive(Serialize)]
+struct InputMessage<'a> {
+    role: &'a str,
+    content: Vec<InputContent<'a>>,
+}
+
+#[derive(Serialize)]
+struct InputContent<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    text: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -438,7 +462,13 @@ mod tests {
         assert!(request.authenticated);
         assert_eq!(request.body["model"], "configured-model");
         assert_eq!(request.body["instructions"], "system content");
-        assert_eq!(request.body["input"], "user content");
+        assert_eq!(
+            request.body["input"],
+            serde_json::json!([{
+                "role": "user",
+                "content": [{"type": "input_text", "text": "user content"}]
+            }])
+        );
         assert_eq!(request.body["store"], false);
         assert_eq!(request.body.as_object().unwrap().len(), 4);
     }

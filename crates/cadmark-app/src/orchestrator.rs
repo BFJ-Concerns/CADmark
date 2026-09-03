@@ -337,6 +337,15 @@ mod tests {
         body: Value,
     }
 
+    impl RecordedRequest {
+        /// The user text carried by the Responses message-array `input`.
+        fn input_text(&self) -> &str {
+            self.body["input"][0]["content"][0]["text"]
+                .as_str()
+                .expect("recorded request carries message-array input")
+        }
+    }
+
     struct ScriptedResponse {
         status: u16,
         body: String,
@@ -550,7 +559,7 @@ mod tests {
             assert_eq!(record.body["model"], "recording-model");
             assert_eq!(record.body["store"], false);
         }
-        let lookup_input = records[0].body["input"].as_str().unwrap();
+        let lookup_input = records[0].input_text();
         assert!(
             records[0].body["instructions"]
                 .as_str()
@@ -562,7 +571,7 @@ mod tests {
         assert_eq!(lookup_input.matches("current request").count(), 1);
         assert!(lookup_input.contains("<build123d_documentation>"));
 
-        let edit_input = records[1].body["input"].as_str().unwrap();
+        let edit_input = records[1].input_text();
         assert!(
             records[1].body["instructions"]
                 .as_str()
@@ -680,9 +689,8 @@ mod tests {
         let records = records.lock().unwrap();
         assert_eq!(records.len(), 2);
         assert!(
-            !records[1].body["input"]
-                .as_str()
-                .unwrap()
+            !records[1]
+                .input_text()
                 .contains("Relevant build123d API reference")
         );
     }
@@ -752,7 +760,7 @@ mod tests {
         assert_eq!(retry.path, "/v1/responses");
         assert!(retry.authenticated);
         assert_eq!(retry.body["model"], "recording-model");
-        let input = retry.body["input"].as_str().unwrap();
+        let input = retry.input_text();
         for expected in [
             "DISTINCTIVE_TRACEBACK",
             "DISTINCTIVE_RETRY_DOCS",
