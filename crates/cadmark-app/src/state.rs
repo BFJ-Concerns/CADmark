@@ -7,7 +7,7 @@
 // them without lifetime gymnastics.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification};
 use cadmark_core::export::ExportFormat;
@@ -43,6 +43,10 @@ struct ViewportResources {
     /// Decoded pick result from the most recent readback, waiting
     /// for `update()` to consume it.
     pick_result: Option<CompletedPick>,
+    /// Per-frame hover picking. Unlike a click, a hover readback is never
+    /// waited for: the mapped result is collected on a later frame, and
+    /// a frame whose readback is still in flight issues no new one.
+    hover: HoverPick,
     /// Last-known viewport size in physical pixels — triggers resize
     /// of the picking texture and depth buffer when it changes.
     viewport_size: (u32, u32),
@@ -52,6 +56,77 @@ enum CompletedPick {
     Hit(cadmark_core::geometry::TopologyElement),
     Background,
     ReadbackFailed,
+}
+
+/// Where a buffer-mapping callback leaves its outcome for a later frame.
+type MapStatus = Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>;
+
+/// Asynchronous readback of the element under the cursor.
+struct HoverPick {
+    /// One-pixel staging buffer, separate from the click path's so the two
+    /// readbacks never contend for a mapping.
+    staging: wgpu::Buffer,
+    /// Mapping in progress; the callback stores its status here and a later
+    /// frame's poll reads it.
+    in_flight: Option<MapStatus>,
+    /// Picking ID under the cursor from the most recent completed readback
+    /// (0 = background), waiting for `update()` to consume it.
+    result: Option<u32>,
+}
+
+impl HoverPick {
+    fn new(device: &wgpu::Device) -> Self {
+        Self {
+            staging: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("hover_pick_staging"),
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+            in_flight: None,
+            result: None,
+        }
+    }
+
+    /// Collect a finished readback without blocking. A mapping that has not
+    /// completed stays in flight; a failed one is dropped, and the next
+    /// frame simply picks again.
+    fn collect(&mut self, device: &wgpu::Device) {
+        let Some(status) = &self.in_flight else {
+            return;
+        };
+        let _ = device.poll(wgpu::Maintain::Poll);
+        let status = status.lock().map(|mut slot| slot.take()).unwrap_or(None);
+        match status {
+            Some(Ok(())) => {
+                let data = self.staging.slice(..4).get_mapped_range();
+                let pixel = [data[0], data[1], data[2], data[3]];
+                drop(data);
+                self.staging.unmap();
+                self.result = Some(cadmark_renderer::picking::colour_to_id(pixel));
+                self.in_flight = None;
+            }
+            Some(Err(error)) => {
+                log::debug!("Hover readback failed: {error}");
+                self.in_flight = None;
+            }
+            None => {}
+        }
+    }
+
+    /// Begin mapping the staging buffer once the copy into it is submitted.
+    fn begin_readback(&mut self) {
+        let slot = Arc::new(Mutex::new(None));
+        let writer = Arc::clone(&slot);
+        self.staging
+            .slice(..4)
+            .map_async(wgpu::MapMode::Read, move |status| {
+                if let Ok(mut slot) = writer.lock() {
+                    *slot = Some(status);
+                }
+            });
+        self.in_flight = Some(slot);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +187,8 @@ struct ViewportCallback {
     /// Pixel coordinates within the viewport to read back for
     /// picking, if the user clicked this frame.
     pick_request: Option<(u32, u32)>,
+    /// Pixel coordinates under the cursor, if it is over the viewport.
+    hover_request: Option<(u32, u32)>,
     /// Viewport size in physical pixels (for resize detection).
     viewport_size: (u32, u32),
 }
@@ -195,6 +272,8 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             res.viewport_size = (w, h);
         }
 
+        res.hover.collect(device);
+
         // ── Write per-frame uniforms ──
         queue.write_buffer(
             &res.pipelines.mesh_uniform_buffer,
@@ -203,11 +282,6 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         );
         queue.write_buffer(
             &res.pipelines.picking_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&self.simple_uniforms),
-        );
-        queue.write_buffer(
-            &res.pipelines.wireframe_uniform_buffer,
             0,
             bytemuck::bytes_of(&self.simple_uniforms),
         );
@@ -225,63 +299,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("pick_readback_encoder"),
                     });
-
-                {
-                    let mut pass = pick_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("picking_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &res.picking.texture_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: &res.pipelines.depth_texture,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        ..Default::default()
-                    });
-
-                    pass.set_pipeline(&res.pipelines.picking_pipeline);
-                    pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                }
-
-                if mesh.edge_vertex_count > 0 {
-                    let mut pass = pick_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("edge_picking_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &res.picking.texture_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: &res.pipelines.depth_texture,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        ..Default::default()
-                    });
-
-                    pass.set_pipeline(&res.pipelines.edge_picking_pipeline);
-                    pass.set_bind_group(0, &res.pipelines.picking_bind_group, &[]);
-                    pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
-                    pass.draw(0..mesh.edge_vertex_count, 0..1);
-                }
+                encode_picking_passes(&mut pick_encoder, &res.pipelines, &res.picking, mesh);
 
                 let submission_token = res.next_submission_token;
                 res.next_submission_token = res.next_submission_token.wrapping_add(1).max(1);
@@ -308,6 +326,25 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     pixel: (x, y),
                     submission_token,
                 });
+            } else if let Some((x, y)) = self.hover_request
+                && res.hover.in_flight.is_none()
+            {
+                // Hover shares the click path's picking texture but not its
+                // wait: the readback is collected on a later frame.
+                let mut hover_encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("hover_readback_encoder"),
+                    });
+                encode_picking_passes(&mut hover_encoder, &res.pipelines, &res.picking, mesh);
+                cadmark_renderer::viewport::copy_pick_pixel(
+                    &mut hover_encoder,
+                    &res.picking,
+                    &res.hover.staging,
+                    x,
+                    y,
+                );
+                queue.submit(std::iter::once(hover_encoder.finish()));
+                res.hover.begin_readback();
             }
 
             // ── Offscreen main viewport pass (with depth) ──
@@ -351,7 +388,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                 // Wireframe overlay.
                 if mesh.edge_vertex_count > 0 {
                     pass.set_pipeline(&res.pipelines.wireframe_pipeline);
-                    pass.set_bind_group(0, &res.pipelines.wireframe_bind_group, &[]);
+                    pass.set_bind_group(0, &res.pipelines.mesh_bind_group, &[]);
                     pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
                     pass.draw(0..mesh.edge_vertex_count, 0..1);
                 }
@@ -376,6 +413,72 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         render_pass.set_pipeline(&res.pipelines.blit_pipeline);
         render_pass.set_bind_group(0, &res.pipelines.blit_bind_group, &[]);
         render_pass.draw(0..3, 0..1);
+    }
+}
+
+/// Render every pickable element into the colour-ID texture: faces first,
+/// then edges drawn over them so a cursor on an edge picks the edge.
+fn encode_picking_passes(
+    encoder: &mut wgpu::CommandEncoder,
+    pipelines: &cadmark_renderer::pipeline::RenderPipelines,
+    picking: &cadmark_renderer::picking::PickingPass,
+    mesh: &cadmark_renderer::mesh::GpuMesh,
+) {
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("picking_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &picking.texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &pipelines.depth_texture,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&pipelines.picking_pipeline);
+        pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+    }
+
+    if mesh.edge_vertex_count > 0 {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("edge_picking_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &picking.texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &pipelines.depth_texture,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&pipelines.edge_picking_pipeline);
+        pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
+        pass.draw(0..mesh.edge_vertex_count, 0..1);
     }
 }
 
@@ -503,6 +606,13 @@ pub struct CadmarkApp {
     /// across frames so `handle_pick_result` can position the overlay
     /// correctly when the readback arrives.
     pick_in_flight: Option<(f32, f32)>,
+    /// Whether a hover readback was pending at the start of this frame, so
+    /// the frame that collects it is scheduled.
+    hover_readback_pending: bool,
+    /// The cursor pixel and camera the last hover pick was issued for. A
+    /// frame that changes neither issues no new pick, so an idle cursor
+    /// costs nothing.
+    last_hover_probe: Option<((u32, u32), cadmark_renderer::camera::Camera)>,
     /// Whether a mesh has been uploaded to the GPU (for placeholder
     /// text logic — avoids locking the renderer to check).
     has_mesh: bool,
@@ -569,6 +679,7 @@ impl CadmarkApp {
             let pipelines =
                 cadmark_renderer::pipeline::RenderPipelines::new(&rs.device, format, w, h);
             let picking = cadmark_renderer::picking::PickingPass::new(&rs.device, w, h);
+            let hover = HoverPick::new(&rs.device);
             let submission_marker_source = rs.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pick_submission_marker_source"),
                 size: 4,
@@ -592,6 +703,7 @@ impl CadmarkApp {
                 next_submission_token: 1,
                 retry_pick: None,
                 pick_result: None,
+                hover,
                 viewport_size: (w, h),
             };
             rs.renderer.write().callback_resources.insert(resources);
@@ -627,10 +739,16 @@ impl CadmarkApp {
             pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
+            hover_readback_pending: false,
+            last_hover_probe: None,
             has_mesh: false,
             wgpu_render_state,
             status: None,
         };
+        app.renderer.target_is_srgb = app
+            .wgpu_render_state
+            .as_ref()
+            .is_some_and(|rs| rs.target_format.is_srgb());
         app.request_reload();
         app
     }
@@ -788,6 +906,7 @@ impl CadmarkApp {
     fn clear_selection(&mut self) {
         self.selection = SelectionState::None;
         self.renderer.selected_id = 0;
+        self.renderer.hover_id = 0;
         self.overlay.close();
     }
 
@@ -811,6 +930,7 @@ impl CadmarkApp {
                 res.pick_result = None;
                 res.pick_attempt = None;
                 res.retry_pick = None;
+                res.hover.result = None;
             }
         }
     }
@@ -914,6 +1034,8 @@ impl CadmarkApp {
             res.mesh = Some(gpu_mesh);
         }
         self.has_mesh = true;
+        // A new mesh under a resting cursor must be picked afresh.
+        self.last_hover_probe = None;
     }
 
     /// Check callback_resources for a decoded pick result from the
@@ -923,14 +1045,19 @@ impl CadmarkApp {
             return;
         };
 
-        // Extract the pick result from callback_resources.
-        let completed = {
+        // Extract the pick and hover results from callback_resources.
+        let (completed, hover) = {
             let mut renderer = rs.renderer.write();
             let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() else {
                 return;
             };
-            res.pick_result.take()
+            self.hover_readback_pending = res.hover.in_flight.is_some();
+            (res.pick_result.take(), res.hover.result.take())
         };
+
+        if let Some(id) = hover {
+            self.renderer.hover_id = id;
+        }
 
         match completed_pick_transition(completed, &mut self.pick_in_flight) {
             PickTransition::Waiting | PickTransition::Background => {}
@@ -1064,6 +1191,9 @@ impl eframe::App for CadmarkApp {
         if self.busy.is_some() || self.exports_in_flight > 0 || self.pick_in_flight.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+        if self.hover_readback_pending {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        }
 
         // Top toolbar.
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -1169,6 +1299,20 @@ impl eframe::App for CadmarkApp {
                 self.clear_selection();
             }
 
+            // Hover: pick under the cursor while it rests over the model,
+            // but not mid-drag, when the view is moving under it.
+            let hover_local = if self.has_mesh && response.hovered() && !response.dragged() {
+                response.hover_pos().map(|pos| pos - rect.min)
+            } else {
+                None
+            };
+            if hover_local.is_none() {
+                self.renderer.hover_id = 0;
+            }
+            if self.renderer.hover_id != 0 {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+
             // ── Viewport rendering ──────────────────────────────────
 
             // Background rect — always drawn so the viewport has a
@@ -1191,10 +1335,22 @@ impl eframe::App for CadmarkApp {
             }
 
             // Consume the pending pick (local coords → pixel coords).
+            let to_pixels = |local: egui::Vec2| ((local.x * ppp) as u32, (local.y * ppp) as u32);
             let pick_request = self
                 .pending_pick
                 .take()
-                .map(|(x, y)| ((x * ppp) as u32, (y * ppp) as u32));
+                .map(|(x, y)| to_pixels(egui::vec2(x, y)));
+            let hover_request = hover_local.map(to_pixels).filter(|&pixel| {
+                let probe = (pixel, self.renderer.camera.clone());
+                if self.last_hover_probe.as_ref() == Some(&probe) {
+                    return false;
+                }
+                self.last_hover_probe = Some(probe);
+                true
+            });
+            if hover_request.is_some() {
+                self.hover_readback_pending = true;
+            }
 
             let callback = eframe::egui_wgpu::Callback::new_paint_callback(
                 rect,
@@ -1202,6 +1358,7 @@ impl eframe::App for CadmarkApp {
                     mesh_uniforms: self.renderer.mesh_uniforms(aspect),
                     simple_uniforms: self.renderer.simple_uniforms(aspect),
                     pick_request,
+                    hover_request,
                     viewport_size,
                 },
             );
