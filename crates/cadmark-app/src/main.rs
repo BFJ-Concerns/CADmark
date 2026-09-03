@@ -9,6 +9,7 @@ mod config;
 pub mod git_ops;
 pub mod orchestrator;
 mod state;
+mod user_settings;
 
 fn surface_error_action(error: wgpu::SurfaceError) -> eframe::egui_wgpu::SurfaceErrorAction {
     match error {
@@ -34,7 +35,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1280.0, 800.0])
+            .with_inner_size([1400.0, 860.0])
+            .with_min_inner_size([900.0, 600.0])
             .with_title("CADmark"),
         wgpu_options,
         // Depth testing happens in the offscreen viewport pass (state.rs),

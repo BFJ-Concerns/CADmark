@@ -60,6 +60,11 @@ impl OpenAiCompatibleClient {
         })
     }
 
+    /// The model name sent with every request.
+    pub(crate) fn model_name(&self) -> &str {
+        &self.model
+    }
+
     pub(crate) async fn request_text(
         &self,
         instructions: &str,

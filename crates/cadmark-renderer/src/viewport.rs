@@ -134,8 +134,10 @@ pub fn render_picking(encoder: &mut wgpu::CommandEncoder, state: &ViewportRender
                 view: &picking.texture_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // Clear to 0 = background (no element).
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    // Every channel clears to zero: the texture is Rgba8Uint,
+                    // so an alpha of 1.0 would land as the byte 1 and decode
+                    // as a vertex rather than the background.
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
             })],
