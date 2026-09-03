@@ -15,8 +15,10 @@ pub enum BackendError {
     RequestFailed(String),
     #[error("AI response could not be parsed: {0}")]
     ParseError(String),
-    #[error("AI request timed out")]
-    Timeout,
+    #[error(
+        "AI request timed out after {after_seconds} s (raise timeout_seconds in cadmark.json to wait longer)"
+    )]
+    Timeout { after_seconds: u64 },
 }
 
 /// Response from the AI backend.

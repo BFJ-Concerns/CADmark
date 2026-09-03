@@ -8,7 +8,10 @@ use thiserror::Error;
 
 use crate::openai_compatible::{Credential, OpenAiCompatibleClient};
 
-const DEFAULT_TIMEOUT_SECONDS: u64 = 180;
+/// How long a single AI request may take. Reasoning models writing a
+/// whole script can run for several minutes, so the ceiling is generous;
+/// `timeout_seconds` in `cadmark.json` overrides it.
+const DEFAULT_TIMEOUT_SECONDS: u64 = 600;
 
 /// Complete AI section of `cadmark.json`.
 #[derive(Deserialize)]
