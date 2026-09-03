@@ -1,0 +1,53 @@
+#!/bin/sh
+# Create the repository-root .venv the embedded kernel imports build123d from.
+#
+# Installs the exact versions in requirements.txt into .venv/ using a Python
+# 3.12 interpreter (cadquery-ocp publishes no wheels for newer Pythons), then
+# proves build123d and OCP import. Re-running is safe: an existing .venv is
+# reused and brought up to the pinned versions.
+#
+# Interpreter selection, in order: --python PATH, the PYO3_PYTHON environment
+# variable (the same interpreter Cargo builds against), then `uv python find
+# 3.12`, then python3.12 on PATH.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+venv="$repo_root/.venv"
+python=${PYO3_PYTHON:-}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --python) python=$2; shift 2 ;;
+        *) echo "usage: scripts/bootstrap-python-runtime [--python /path/to/python3.12]" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$python" ] && command -v uv >/dev/null 2>&1; then
+    python=$(uv python find 3.12 2>/dev/null || true)
+fi
+if [ -z "$python" ]; then
+    python=$(command -v python3.12 || true)
+fi
+if [ -z "$python" ] || [ ! -x "$python" ]; then
+    echo "bootstrap: no Python 3.12 interpreter found; pass --python or set PYO3_PYTHON" >&2
+    exit 1
+fi
+
+version=$("$python" -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+if [ "$version" != "3.12" ]; then
+    echo "bootstrap: $python is Python $version; the kernel requires 3.12" >&2
+    exit 1
+fi
+
+if command -v uv >/dev/null 2>&1; then
+    [ -x "$venv/bin/python" ] || uv venv --python "$python" "$venv"
+    uv pip install --python "$venv/bin/python" -r "$repo_root/requirements.txt"
+else
+    [ -x "$venv/bin/python" ] || "$python" -m venv "$venv"
+    "$venv/bin/python" -m pip install --quiet -r "$repo_root/requirements.txt"
+fi
+
+"$venv/bin/python" - <<'PY'
+import build123d, OCP
+print(f"bootstrap: .venv ready (build123d {build123d.__version__}, OCP {OCP.__file__.rsplit('/', 1)[0]})")
+PY
