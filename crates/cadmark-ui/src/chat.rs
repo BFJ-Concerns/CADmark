@@ -81,14 +81,28 @@ impl ChatPane {
 
     /// Render the chat pane. Returns Some(text) if the user submitted a message.
     pub fn show(&mut self, ui: &mut egui::Ui, conversation: &Conversation) -> Option<String> {
-        let mut submitted = None;
-        let busy = self.activity != ChatActivity::Idle;
+        // The input sits in a bottom panel so it is laid out first and the
+        // messages take whatever height remains: however tall the input
+        // grows, the send row below it stays on screen.
+        let submitted = egui::TopBottomPanel::bottom("chat_input_panel")
+            .frame(egui::Frame::NONE.inner_margin(egui::Margin {
+                left: 0,
+                right: 0,
+                top: 4,
+                bottom: 0,
+            }))
+            .show_separator_line(false)
+            .show_inside(ui, |ui| self.show_input(ui))
+            .inner;
 
-        let input_rows = 3;
-        let input_height = ui.text_style_height(&egui::TextStyle::Body) * input_rows as f32 + 16.0;
-        let bottom_reserve = input_height + 34.0;
-        let scroll_height = (ui.available_height() - bottom_reserve).max(60.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show_inside(ui, |ui| self.show_messages(ui, conversation));
 
+        submitted
+    }
+
+    fn show_messages(&mut self, ui: &mut egui::Ui, conversation: &Conversation) {
         let new_message = conversation.len() != self.seen_messages;
         self.seen_messages = conversation.len();
 
@@ -96,7 +110,6 @@ impl ChatPane {
             .id_salt("chat_messages")
             .auto_shrink([false, false])
             .stick_to_bottom(true)
-            .max_height(scroll_height)
             .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
@@ -117,10 +130,14 @@ impl ChatPane {
                 }
                 ui.add_space(4.0);
             });
+    }
 
-        ui.add_space(4.0);
+    /// The input box and the send row under it. The box grows with its
+    /// text up to a cap, then scrolls inside itself.
+    fn show_input(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        let mut submitted = None;
+        let busy = self.activity != ChatActivity::Idle;
 
-        // ── Input ──────────────────────────────────────────────────
         let hint = if !self.ai_available {
             "AI is not configured. Add a cadmark.json to chat."
         } else if busy {
@@ -130,25 +147,37 @@ impl ChatPane {
         };
         let can_send = self.ai_available && !busy;
 
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        let min_rows = 3;
+        let max_input_height = row_height * 10.0;
+
         let response = egui::Frame::new()
             .fill(theme::SUNKEN)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
             .corner_radius(egui::CornerRadius::same(theme::RADIUS + 1))
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
-                ui.add_sized(
-                    [ui.available_width(), input_height - 12.0],
-                    egui::TextEdit::multiline(&mut self.input_text)
-                        .id_salt("chat_input")
-                        .frame(false)
-                        .hint_text(hint)
-                        .desired_rows(input_rows)
-                        .interactive(can_send)
-                        .return_key(egui::KeyboardShortcut::new(
-                            egui::Modifiers::SHIFT,
-                            egui::Key::Enter,
-                        )),
-                )
+                egui::ScrollArea::vertical()
+                    .id_salt("chat_input_scroll")
+                    .max_height(max_input_height)
+                    .auto_shrink([false, true])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.input_text)
+                                .id_salt("chat_input")
+                                .frame(false)
+                                .hint_text(hint)
+                                .desired_rows(min_rows)
+                                .desired_width(f32::INFINITY)
+                                .interactive(can_send)
+                                .return_key(egui::KeyboardShortcut::new(
+                                    egui::Modifiers::SHIFT,
+                                    egui::Key::Enter,
+                                )),
+                        )
+                    })
+                    .inner
             })
             .inner;
 
@@ -162,7 +191,7 @@ impl ChatPane {
 
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("Enter to send · Shift+Enter for a new line")
+                egui::RichText::new("Enter to send \u{b7} Shift+Enter for a new line")
                     .small()
                     .color(theme::TEXT_MUTED),
             );
