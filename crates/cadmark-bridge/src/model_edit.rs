@@ -30,6 +30,11 @@ impl ModelEditBackend {
         Self { client }
     }
 
+    /// The model name requests are sent to.
+    pub fn model_name(&self) -> &str {
+        self.client.model_name()
+    }
+
     fn build_prompt(request: &AiRequest) -> String {
         let mut prompt = String::new();
 
