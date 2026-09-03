@@ -1,7 +1,12 @@
 // Camera — orbit, pan, zoom controls for CAD viewport navigation.
 //
 // Right-click drag to orbit, scroll to zoom, middle-click to pan.
-// Standard CAD navigation conventions.
+// Standard CAD navigation conventions. The world is Z-up, as build123d
+// models are: yaw 0 and pitch 0 is the front view, looking along +Y with X
+// to the right and Z up.
+
+/// World up. build123d builds Z-up, so the viewport does too.
+const WORLD_UP: [f32; 3] = [0.0, 0.0, 1.0];
 
 /// Camera state for the 3D viewport.
 #[derive(Debug, Clone, PartialEq)]
@@ -10,9 +15,11 @@ pub struct Camera {
     pub target: [f32; 3],
     /// Distance from the target.
     pub distance: f32,
-    /// Horizontal angle in radians (azimuth).
+    /// Horizontal angle in radians. Zero looks from in front (-Y); positive
+    /// turns the eye anticlockwise seen from above.
     pub yaw: f32,
-    /// Vertical angle in radians (elevation), clamped to avoid gimbal lock.
+    /// Elevation in radians. Orbiting stops just short of the poles; the
+    /// axis views reach them exactly.
     pub pitch: f32,
     /// Field of view in radians.
     pub fov: f32,
@@ -31,6 +38,15 @@ pub struct LightRig {
     pub key: [f32; 3],
     /// Soft secondary light: low and to the right, opposing the key.
     pub fill: [f32; 3],
+}
+
+/// The camera's orthonormal axes in world space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Basis {
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    /// From the eye towards the target.
+    pub forward: [f32; 3],
 }
 
 /// Axis-aligned bounds used to frame newly loaded geometry.
@@ -105,9 +121,38 @@ impl Camera {
         let cos_pitch = self.pitch.cos();
         [
             self.target[0] + self.distance * cos_pitch * self.yaw.sin(),
-            self.target[1] + self.distance * self.pitch.sin(),
-            self.target[2] + self.distance * cos_pitch * self.yaw.cos(),
+            self.target[1] - self.distance * cos_pitch * self.yaw.cos(),
+            self.target[2] + self.distance * self.pitch.sin(),
         ]
+    }
+
+    /// Turn the camera to look at the target from the given world-space
+    /// direction, keeping the target and distance. A vertical direction
+    /// gives the top or bottom view with +Y up the screen.
+    pub fn look_from(&mut self, direction: [f32; 3]) {
+        let direction = normalize(direction);
+        self.pitch = direction[2].clamp(-1.0, 1.0).asin();
+        let horizontal = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
+        self.yaw = if horizontal < 1e-4 {
+            0.0
+        } else {
+            direction[0].atan2(-direction[1])
+        };
+    }
+
+    /// The camera's axes in world space. Looking straight down or up, where
+    /// world up is no guide, the screen's up is the direction the eye would
+    /// face from the same yaw at the horizon, so the top view has +Y up.
+    pub fn basis(&self) -> Basis {
+        let forward = normalize(sub(self.target, self.eye_position()));
+        let up_reference = if dot(forward, WORLD_UP).abs() > 0.9999 {
+            [-self.yaw.sin(), self.yaw.cos(), 0.0]
+        } else {
+            WORLD_UP
+        };
+        let right = normalize(cross(forward, up_reference));
+        let up = cross(right, forward);
+        Basis { right, up, forward }
     }
 
     /// Orbit the camera by a delta in screen-space pixels.
@@ -126,13 +171,10 @@ impl Camera {
         self.distance = (self.distance * factor).clamp(0.1, 500.0);
     }
 
-    /// Pan the camera target in the camera's local XY plane.
+    /// Pan the camera target in the camera's own screen plane.
     pub fn pan(&mut self, dx: f32, dy: f32) {
         let sensitivity = 0.002 * self.distance;
-        // Camera right vector (simplified — ignores roll).
-        let right = [self.yaw.cos(), 0.0, -self.yaw.sin()];
-        // Camera up is world Y in this simplified model.
-        let up = [0.0, 1.0, 0.0];
+        let Basis { right, up, .. } = self.basis();
 
         for i in 0..3 {
             self.target[i] -= right[i] * dx * sensitivity;
@@ -142,10 +184,7 @@ impl Camera {
 
     /// Light directions for the current view, expressed in world space.
     pub fn light_rig(&self) -> LightRig {
-        let eye = self.eye_position();
-        let forward = normalize(sub(self.target, eye));
-        let right = normalize(cross(forward, [0.0, 1.0, 0.0]));
-        let up = cross(right, forward);
+        let Basis { right, up, forward } = self.basis();
         let towards_eye = [-forward[0], -forward[1], -forward[2]];
 
         let blend = |r: f32, u: f32, e: f32| {
@@ -160,10 +199,11 @@ impl Camera {
         }
     }
 
-    /// Build a 4x4 view matrix (column-major) for the shader.
+    /// Build a 4x4 view matrix (column-major) for the shader. Column `i`
+    /// is the view-space image of world axis `i`: its x and y are the
+    /// axis's screen direction and its z points towards the viewer.
     pub fn view_matrix(&self) -> [[f32; 4]; 4] {
-        let eye = self.eye_position();
-        look_at(eye, self.target, [0.0, 1.0, 0.0])
+        view_from_basis(self.eye_position(), self.basis())
     }
 
     /// Build a 4x4 perspective projection matrix (column-major).
@@ -172,11 +212,14 @@ impl Camera {
     }
 }
 
-/// Simple look-at matrix. Column-major layout for wgpu.
-fn look_at(eye: [f32; 3], target: [f32; 3], up: [f32; 3]) -> [[f32; 4]; 4] {
-    let f = normalize(sub(target, eye));
-    let s = normalize(cross(f, up));
-    let u = cross(s, f);
+/// View matrix from an eye position and orthonormal camera axes.
+/// Column-major layout for wgpu.
+fn view_from_basis(eye: [f32; 3], basis: Basis) -> [[f32; 4]; 4] {
+    let Basis {
+        right: s,
+        up: u,
+        forward: f,
+    } = basis;
 
     [
         [s[0], u[0], -f[0], 0.0],
@@ -246,8 +289,8 @@ mod tests {
             ..Camera::default()
         };
         let eye = cam.eye_position();
-        // yaw=0, pitch=0: eye is along +Z axis at distance 10.
-        assert!(approx_eq_vec(eye, [0.0, 0.0, 10.0]));
+        // yaw=0, pitch=0: the front view, eye along -Y at distance 10.
+        assert!(approx_eq_vec(eye, [0.0, -10.0, 0.0]));
     }
 
     #[test]
@@ -260,10 +303,10 @@ mod tests {
             ..Camera::default()
         };
         let eye = cam.eye_position();
-        // pitch=45deg: Y should be ~7.07, distance from origin should be ~10.
+        // pitch=45deg: Z should be ~7.07, distance from origin should be ~10.
         let dist = dot(eye, eye).sqrt();
         assert!(approx_eq(dist, 10.0));
-        assert!(eye[1] > 0.0); // Elevated above target.
+        assert!(eye[2] > 0.0); // Elevated above target.
     }
 
     #[test]
@@ -271,8 +314,8 @@ mod tests {
         let mut cam = Camera::default();
         let before = cam.light_rig();
         // The key light sits above the eye line and the fill below it.
-        assert!(before.key[1] > 0.0);
-        assert!(before.fill[1] < before.key[1]);
+        assert!(before.key[2] > 0.0);
+        assert!(before.fill[2] < before.key[2]);
         assert!(approx_eq(dot(before.key, before.key), 1.0));
         assert!(approx_eq(dot(before.fill, before.fill), 1.0));
 
@@ -285,8 +328,8 @@ mod tests {
         cam.yaw += std::f32::consts::PI;
         let after = cam.light_rig();
         assert!(approx_eq(after.key[0], -before.key[0]));
-        assert!(approx_eq(after.key[2], -before.key[2]));
-        assert!(approx_eq(after.key[1], before.key[1]));
+        assert!(approx_eq(after.key[1], -before.key[1]));
+        assert!(approx_eq(after.key[2], before.key[2]));
     }
 
     #[test]
@@ -328,6 +371,63 @@ mod tests {
         cam.pan(100.0, 0.0);
         // Panning horizontally with yaw=0 should shift target along X.
         assert!((cam.target[0] - original_target[0]).abs() > 0.01);
+    }
+
+    #[test]
+    fn axis_views_look_from_each_direction() {
+        let mut cam = Camera {
+            target: [1.0, 2.0, 3.0],
+            distance: 10.0,
+            ..Camera::default()
+        };
+        for direction in [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ] {
+            cam.look_from(direction);
+            let expected: [f32; 3] = std::array::from_fn(|axis| cam.target[axis] + direction[axis] * 10.0);
+            assert!(
+                approx_eq_vec(cam.eye_position(), expected),
+                "looking from {direction:?} put the eye at {:?}",
+                cam.eye_position()
+            );
+        }
+    }
+
+    #[test]
+    fn front_view_has_x_right_and_z_up() {
+        let mut cam = Camera::default();
+        cam.look_from([0.0, -1.0, 0.0]);
+        let basis = cam.basis();
+        assert!(approx_eq_vec(basis.right, [1.0, 0.0, 0.0]));
+        assert!(approx_eq_vec(basis.up, [0.0, 0.0, 1.0]));
+        assert!(approx_eq_vec(basis.forward, [0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn top_view_has_x_right_and_y_up() {
+        let mut cam = Camera::default();
+        cam.look_from([0.0, 0.0, 1.0]);
+        let basis = cam.basis();
+        assert!(approx_eq_vec(basis.right, [1.0, 0.0, 0.0]));
+        assert!(approx_eq_vec(basis.up, [0.0, 1.0, 0.0]));
+        assert!(approx_eq_vec(basis.forward, [0.0, 0.0, -1.0]));
+    }
+
+    #[test]
+    fn view_matrix_columns_are_world_axes_on_screen() {
+        let mut cam = Camera::default();
+        cam.look_from([0.0, -1.0, 0.0]);
+        let m = cam.view_matrix();
+        // In the front view, world X runs right across the screen, world Z
+        // runs up it, and world Y points away from the viewer.
+        assert!(approx_eq_vec([m[0][0], m[0][1], m[0][2]], [1.0, 0.0, 0.0]));
+        assert!(approx_eq_vec([m[2][0], m[2][1], m[2][2]], [0.0, 1.0, 0.0]));
+        assert!(approx_eq_vec([m[1][0], m[1][1], m[1][2]], [0.0, 0.0, -1.0]));
     }
 
     #[test]

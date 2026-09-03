@@ -72,8 +72,8 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     }
     let view_dir = normalize(uniforms.eye_pos - in.world_pos);
 
-    // Ambient from the sky/ground hemisphere, keyed on world up (Y).
-    let hemisphere = normal.y * 0.5 + 0.5;
+    // Ambient from the sky/ground hemisphere, keyed on world up (Z).
+    let hemisphere = normal.z * 0.5 + 0.5;
     var colour = BASE_COLOUR * mix(GROUND_COLOUR, SKY_COLOUR, hemisphere);
 
     // Key light: diffuse plus a tight Blinn-Phong highlight.

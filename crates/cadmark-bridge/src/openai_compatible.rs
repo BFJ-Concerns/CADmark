@@ -35,6 +35,9 @@ pub struct OpenAiCompatibleClient {
     responses_url: Url,
     model: String,
     credential: Option<std::sync::Arc<Credential>>,
+    /// The whole-request ceiling the client was built with, reported when
+    /// a request runs past it.
+    timeout_seconds: u64,
 }
 
 impl OpenAiCompatibleClient {
@@ -57,6 +60,7 @@ impl OpenAiCompatibleClient {
             responses_url,
             model,
             credential: credential.map(std::sync::Arc::new),
+            timeout_seconds,
         })
     }
 
@@ -87,9 +91,15 @@ impl OpenAiCompatibleClient {
             request = request.bearer_auth(credential.value());
         }
 
-        let response = request.send().await.map_err(map_transport_error)?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| map_transport_error(error, self.timeout_seconds))?;
         let status = response.status();
-        let response_body = response.text().await.map_err(map_transport_error)?;
+        let response_body = response
+            .text()
+            .await
+            .map_err(|error| map_transport_error(error, self.timeout_seconds))?;
 
         if !status.is_success() {
             return Err(non_success_error(
@@ -219,9 +229,11 @@ fn extract_output_text(output: Option<Vec<OutputItem>>) -> Result<String, Backen
     }
 }
 
-fn map_transport_error(error: reqwest::Error) -> BackendError {
+fn map_transport_error(error: reqwest::Error, timeout_seconds: u64) -> BackendError {
     if error.is_timeout() {
-        BackendError::Timeout
+        BackendError::Timeout {
+            after_seconds: timeout_seconds,
+        }
     } else if error.is_connect() {
         BackendError::Unavailable("could not connect to configured provider".to_string())
     } else {
@@ -537,7 +549,7 @@ mod tests {
         let client = OpenAiCompatibleClient::new(url, "model".to_string(), None, 1).unwrap();
         assert!(matches!(
             client.request_text("instructions", "input").await,
-            Err(BackendError::Timeout)
+            Err(BackendError::Timeout { after_seconds: 1 })
         ));
         stalled_server.await.unwrap();
     }
