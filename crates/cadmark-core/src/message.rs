@@ -1,8 +1,8 @@
 // Message types for the chat pane.
 //
-// Three distinct visual types: user chat, spatial comments (with
-// geometry chip), and AI responses. Spatial comments transition
-// to "Applied" state after the AI acts on them.
+// Four visual types: user chat, spatial comments (with geometry chip),
+// AI responses, and notices from CADmark itself (errors, availability).
+// Spatial comments transition to "Applied" state after the AI acts on them.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,9 @@ pub enum MessageKind {
     },
     /// Response from the AI.
     AiResponse,
+    /// A note from CADmark itself rather than the AI: an execution failure,
+    /// a provider error, or AI being unavailable.
+    Notice { is_error: bool },
 }
 
 /// A single message in the conversation.
@@ -77,6 +80,26 @@ impl Message {
         Self {
             id: MessageId::new(),
             kind: MessageKind::AiResponse,
+            text: text.into(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// A note from CADmark about the session: shown quietly, not as speech.
+    pub fn notice(text: impl Into<String>) -> Self {
+        Self {
+            id: MessageId::new(),
+            kind: MessageKind::Notice { is_error: false },
+            text: text.into(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    /// A note about something that went wrong.
+    pub fn error_notice(text: impl Into<String>) -> Self {
+        Self {
+            id: MessageId::new(),
+            kind: MessageKind::Notice { is_error: true },
             text: text.into(),
             timestamp: Utc::now(),
         }
@@ -206,6 +229,18 @@ mod tests {
         // Non-spatial messages are unaffected.
         assert!(!conv.messages()[0].is_applied());
         assert!(!conv.messages()[2].is_applied());
+    }
+
+    #[test]
+    fn notices_carry_their_severity() {
+        assert!(matches!(
+            Message::notice("AI is unavailable").kind,
+            MessageKind::Notice { is_error: false }
+        ));
+        assert!(matches!(
+            Message::error_notice("part.py failed to run").kind,
+            MessageKind::Notice { is_error: true }
+        ));
     }
 
     #[test]

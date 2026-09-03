@@ -5,5 +5,6 @@ edition = "2024"
 
 [dependencies]
 cadmark-core = { workspace = true }
+chrono = { workspace = true }
 egui = { workspace = true }
 log = { workspace = true }

@@ -53,7 +53,12 @@ pub struct EditOutcome {
 /// Results sent from the orchestrator back to the UI thread.
 pub enum OrchestratorResult<M> {
     /// A script executed successfully and its model is ready to display.
-    ModelReady { model: M, origin: ModelOrigin },
+    ModelReady {
+        model: M,
+        origin: ModelOrigin,
+        /// The source that produced the model.
+        source: String,
+    },
     /// AI responded but its code failed; the previous script was restored.
     ExecutionFailed { ai_message: String, error: String },
     /// There is no script on disk yet: the normal state of a new project.
@@ -170,6 +175,7 @@ impl<E: ScriptExecutor> Orchestrator<E> {
             Ok(model) => OrchestratorResult::ModelReady {
                 model,
                 origin: ModelOrigin::Reload,
+                source: self.current_code.clone(),
             },
             Err(failure) => OrchestratorResult::ReloadFailed {
                 error: failure.message,
@@ -254,6 +260,7 @@ impl<E: ScriptExecutor> Orchestrator<E> {
                 self.current_code = response.code.clone();
                 return OrchestratorResult::ModelReady {
                     model,
+                    source: response.code.clone(),
                     origin: ModelOrigin::Edit(EditOutcome {
                         response,
                         trigger_message,
@@ -302,6 +309,7 @@ impl<E: ScriptExecutor> Orchestrator<E> {
                 self.current_code = retry_response.code.clone();
                 OrchestratorResult::ModelReady {
                     model,
+                    source: retry_response.code.clone(),
                     origin: ModelOrigin::Edit(EditOutcome {
                         response: retry_response,
                         trigger_message,
@@ -682,7 +690,11 @@ mod tests {
             OrchestratorResult::ModelReady {
                 model,
                 origin: ModelOrigin::Reload,
-            } => assert_eq!(model, "ON_DISK = 1"),
+                source,
+            } => {
+                assert_eq!(model, "ON_DISK = 1");
+                assert_eq!(source, "ON_DISK = 1");
+            }
             _ => panic!("expected the on-disk model"),
         }
         assert_eq!(orchestrator.current_code(), "ON_DISK = 1");
@@ -804,6 +816,7 @@ mod tests {
             OrchestratorResult::ModelReady {
                 model,
                 origin: ModelOrigin::Edit(edit),
+                ..
             } => {
                 assert_eq!(model, "DISTINCTIVE_CODE = 42");
                 assert_eq!(edit.response.code, "DISTINCTIVE_CODE = 42");
