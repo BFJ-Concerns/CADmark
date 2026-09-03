@@ -96,8 +96,10 @@ def measure_vertices(shapes):
 def measure_model(shape, face_count, edge_count, vertex_count):
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(shape, props)
+    # Measured from the exact surfaces: the triangulation route pads the box
+    # by the mesh tolerance, which shows up as a 60.05 mm plate.
     box = Bnd_Box()
-    BRepBndLib.AddOptimal_s(shape, box, True, False)
+    BRepBndLib.AddOptimal_s(shape, box, False, False)
     x_min, y_min, z_min, x_max, y_max, z_max = box.Get()
     return {
         'volume': props.Mass(),
