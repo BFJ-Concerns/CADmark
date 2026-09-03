@@ -27,8 +27,10 @@ fn main() -> eframe::Result<()> {
     env_logger::init();
     log::info!("Starting CADmark");
 
-    let mut wgpu_options = eframe::egui_wgpu::WgpuConfiguration::default();
-    wgpu_options.on_surface_error = std::sync::Arc::new(surface_error_action);
+    let wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
+        on_surface_error: std::sync::Arc::new(surface_error_action),
+        ..Default::default()
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

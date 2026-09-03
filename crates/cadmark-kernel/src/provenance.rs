@@ -28,12 +28,6 @@ pub enum ProvenanceError {
     WrapperRestoration(String),
     #[error("provenance instrumentation is poisoned after a restoration failure")]
     Poisoned,
-    #[error("missing provenance history for {kind} {index}; last operation: {last_operation}")]
-    MissingHistory {
-        kind: &'static str,
-        index: u32,
-        last_operation: String,
-    },
     #[error("malformed provenance capture: {0}")]
     MalformedCapture(String),
 }
@@ -41,6 +35,12 @@ pub enum ProvenanceError {
 #[derive(Debug)]
 pub(crate) struct InstrumentationSession {
     inner: Py<PyAny>,
+}
+
+impl InstrumentationSession {
+    pub(crate) fn bound<'py>(&self, py: Python<'py>) -> &Bound<'py, PyAny> {
+        self.inner.bind(py)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,8 +262,18 @@ fn parse_operation(value: &str) -> Result<SemanticOperation, ProvenanceError> {
     match value {
         "Box" => Ok(SemanticOperation::Box),
         "Cylinder" => Ok(SemanticOperation::Cylinder),
+        "Sphere" => Ok(SemanticOperation::Sphere),
+        "Cone" => Ok(SemanticOperation::Cone),
+        "Torus" => Ok(SemanticOperation::Torus),
+        "Wedge" => Ok(SemanticOperation::Wedge),
         "Extrude" => Ok(SemanticOperation::Extrude),
         "Revolve" => Ok(SemanticOperation::Revolve),
+        "Loft" => Ok(SemanticOperation::Loft),
+        "Sweep" => Ok(SemanticOperation::Sweep),
+        "Thicken" => Ok(SemanticOperation::Thicken),
+        "Shell" => Ok(SemanticOperation::Shell),
+        "Draft" => Ok(SemanticOperation::Draft),
+        "Split" => Ok(SemanticOperation::Split),
         "BooleanFuse" => Ok(SemanticOperation::BooleanFuse),
         "BooleanCut" => Ok(SemanticOperation::BooleanCut),
         "BooleanCommon" => Ok(SemanticOperation::BooleanCommon),
@@ -300,53 +310,22 @@ fn build_ledger(raw: &RawProvenance, source: &str) -> Result<ProvenanceLedger, P
         operations.insert(operation.operation_id, operation);
     }
 
-    let last_operation = raw
-        .operations
-        .last()
-        .map(|operation| {
-            format!(
-                "{:?} at line {}",
-                operation.operation, operation.source_line
-            )
-        })
-        .unwrap_or_else(|| "none".to_string());
     let mut ledger = ProvenanceLedger::new();
 
     for (index, element) in raw.faces.iter().enumerate() {
-        let value = ledger_value(
-            element,
-            &operations,
-            &source_lines,
-            "face",
-            index as u32,
-            &last_operation,
-        )?;
+        let value = ledger_value(element, &operations, &source_lines);
         ledger
             .record_face(FaceId(index as u32), value)
             .map_err(|error| ProvenanceError::MalformedCapture(error.to_string()))?;
     }
     for (index, element) in raw.edges.iter().enumerate() {
-        let value = ledger_value(
-            element,
-            &operations,
-            &source_lines,
-            "edge",
-            index as u32,
-            &last_operation,
-        )?;
+        let value = ledger_value(element, &operations, &source_lines);
         ledger
             .record_edge(EdgeId(index as u32), value)
             .map_err(|error| ProvenanceError::MalformedCapture(error.to_string()))?;
     }
     for (index, element) in raw.vertices.iter().enumerate() {
-        let value = ledger_value(
-            element,
-            &operations,
-            &source_lines,
-            "vertex",
-            index as u32,
-            &last_operation,
-        )?;
+        let value = ledger_value(element, &operations, &source_lines);
         ledger
             .record_vertex(VertexId(index as u32), value)
             .map_err(|error| ProvenanceError::MalformedCapture(error.to_string()))?;
@@ -355,20 +334,16 @@ fn build_ledger(raw: &RawProvenance, source: &str) -> Result<ProvenanceLedger, P
     Ok(ledger)
 }
 
+/// An element no instrumented operation claimed is recorded as untraced
+/// rather than failing the whole execution: the model still renders and the
+/// user learns at click time that this one element cannot be sourced.
 fn ledger_value(
     element: &RawElement,
     operations: &HashMap<u64, &RawOperation>,
     source_lines: &[&str],
-    kind: &'static str,
-    index: u32,
-    last_operation: &str,
-) -> Result<LedgerValue, ProvenanceError> {
+) -> LedgerValue {
     if element.candidates.is_empty() {
-        return Err(ProvenanceError::MissingHistory {
-            kind,
-            index,
-            last_operation: last_operation.to_string(),
-        });
+        return LedgerValue::Untraced;
     }
 
     let entries = element
@@ -390,18 +365,18 @@ fn ledger_value(
         })
         .collect::<Vec<_>>();
 
-    Ok(if entries.len() == 1 {
+    if entries.len() == 1 {
         LedgerValue::Resolved(entries.into_iter().next().unwrap())
     } else {
         LedgerValue::Ambiguous(entries)
-    })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::process::Command;
 
-    use cadmark_core::context::{NullIdentification, ProvenanceResolutionError, resolve_context};
+    use cadmark_core::context::{NullIdentification, resolve_context};
     use cadmark_core::geometry::TopologyElement;
     use pyo3::types::PyDict;
 
@@ -430,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_has_exactly_the_eleven_supported_bindings() {
+    fn manifest_covers_every_supported_binding() {
         activate();
         let _guard = crate::execution::PYTHON_EXECUTION_LOCK
             .lock()
@@ -438,7 +413,7 @@ mod tests {
         Python::with_gil(|py| {
             let namespace = run_instrumentation_source(py).unwrap();
             let manifest = namespace.get_item("_cadmark_manifest").unwrap().unwrap();
-            assert_eq!(manifest.len().unwrap(), 11);
+            assert_eq!(manifest.len().unwrap(), 25);
             let bindings: Vec<(String, String)> = manifest
                 .try_iter()
                 .unwrap()
@@ -458,6 +433,27 @@ mod tests {
                 "build123d.topology.utils".into(),
                 "BRepPrimAPI_MakePrism".into()
             )));
+            for expected in [
+                "BRepPrimAPI_MakeSphere",
+                "BRepPrimAPI_MakeCone",
+                "BRepPrimAPI_MakeTorus",
+                "BRepPrimAPI_MakeWedge",
+                "BRepOffsetAPI_ThruSections",
+                "BRepOffsetAPI_MakePipeShell",
+                "BRepOffsetAPI_MakeThickSolid",
+                "BRepOffset_MakeOffset",
+                "BRepOffsetAPI_DraftAngle",
+                "BRepAlgoAPI_Splitter",
+                "BRepFeat_MakeDPrism",
+                "LocOpe_DPrism",
+                "BRepBuilderAPI_Transform",
+                "BRepBuilderAPI_GTransform",
+            ] {
+                assert!(
+                    bindings.iter().any(|(_, attribute)| attribute == expected),
+                    "manifest is missing {expected}"
+                );
+            }
         });
     }
 
@@ -671,9 +667,10 @@ _cadmark_probe_capture = _cadmark_probe_session.finalise(_cadmark_probe_clean)
                 .face_ids()
                 .find(|id| matches!(ledger.lookup_face(*id), Some(LedgerValue::Ambiguous(_))));
             let id = ambiguous_face.expect("real cleanup should merge distinct face candidates");
-            let error = resolve_context(&TopologyElement::Face(id), &ledger, &NullIdentification)
-                .unwrap_err();
-            assert!(matches!(error, ProvenanceResolutionError::Ambiguous { .. }));
+            let context =
+                resolve_context(&TopologyElement::Face(id), &ledger, &NullIdentification).unwrap();
+            assert!(context.provenance.candidates().len() >= 2);
+            assert!(context.provenance.resolved().is_none());
         });
     }
 
@@ -855,10 +852,9 @@ _cadmark_identity_is_partner = _cadmark_identity_copied.IsPartner(
             )
             .unwrap();
             let raw = parse_capture(&empty_candidates).unwrap();
-            assert!(matches!(
-                build_ledger(&raw, "Box()"),
-                Err(ProvenanceError::MissingHistory { .. })
-            ));
+            let ledger = build_ledger(&raw, "Box()").unwrap();
+            assert_eq!(ledger.lookup_face(FaceId(0)), Some(&LedgerValue::Untraced));
+            assert_eq!(ledger.untraced_count(), 1);
 
             let out_of_range = capture_from_expression(
                 py,

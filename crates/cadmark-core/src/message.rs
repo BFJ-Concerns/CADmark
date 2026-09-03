@@ -139,12 +139,14 @@ impl Conversation {
 mod tests {
     use super::*;
     use crate::geometry::{FaceId, GeometryContext, TopologyElement};
-    use crate::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
+    use crate::ledger::{
+        LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+    };
 
     fn sample_geometry_context() -> GeometryContext {
         GeometryContext {
             element: TopologyElement::Face(FaceId(5)),
-            provenance: ProvenanceEntry {
+            provenance: LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
                     line: 10,
                     code: "box = Box(10, 10, 10)".to_string(),
@@ -152,7 +154,7 @@ mod tests {
                 operation: SemanticOperation::Box,
                 operation_id: 1,
                 relation: ProvenanceRelation::Generated,
-            },
+            }),
             identification: Default::default(),
         }
     }

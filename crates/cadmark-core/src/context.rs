@@ -6,18 +6,15 @@
 // 2. Identification (experimental): which specific element was clicked.
 // 3. Output format (stable): packages the result for the AI bridge.
 
-use crate::geometry::{GeometryContext, TopologyElement};
-use crate::ledger::{LedgerValue, ProvenanceEntry, ProvenanceLedger};
+use crate::geometry::{GeometryContext, GeometryDescriptors, TopologyElement};
+use crate::ledger::ProvenanceLedger;
 
+/// The picked element is outside the ledger the current model was built
+/// from: a stale pick after a reload, or a picking-buffer fault.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ProvenanceResolutionError {
-    #[error("no provenance exists for {element:?}")]
-    MissingElement { element: TopologyElement },
-    #[error("provenance is ambiguous for {element:?}")]
-    Ambiguous {
-        element: TopologyElement,
-        candidates: Vec<ProvenanceEntry>,
-    },
+#[error("{} is not part of the current model", element.display_label())]
+pub struct MissingElement {
+    pub element: TopologyElement,
 }
 
 /// Strategy for identifying which specific element was clicked.
@@ -45,15 +42,62 @@ impl IdentificationStrategy for NullIdentification {
     }
 }
 
+/// Identification from measured geometry: surface or curve type, size,
+/// position and orientation of the selected element, so the AI can reason
+/// about which element was picked and where it sits.
+pub struct MeasuredIdentification {
+    pub descriptors: GeometryDescriptors,
+}
+
+fn triple(values: [f64; 3]) -> String {
+    format!("({:.2}, {:.2}, {:.2})", values[0], values[1], values[2])
+}
+
+impl IdentificationStrategy for MeasuredIdentification {
+    fn identify(&self, element: &TopologyElement) -> std::collections::HashMap<String, String> {
+        let mut map = std::collections::HashMap::new();
+        match element {
+            TopologyElement::Face(id) => {
+                if let Some(face) = self.descriptors.face(*id) {
+                    map.insert("surface".into(), face.surface_type.clone());
+                    map.insert("area_mm2".into(), format!("{:.2}", face.area));
+                    map.insert("centre_mm".into(), triple(face.centre));
+                    map.insert("outward_normal".into(), triple(face.normal));
+                }
+            }
+            TopologyElement::Edge(id) => {
+                if let Some(edge) = self.descriptors.edge(*id) {
+                    map.insert("curve".into(), edge.curve_type.clone());
+                    map.insert("length_mm".into(), format!("{:.2}", edge.length));
+                    map.insert("centre_mm".into(), triple(edge.centre));
+                }
+            }
+            TopologyElement::Vertex(id) => {
+                if let Some(vertex) = self.descriptors.vertex(*id) {
+                    map.insert("position_mm".into(), triple(vertex.position));
+                }
+            }
+        }
+        map
+    }
+
+    fn name(&self) -> &str {
+        "measured"
+    }
+}
+
 /// Resolve a picked element into a full geometry context for the AI.
 ///
 /// Looks up the element in the provenance ledger to find the generating code,
-/// then runs the identification strategy for additional disambiguation.
+/// then runs the identification strategy for additional disambiguation. An
+/// ambiguous or untraced source is carried through as such rather than
+/// refused: the user can still comment on the element, and both the overlay
+/// and the AI are told exactly what is known about where it came from.
 pub fn resolve_context(
     element: &TopologyElement,
     ledger: &ProvenanceLedger,
     strategy: &dyn IdentificationStrategy,
-) -> Result<GeometryContext, ProvenanceResolutionError> {
+) -> Result<GeometryContext, MissingElement> {
     // Step 1: Provenance lookup.
     let provenance = match element {
         TopologyElement::Face(id) => ledger.lookup_face(*id),
@@ -61,20 +105,11 @@ pub fn resolve_context(
         TopologyElement::Vertex(id) => ledger.lookup_vertex(*id),
     };
 
-    let provenance = match provenance {
-        Some(LedgerValue::Resolved(entry)) => entry.clone(),
-        Some(LedgerValue::Ambiguous(candidates)) => {
-            return Err(ProvenanceResolutionError::Ambiguous {
-                element: element.clone(),
-                candidates: candidates.clone(),
-            });
-        }
-        None => {
-            return Err(ProvenanceResolutionError::MissingElement {
-                element: element.clone(),
-            });
-        }
-    };
+    let provenance = provenance
+        .ok_or_else(|| MissingElement {
+            element: element.clone(),
+        })?
+        .clone();
 
     // Step 2: Identification strategy.
     let identification = strategy.identify(element);
@@ -117,22 +152,42 @@ mod tests {
         let strategy = NullIdentification;
         let context = resolve_context(&element, &ledger, &strategy).unwrap();
 
-        assert_eq!(context.provenance.source.line, 5);
-        assert_eq!(context.provenance.source.code, "box = Box(10, 10, 10)");
+        let entry = context.provenance.resolved().unwrap();
+        assert_eq!(entry.source.line, 5);
+        assert_eq!(entry.source.code, "box = Box(10, 10, 10)");
+        assert_eq!(entry.describe(), "created by box at line 5");
         assert!(context.identification.is_empty());
     }
 
     #[test]
-    fn resolve_without_provenance_returns_error() {
+    fn resolve_outside_the_model_returns_error() {
         let ledger = ProvenanceLedger::new();
         let element = TopologyElement::Edge(EdgeId(99));
         let strategy = NullIdentification;
         let error = resolve_context(&element, &ledger, &strategy).unwrap_err();
-        assert_eq!(error, ProvenanceResolutionError::MissingElement { element });
+        assert_eq!(error, MissingElement { element });
+        assert_eq!(
+            error.to_string(),
+            "edge 99 is not part of the current model"
+        );
     }
 
     #[test]
-    fn resolve_ambiguous_provenance_returns_all_candidates() {
+    fn resolve_untraced_element_carries_untraced_provenance() {
+        let mut ledger = ProvenanceLedger::new();
+        ledger
+            .record_face(FaceId(2), LedgerValue::Untraced)
+            .unwrap();
+        let element = TopologyElement::Face(FaceId(2));
+        let context = resolve_context(&element, &ledger, &NullIdentification).unwrap();
+        assert_eq!(context.provenance, LedgerValue::Untraced);
+        assert!(context.provenance.candidates().is_empty());
+        assert!(context.provenance.describe().contains("no source line"));
+        assert_eq!(ledger.untraced_count(), 1);
+    }
+
+    #[test]
+    fn resolve_ambiguous_provenance_carries_all_candidates() {
         let first = ProvenanceEntry {
             source: SourceRef {
                 line: 2,
@@ -160,13 +215,42 @@ mod tests {
             .unwrap();
 
         let element = TopologyElement::Face(FaceId(0));
-        let error = resolve_context(&element, &ledger, &NullIdentification).unwrap_err();
+        let context = resolve_context(&element, &ledger, &NullIdentification).unwrap();
         assert_eq!(
-            error,
-            ProvenanceResolutionError::Ambiguous {
-                element,
-                candidates: vec![first, second],
-            }
+            context.provenance.candidates(),
+            &[first.clone(), second.clone()]
+        );
+        assert_eq!(
+            context.provenance.describe(),
+            "source is ambiguous: created by box at line 2 or created by cylinder at line 3"
+        );
+    }
+
+    #[test]
+    fn measured_identification_describes_the_selected_face() {
+        use crate::geometry::FaceDescriptor;
+
+        let strategy = MeasuredIdentification {
+            descriptors: GeometryDescriptors {
+                faces: vec![FaceDescriptor {
+                    surface_type: "plane".into(),
+                    area: 200.0,
+                    centre: [0.0, 0.0, 2.5],
+                    normal: [0.0, 0.0, 1.0],
+                }],
+                edges: Vec::new(),
+                vertices: Vec::new(),
+            },
+        };
+        let map = strategy.identify(&TopologyElement::Face(FaceId(0)));
+        assert_eq!(map["surface"], "plane");
+        assert_eq!(map["area_mm2"], "200.00");
+        assert_eq!(map["centre_mm"], "(0.00, 0.00, 2.50)");
+        assert_eq!(map["outward_normal"], "(0.00, 0.00, 1.00)");
+        assert!(
+            strategy
+                .identify(&TopologyElement::Face(FaceId(7)))
+                .is_empty()
         );
     }
 
@@ -179,12 +263,9 @@ mod tests {
                 element: &TopologyElement,
             ) -> std::collections::HashMap<String, String> {
                 let mut map = std::collections::HashMap::new();
-                match element {
-                    TopologyElement::Face(id) => {
-                        map.insert("face_index".to_string(), id.0.to_string());
-                        map.insert("method".to_string(), "test".to_string());
-                    }
-                    _ => {}
+                if let TopologyElement::Face(id) = element {
+                    map.insert("face_index".to_string(), id.0.to_string());
+                    map.insert("method".to_string(), "test".to_string());
                 }
                 map
             }
