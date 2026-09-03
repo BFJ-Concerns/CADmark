@@ -925,6 +925,49 @@ with BuildPart() as part:
         assert!((size[2] - 5.0).abs() < 1e-6, "{size:?}");
     }
 
+    /// Every triangle of a closed solid faces outward: its normals point away
+    /// from the centre and its winding is anticlockwise seen from outside.
+    /// A box exercises both face orientations, since half its faces are
+    /// reversed relative to their planes.
+    #[test]
+    fn tessellation_faces_outward_on_reversed_faces() {
+        activate_test_runtime();
+        let result = execute_script_source(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    Box(10, 20, 30)
+"#,
+        )
+        .unwrap();
+        let mesh = &result.mesh;
+        for vertex in &mesh.vertices {
+            let dot: f32 = (0..3)
+                .map(|axis| vertex.position[axis] * vertex.normal[axis])
+                .sum();
+            assert!(dot > 0.0, "normal points inward at {vertex:?}");
+        }
+        for triangle in mesh.indices.as_chunks::<3>().0 {
+            let [a, b, c] = [
+                mesh.vertices[triangle[0] as usize].position,
+                mesh.vertices[triangle[1] as usize].position,
+                mesh.vertices[triangle[2] as usize].position,
+            ];
+            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            let winding_normal = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            let outward: f32 = (0..3).map(|axis| winding_normal[axis] * a[axis]).sum();
+            assert!(
+                outward > 0.0,
+                "triangle {triangle:?} is wound clockwise from outside"
+            );
+        }
+    }
+
     #[test]
     fn tessellation_carries_outward_surface_normals() {
         activate_test_runtime();

@@ -4,7 +4,7 @@
 // Standard CAD navigation conventions.
 
 /// Camera state for the 3D viewport.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Camera {
     /// Point the camera orbits around.
     pub target: [f32; 3],
@@ -20,6 +20,17 @@ pub struct Camera {
     pub near: f32,
     /// Far clipping plane.
     pub far: f32,
+}
+
+/// Directions towards the two lights of the viewport's studio rig, in world
+/// space and unit length. The rig is fixed to the camera, so the model is lit
+/// the same way from every viewing angle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LightRig {
+    /// Main light: above and to the left of the eye, slightly in front.
+    pub key: [f32; 3],
+    /// Soft secondary light: low and to the right, opposing the key.
+    pub fill: [f32; 3],
 }
 
 /// Axis-aligned bounds used to frame newly loaded geometry.
@@ -129,6 +140,26 @@ impl Camera {
         }
     }
 
+    /// Light directions for the current view, expressed in world space.
+    pub fn light_rig(&self) -> LightRig {
+        let eye = self.eye_position();
+        let forward = normalize(sub(self.target, eye));
+        let right = normalize(cross(forward, [0.0, 1.0, 0.0]));
+        let up = cross(right, forward);
+        let towards_eye = [-forward[0], -forward[1], -forward[2]];
+
+        let blend = |r: f32, u: f32, e: f32| {
+            normalize(std::array::from_fn(|axis| {
+                right[axis] * r + up[axis] * u + towards_eye[axis] * e
+            }))
+        };
+
+        LightRig {
+            key: blend(-0.55, 0.75, 0.6),
+            fill: blend(0.8, -0.25, 0.35),
+        }
+    }
+
     /// Build a 4x4 view matrix (column-major) for the shader.
     pub fn view_matrix(&self) -> [[f32; 4]; 4] {
         let eye = self.eye_position();
@@ -233,6 +264,29 @@ mod tests {
         let dist = dot(eye, eye).sqrt();
         assert!(approx_eq(dist, 10.0));
         assert!(eye[1] > 0.0); // Elevated above target.
+    }
+
+    #[test]
+    fn light_rig_follows_the_camera() {
+        let mut cam = Camera::default();
+        let before = cam.light_rig();
+        // The key light sits above the eye line and the fill below it.
+        assert!(before.key[1] > 0.0);
+        assert!(before.fill[1] < before.key[1]);
+        assert!(approx_eq(dot(before.key, before.key), 1.0));
+        assert!(approx_eq(dot(before.fill, before.fill), 1.0));
+
+        // Both lights face the viewer's side of the model.
+        let towards_eye = normalize(sub(cam.eye_position(), cam.target));
+        assert!(dot(before.key, towards_eye) > 0.0);
+        assert!(dot(before.fill, towards_eye) > 0.0);
+
+        // Orbiting half a turn swings the rig around with the camera.
+        cam.yaw += std::f32::consts::PI;
+        let after = cam.light_rig();
+        assert!(approx_eq(after.key[0], -before.key[0]));
+        assert!(approx_eq(after.key[2], -before.key[2]));
+        assert!(approx_eq(after.key[1], before.key[1]));
     }
 
     #[test]

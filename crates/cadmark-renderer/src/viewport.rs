@@ -109,7 +109,7 @@ pub fn render_scene(
         });
 
         pass.set_pipeline(&pipelines.wireframe_pipeline);
-        pass.set_bind_group(0, &pipelines.wireframe_bind_group, &[]);
+        pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
         pass.draw(0..mesh.edge_vertex_count, 0..1);
     }
@@ -186,10 +186,23 @@ pub fn render_picking(encoder: &mut wgpu::CommandEncoder, state: &ViewportRender
     }
 }
 
-/// Issue a copy from the picking texture to the staging buffer for a single pixel.
+/// Issue a copy from the picking texture to its own staging buffer for a
+/// single pixel.
 pub fn request_pick_readback(
     encoder: &mut wgpu::CommandEncoder,
     picking: &PickingPass,
+    x: u32,
+    y: u32,
+) {
+    copy_pick_pixel(encoder, picking, &picking.staging_buffer, x, y);
+}
+
+/// Copy one pixel of the picking texture into `staging`, which must be at
+/// least 256 bytes and mappable for reading.
+pub fn copy_pick_pixel(
+    encoder: &mut wgpu::CommandEncoder,
+    picking: &PickingPass,
+    staging: &wgpu::Buffer,
     x: u32,
     y: u32,
 ) {
@@ -205,7 +218,7 @@ pub fn request_pick_readback(
             aspect: wgpu::TextureAspect::All,
         },
         wgpu::TexelCopyBufferInfo {
-            buffer: &picking.staging_buffer,
+            buffer: staging,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 // Rgba8Uint = 4 bytes per pixel, row alignment to 256 bytes.
