@@ -1,5 +1,6 @@
-// Toolbar — undo/redo controls with microversion dropdown.
+// Toolbar — design-step navigation, refresh, view framing, and export.
 
+use cadmark_core::export::ExportFormat;
 use cadmark_core::version::VersionHistory;
 
 /// Action taken by the toolbar controls.
@@ -11,15 +12,33 @@ pub enum ToolbarAction {
     JumpToVersion(usize),
     /// Re-execute the current script and reload the model.
     Refresh,
+    /// Frame the whole model in the viewport.
+    FitView,
+    /// Write the current model to a file in the given format.
+    Export(ExportFormat),
 }
 
-/// Render the toolbar with undo/redo controls.
-pub fn show_toolbar(ui: &mut egui::Ui, history: &VersionHistory) -> ToolbarAction {
+/// What the toolbar may offer right now.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolbarState {
+    /// Undo, redo and refresh are held while the worker is busy so a
+    /// checkout cannot race an edit being written.
+    pub controls_enabled: bool,
+    /// Fit-view and export need a loaded model.
+    pub has_model: bool,
+}
+
+/// Render the toolbar.
+pub fn show_toolbar(
+    ui: &mut egui::Ui,
+    history: &VersionHistory,
+    state: ToolbarState,
+) -> ToolbarAction {
     let mut action = ToolbarAction::None;
 
     ui.horizontal(|ui| {
         // Undo button with dropdown.
-        ui.add_enabled_ui(history.can_undo(), |ui| {
+        ui.add_enabled_ui(state.controls_enabled && history.can_undo(), |ui| {
             let undo_response = ui.button("Undo");
 
             if undo_response.clicked() {
@@ -46,7 +65,10 @@ pub fn show_toolbar(ui: &mut egui::Ui, history: &VersionHistory) -> ToolbarActio
 
         // Redo button.
         if ui
-            .add_enabled(history.can_redo(), egui::Button::new("Redo"))
+            .add_enabled(
+                state.controls_enabled && history.can_redo(),
+                egui::Button::new("Redo"),
+            )
             .clicked()
         {
             action = ToolbarAction::Redo;
@@ -56,11 +78,34 @@ pub fn show_toolbar(ui: &mut egui::Ui, history: &VersionHistory) -> ToolbarActio
 
         // Refresh button — re-execute the script from disk.
         if ui
-            .button("\u{21BB} Refresh")
-            .on_hover_text("Re-execute script and reload model")
+            .add_enabled(
+                state.controls_enabled,
+                egui::Button::new("\u{21BB} Refresh"),
+            )
+            .on_hover_text("Re-execute part.py and reload the model")
             .clicked()
         {
             action = ToolbarAction::Refresh;
+        }
+
+        if ui
+            .add_enabled(state.has_model, egui::Button::new("Fit view"))
+            .on_hover_text("Frame the whole model")
+            .clicked()
+        {
+            action = ToolbarAction::FitView;
+        }
+
+        ui.separator();
+        ui.label(egui::RichText::new("Export").small());
+        for format in ExportFormat::ALL {
+            if ui
+                .add_enabled(state.has_model, egui::Button::new(format.label()))
+                .on_hover_text(format!("Write part.{} next to part.py", format.extension()))
+                .clicked()
+            {
+                action = ToolbarAction::Export(format);
+            }
         }
     });
 

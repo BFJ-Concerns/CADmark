@@ -1,15 +1,17 @@
-// Orchestrator — coordinates the AI request → execute → render cycle.
+// Orchestrator — the worker thread that owns script execution.
 //
-// When the user sends a chat message or spatial comment, the orchestrator:
+// Every build123d execution runs here, never on the UI thread: the initial
+// load, reloads after undo/redo/refresh, and the AI edit cycle. For an AI
+// request the orchestrator:
 // 1. Packages context (current code, geometry, conversation) into an AiRequest.
-// 2. Sends the request to the AI backend (async, off main thread).
-// 3. Receives modified code.
-// 4. Executes the build123d script via the kernel.
-// 5. If execution fails, retries with the traceback (one attempt).
-// 6. On success: updates the mesh, creates a microversion commit, updates chat.
-// 7. On failure: reports the error in chat.
+// 2. Sends the request to the AI backend.
+// 3. Writes the returned code and executes it once.
+// 4. If execution fails for a reason the AI can fix, retries with the
+//    traceback (one attempt).
+// 5. Ships the executed model to the UI, or restores the previous script and
+//    reports the failure.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use cadmark_bridge::backend::{AiBackend, AiResponse};
@@ -28,32 +30,64 @@ pub enum OrchestratorCommand {
         text: String,
         context: GeometryContext,
     },
-    /// Undo/redo changed the working tree — sync the cached source code.
-    UpdateCode(String),
+    /// Re-read the script from disk and execute it: startup, undo/redo, and
+    /// the Refresh button.
+    Reload,
+}
+
+/// Why a model was built: a reload of what is on disk, or an accepted AI edit.
+pub enum ModelOrigin {
+    Reload,
+    Edit(EditOutcome),
+}
+
+/// The AI edit that produced a model.
+pub struct EditOutcome {
+    pub response: AiResponse,
+    pub trigger_message: String,
+    pub applied_spatial_message_id: Option<MessageId>,
+    /// Path to the script the edit was written to.
+    pub script_path: PathBuf,
 }
 
 /// Results sent from the orchestrator back to the UI thread.
-pub enum OrchestratorResult {
-    /// AI responded successfully — code executed and mesh is ready.
-    Success {
-        response: AiResponse,
-        trigger_message: String,
-        applied_spatial_message_id: Option<MessageId>,
-        /// Path to the updated script file (for the kernel to re-read).
-        script_path: PathBuf,
-    },
-    /// AI responded but code execution failed after retry.
+pub enum OrchestratorResult<M> {
+    /// A script executed successfully and its model is ready to display.
+    ModelReady { model: M, origin: ModelOrigin },
+    /// AI responded but its code failed; the previous script was restored.
     ExecutionFailed { ai_message: String, error: String },
-    /// AI backend itself failed.
+    /// There is no script on disk yet: the normal state of a new project.
+    NoScript,
+    /// The script on disk failed to execute.
+    ReloadFailed { error: String },
+    /// AI backend itself failed, or no AI is configured.
     BackendError(String),
+}
+
+/// Why a script execution failed, and whether handing the message back to
+/// the AI could plausibly fix it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionFailure {
+    pub message: String,
+    /// True for faults in the script itself (a Python error, an unsupported
+    /// output shape). False for faults in CADmark's own runtime, which the
+    /// AI cannot repair and should not be told to.
+    pub retryable: bool,
+}
+
+/// Executes a script and produces a model. The kernel is the production
+/// implementation; tests substitute scripted outcomes.
+pub trait ScriptExecutor: Send + Sync {
+    type Model: Send + 'static;
+
+    fn execute(&self, script_path: &Path) -> Result<Self::Model, ExecutionFailure>;
 }
 
 /// Maximum number of previous user messages retained for doc lookup context.
 const MAX_MESSAGE_HISTORY: usize = 10;
 
-/// Manages the async AI request cycle.
-/// Lives on a background tokio runtime, communicates with the UI via channels.
-pub struct Orchestrator {
+/// Manages script execution and the AI request cycle on a worker thread.
+pub struct Orchestrator<E: ScriptExecutor> {
     /// Current build123d source code.
     current_code: String,
     /// Path to the project directory.
@@ -63,25 +97,43 @@ pub struct Orchestrator {
     /// Rolling window of recent user messages, used by the doc lookup
     /// agent to understand conversational context.
     message_history: Vec<String>,
-    backend: Box<dyn AiBackend>,
-    doc_lookup: DocLookup,
-    script_executor: Box<dyn ScriptExecutor>,
+    /// AI consumers, absent when no usable configuration was found. The
+    /// model still loads and renders without them.
+    ai: Option<AiConsumers>,
+    /// Why the AI consumers are absent, shown when the user tries to chat.
+    ai_unavailable_reason: Option<String>,
+    script_executor: E,
 }
 
-impl Orchestrator {
+struct AiConsumers {
+    backend: Box<dyn AiBackend>,
+    doc_lookup: DocLookup,
+}
+
+impl<E: ScriptExecutor> Orchestrator<E> {
     fn new(
         project_dir: PathBuf,
         script_filename: String,
-        services: AiServices,
-        script_executor: Box<dyn ScriptExecutor>,
+        services: Result<AiServices, String>,
+        script_executor: E,
     ) -> Self {
+        let (ai, ai_unavailable_reason) = match services {
+            Ok(services) => (
+                Some(AiConsumers {
+                    backend: Box::new(services.model_edit),
+                    doc_lookup: services.doc_lookup,
+                }),
+                None,
+            ),
+            Err(reason) => (None, Some(reason)),
+        };
         Self {
             current_code: String::new(),
             project_dir,
             script_filename,
             message_history: Vec::new(),
-            backend: Box::new(services.model_edit),
-            doc_lookup: services.doc_lookup,
+            ai,
+            ai_unavailable_reason,
             script_executor,
         }
     }
@@ -99,10 +151,39 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Re-read the script from disk and execute it.
+    pub fn handle_reload(&mut self) -> OrchestratorResult<E::Model> {
+        let script_path = self.script_path();
+        if !script_path.exists() {
+            self.current_code.clear();
+            return OrchestratorResult::NoScript;
+        }
+        match std::fs::read_to_string(&script_path) {
+            Ok(source) => self.current_code = source,
+            Err(error) => {
+                return OrchestratorResult::ReloadFailed {
+                    error: format!("Failed to read {}: {error}", script_path.display()),
+                };
+            }
+        }
+        match self.script_executor.execute(&script_path) {
+            Ok(model) => OrchestratorResult::ModelReady {
+                model,
+                origin: ModelOrigin::Reload,
+            },
+            Err(failure) => OrchestratorResult::ReloadFailed {
+                error: failure.message,
+            },
+        }
+    }
+
     /// Process a chat message through the AI.
     /// Runs the doc lookup agent first to gather relevant API references.
-    pub async fn handle_chat(&mut self, message: &str) -> OrchestratorResult {
-        let doc_context = self.doc_lookup.lookup(message, &self.message_history).await;
+    pub async fn handle_chat(&mut self, message: &str) -> OrchestratorResult<E::Model> {
+        let Some(ai) = &self.ai else {
+            return self.ai_unavailable();
+        };
+        let doc_context = ai.doc_lookup.lookup(message, &self.message_history).await;
         self.push_message(message);
 
         let mut request = AiRequest::from_chat(self.current_code.clone(), message.to_string());
@@ -119,8 +200,11 @@ impl Orchestrator {
         id: MessageId,
         text: &str,
         context: GeometryContext,
-    ) -> OrchestratorResult {
-        let doc_context = self.doc_lookup.lookup(text, &self.message_history).await;
+    ) -> OrchestratorResult<E::Model> {
+        let Some(ai) = &self.ai else {
+            return self.ai_unavailable();
+        };
+        let doc_context = ai.doc_lookup.lookup(text, &self.message_history).await;
         self.push_message(text);
 
         let mut request =
@@ -131,15 +215,27 @@ impl Orchestrator {
         self.process_request(request, Some(id)).await
     }
 
+    fn ai_unavailable(&self) -> OrchestratorResult<E::Model> {
+        OrchestratorResult::BackendError(format!(
+            "AI is unavailable: {}",
+            self.ai_unavailable_reason
+                .as_deref()
+                .unwrap_or("no AI is configured")
+        ))
+    }
+
     /// Core request processing — send to AI, execute, retry on failure.
     async fn process_request(
         &mut self,
         request: AiRequest,
         applied_spatial_message_id: Option<MessageId>,
-    ) -> OrchestratorResult {
+    ) -> OrchestratorResult<E::Model> {
+        let Some(ai) = &self.ai else {
+            return self.ai_unavailable();
+        };
         let trigger_message = request.user_message.clone();
         // Step 1: Send to AI.
-        let response = match self.backend.request(request.clone()).await {
+        let response = match ai.backend.request(request.clone()).await {
             Ok(r) => r,
             Err(e) => return OrchestratorResult::BackendError(e.to_string()),
         };
@@ -153,70 +249,79 @@ impl Orchestrator {
             };
         }
 
-        match self.script_executor.execute(&script_path) {
-            Ok(()) => {
-                // Execution succeeded — update state.
+        let first_failure = match self.script_executor.execute(&script_path) {
+            Ok(model) => {
                 self.current_code = response.code.clone();
-                OrchestratorResult::Success {
-                    response,
-                    trigger_message,
-                    applied_spatial_message_id,
-                    script_path,
+                return OrchestratorResult::ModelReady {
+                    model,
+                    origin: ModelOrigin::Edit(EditOutcome {
+                        response,
+                        trigger_message,
+                        applied_spatial_message_id,
+                        script_path,
+                    }),
+                };
+            }
+            Err(failure) => failure,
+        };
+
+        if !first_failure.retryable {
+            // A fault in CADmark's own runtime: the AI cannot fix it, and
+            // telling it to would only make it "repair" correct code.
+            self.restore_original(&script_path);
+            return OrchestratorResult::ExecutionFailed {
+                ai_message: response.message,
+                error: first_failure.message,
+            };
+        }
+
+        // Step 3: Retry with traceback.
+        let traceback = first_failure.message;
+        let retry_request = request.retry_with_traceback(traceback.clone());
+
+        let retry_response = match ai.backend.request(retry_request).await {
+            Ok(retry_response) => retry_response,
+            Err(e) => {
+                self.restore_original(&script_path);
+                return OrchestratorResult::BackendError(format!(
+                    "Retry failed: {e}\n\nOriginal error:\n{traceback}"
+                ));
+            }
+        };
+
+        if let Err(e) = std::fs::write(&script_path, &retry_response.code) {
+            self.restore_original(&script_path);
+            return OrchestratorResult::ExecutionFailed {
+                ai_message: retry_response.message,
+                error: format!("Failed to write retry script: {e}"),
+            };
+        }
+
+        match self.script_executor.execute(&script_path) {
+            Ok(model) => {
+                self.current_code = retry_response.code.clone();
+                OrchestratorResult::ModelReady {
+                    model,
+                    origin: ModelOrigin::Edit(EditOutcome {
+                        response: retry_response,
+                        trigger_message,
+                        applied_spatial_message_id,
+                        script_path,
+                    }),
                 }
             }
-            Err(first_error) => {
-                // Step 3: Retry with traceback.
-                let traceback = format!("{first_error}");
-                let retry_request = request.retry_with_traceback(traceback.clone());
-
-                match self.backend.request(retry_request).await {
-                    Ok(retry_response) => {
-                        // Write the retry code.
-                        if let Err(e) = std::fs::write(&script_path, &retry_response.code) {
-                            self.restore_original(&script_path);
-                            return OrchestratorResult::ExecutionFailed {
-                                ai_message: retry_response.message,
-                                error: format!("Failed to write retry script: {e}"),
-                            };
-                        }
-
-                        match self.script_executor.execute(&script_path) {
-                            Ok(()) => {
-                                self.current_code = retry_response.code.clone();
-                                OrchestratorResult::Success {
-                                    response: retry_response,
-                                    trigger_message,
-                                    applied_spatial_message_id,
-                                    script_path,
-                                }
-                            }
-                            Err(retry_error) => {
-                                // Restore the original code on double failure.
-                                self.restore_original(&script_path);
-                                OrchestratorResult::ExecutionFailed {
-                                    ai_message: retry_response.message,
-                                    error: format!(
-                                        "Code failed after retry.\n\nFirst error:\n{traceback}\n\nRetry error:\n{retry_error}"
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        // Restore the original code.
-                        self.restore_original(&script_path);
-                        OrchestratorResult::BackendError(format!(
-                            "Retry failed: {e}\n\nOriginal error:\n{traceback}"
-                        ))
-                    }
+            Err(retry_failure) => {
+                // Restore the original code on double failure.
+                self.restore_original(&script_path);
+                OrchestratorResult::ExecutionFailed {
+                    ai_message: retry_response.message,
+                    error: format!(
+                        "Code failed after retry.\n\nFirst error:\n{traceback}\n\nRetry error:\n{}",
+                        retry_failure.message
+                    ),
                 }
             }
         }
-    }
-
-    /// Update the stored code (e.g. after undo/redo restores a different version).
-    pub fn set_current_code(&mut self, code: String) {
-        self.current_code = code;
     }
 
     pub fn current_code(&self) -> &str {
@@ -232,7 +337,7 @@ impl Orchestrator {
         }
     }
 
-    fn restore_original(&self, script_path: &std::path::Path) {
+    fn restore_original(&self, script_path: &Path) {
         if let Err(error) = std::fs::write(script_path, &self.current_code) {
             log::error!(
                 "Failed to restore script after request failure: {error}. \
@@ -242,77 +347,79 @@ impl Orchestrator {
     }
 }
 
-trait ScriptExecutor: Send + Sync {
-    fn execute(&self, script_path: &std::path::Path) -> Result<(), String>;
-}
-
-struct KernelScriptExecutor;
+/// The production executor: the embedded build123d kernel.
+pub struct KernelScriptExecutor;
 
 impl ScriptExecutor for KernelScriptExecutor {
-    fn execute(&self, script_path: &std::path::Path) -> Result<(), String> {
-        cadmark_kernel::execution::execute_script(script_path)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+    type Model = cadmark_kernel::execution::ExecutionResult;
+
+    fn execute(&self, script_path: &Path) -> Result<Self::Model, ExecutionFailure> {
+        use cadmark_kernel::execution::ExecutionError;
+        cadmark_kernel::execution::execute_script(script_path).map_err(|error| {
+            let retryable = matches!(
+                error,
+                ExecutionError::Script(_)
+                    | ExecutionError::Tessellation(_)
+                    | ExecutionError::NoSolid
+            );
+            ExecutionFailure {
+                message: error.to_string(),
+                retryable,
+            }
+        })
     }
 }
 
-/// Spawn the orchestrator on a tokio runtime with channel communication.
+/// Spawn the orchestrator on its own thread with channel communication.
 /// Returns (sender, receiver) for the UI thread to use.
+///
+/// `services` is the AI configuration outcome; when it is an error the
+/// orchestrator still executes scripts and answers chat with the reason.
 pub fn spawn_orchestrator(
     project_dir: PathBuf,
     script_filename: String,
-    services: AiServices,
+    services: Result<AiServices, String>,
 ) -> (
     mpsc::Sender<OrchestratorCommand>,
-    mpsc::Receiver<OrchestratorResult>,
+    mpsc::Receiver<OrchestratorResult<cadmark_kernel::execution::ExecutionResult>>,
 ) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<OrchestratorCommand>();
-    let (result_tx, result_rx) = mpsc::channel::<OrchestratorResult>();
+    let (result_tx, result_rx) = mpsc::channel();
 
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-        rt.block_on(async {
-            let mut orchestrator = Orchestrator::new(
-                project_dir,
-                script_filename,
-                services,
-                Box::new(KernelScriptExecutor),
-            );
-            if let Err(e) = orchestrator.load_current_code() {
-                log::error!("Failed to load existing script: {e}");
-                let _ = result_tx.send(OrchestratorResult::BackendError(format!(
-                    "Could not read project script: {e}"
-                )));
-            }
+    std::thread::Builder::new()
+        .name("cadmark-orchestrator".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+            rt.block_on(async {
+                let mut orchestrator =
+                    Orchestrator::new(project_dir, script_filename, services, KernelScriptExecutor);
+                if let Err(e) = orchestrator.load_current_code() {
+                    log::error!("Failed to load existing script: {e}");
+                    let _ = result_tx.send(OrchestratorResult::ReloadFailed {
+                        error: format!("Could not read project script: {e}"),
+                    });
+                }
 
-            while let Ok(cmd) = cmd_rx.recv() {
-                match cmd {
-                    // Code sync from undo/redo — no result to send back.
-                    OrchestratorCommand::UpdateCode(code) => {
-                        orchestrator.set_current_code(code);
-                        continue;
-                    }
-                    cmd => {
-                        let result = match cmd {
-                            OrchestratorCommand::ChatMessage(msg) => {
-                                orchestrator.handle_chat(&msg).await
-                            }
-                            OrchestratorCommand::SpatialComment { id, text, context } => {
-                                orchestrator
-                                    .handle_spatial_comment(id, &text, context)
-                                    .await
-                            }
-                            OrchestratorCommand::UpdateCode(_) => unreachable!(),
-                        };
-
-                        if result_tx.send(result).is_err() {
-                            break; // UI thread dropped the receiver.
+                while let Ok(cmd) = cmd_rx.recv() {
+                    let result = match cmd {
+                        OrchestratorCommand::Reload => orchestrator.handle_reload(),
+                        OrchestratorCommand::ChatMessage(msg) => {
+                            orchestrator.handle_chat(&msg).await
                         }
+                        OrchestratorCommand::SpatialComment { id, text, context } => {
+                            orchestrator
+                                .handle_spatial_comment(id, &text, context)
+                                .await
+                        }
+                    };
+
+                    if result_tx.send(result).is_err() {
+                        break; // UI thread dropped the receiver.
                     }
                 }
-            }
-        });
-    });
+            });
+        })
+        .expect("failed to spawn the orchestrator thread");
 
     (cmd_tx, result_rx)
 }
@@ -492,12 +599,28 @@ mod tests {
     }
 
     struct FakeExecutorState {
-        results: VecDeque<Result<(), String>>,
+        results: VecDeque<Result<(), ExecutionFailure>>,
         executed_code: Vec<String>,
+    }
+
+    /// A script-level failure the AI may be asked to repair.
+    fn script_failure(message: &str) -> ExecutionFailure {
+        ExecutionFailure {
+            message: message.to_string(),
+            retryable: true,
+        }
     }
 
     impl FakeExecutor {
         fn new(results: impl IntoIterator<Item = Result<(), String>>) -> Self {
+            Self::scripted(
+                results
+                    .into_iter()
+                    .map(|result| result.map_err(|message| script_failure(&message))),
+            )
+        }
+
+        fn scripted(results: impl IntoIterator<Item = Result<(), ExecutionFailure>>) -> Self {
             Self {
                 state: Arc::new(Mutex::new(FakeExecutorState {
                     results: results.into_iter().collect(),
@@ -512,11 +635,13 @@ mod tests {
     }
 
     impl ScriptExecutor for FakeExecutor {
-        fn execute(&self, script_path: &std::path::Path) -> Result<(), String> {
+        type Model = String;
+
+        fn execute(&self, script_path: &std::path::Path) -> Result<String, ExecutionFailure> {
             let code = std::fs::read_to_string(script_path).unwrap();
             let mut state = self.state.lock().unwrap();
-            state.executed_code.push(code);
-            state.results.pop_front().unwrap_or(Ok(()))
+            state.executed_code.push(code.clone());
+            state.results.pop_front().unwrap_or(Ok(())).map(|()| code)
         }
     }
 
@@ -524,15 +649,103 @@ mod tests {
         project_dir: &std::path::Path,
         services: AiServices,
         executor: FakeExecutor,
-    ) -> Orchestrator {
+    ) -> Orchestrator<FakeExecutor> {
         let mut orchestrator = Orchestrator::new(
             project_dir.to_path_buf(),
             "part.py".to_string(),
-            services,
-            Box::new(executor),
+            Ok(services),
+            executor,
         );
         orchestrator.load_current_code().unwrap();
         orchestrator
+    }
+
+    #[test]
+    fn reload_executes_the_script_on_disk_and_reports_its_model() {
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        let executor = FakeExecutor::new([Ok(())]);
+        let mut orchestrator = Orchestrator::new(
+            project.path().to_path_buf(),
+            "part.py".to_string(),
+            Err("no configuration".to_string()),
+            executor.clone(),
+        );
+
+        assert!(matches!(
+            orchestrator.handle_reload(),
+            OrchestratorResult::NoScript
+        ));
+
+        std::fs::write(&script_path, "ON_DISK = 1").unwrap();
+        match orchestrator.handle_reload() {
+            OrchestratorResult::ModelReady {
+                model,
+                origin: ModelOrigin::Reload,
+            } => assert_eq!(model, "ON_DISK = 1"),
+            _ => panic!("expected the on-disk model"),
+        }
+        assert_eq!(orchestrator.current_code(), "ON_DISK = 1");
+        assert_eq!(executor.executed_code(), vec!["ON_DISK = 1"]);
+    }
+
+    #[tokio::test]
+    async fn chat_without_ai_reports_the_reason_and_leaves_the_script_alone() {
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+        let mut orchestrator = Orchestrator::new(
+            project.path().to_path_buf(),
+            "part.py".to_string(),
+            Err("DISTINCTIVE_REASON".to_string()),
+            FakeExecutor::new([]),
+        );
+        match orchestrator.handle_chat("request").await {
+            OrchestratorResult::BackendError(error) => {
+                assert!(error.contains("DISTINCTIVE_REASON"));
+            }
+            _ => panic!("expected an unavailable-AI error"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(script_path).unwrap(),
+            "ORIGINAL_CODE = 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_faults_are_not_handed_to_the_ai_for_repair() {
+        let (base_url, records, server) = recording_server(vec![
+            completed("docs"),
+            completed("```python\nCORRECT_CODE = True\n```\nSummary: Correct"),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "ORIGINAL_CODE = 1").unwrap();
+        let executor = FakeExecutor::scripted([Err(ExecutionFailure {
+            message: "RUNTIME_FAULT".to_string(),
+            retryable: false,
+        })]);
+        let mut orchestrator = orchestrator(project.path(), services(&base_url), executor.clone());
+
+        let result = orchestrator.handle_chat("request").await;
+        server.await.unwrap();
+        match result {
+            OrchestratorResult::ExecutionFailed { error, .. } => {
+                assert_eq!(error, "RUNTIME_FAULT");
+            }
+            _ => panic!("expected a non-retried execution failure"),
+        }
+        assert_eq!(
+            records.lock().unwrap().len(),
+            2,
+            "no retry request was sent"
+        );
+        assert_eq!(executor.executed_code(), vec!["CORRECT_CODE = True"]);
+        assert_eq!(
+            std::fs::read_to_string(script_path).unwrap(),
+            "ORIGINAL_CODE = 1"
+        );
     }
 
     #[tokio::test]
@@ -588,10 +801,16 @@ mod tests {
             "DISTINCTIVE_CODE = 42"
         );
         match result {
-            OrchestratorResult::Success { response, .. } => {
-                assert_eq!(response.code, "DISTINCTIVE_CODE = 42");
-                assert_eq!(response.summary, "Distinctive summary");
-                assert!(response.message.contains("Distinctive message"));
+            OrchestratorResult::ModelReady {
+                model,
+                origin: ModelOrigin::Edit(edit),
+            } => {
+                assert_eq!(model, "DISTINCTIVE_CODE = 42");
+                assert_eq!(edit.response.code, "DISTINCTIVE_CODE = 42");
+                assert_eq!(edit.response.summary, "Distinctive summary");
+                assert!(edit.response.message.contains("Distinctive message"));
+                assert_eq!(edit.trigger_message, "current request");
+                assert_eq!(edit.script_path, script_path);
             }
             _ => panic!("expected successful orchestrator result"),
         }
@@ -685,7 +904,7 @@ mod tests {
 
         let result = orchestrator.handle_chat("request").await;
         server.await.unwrap();
-        assert!(matches!(result, OrchestratorResult::Success { .. }));
+        assert!(matches!(result, OrchestratorResult::ModelReady { .. }));
         let records = records.lock().unwrap();
         assert_eq!(records.len(), 2);
         assert!(
@@ -699,7 +918,7 @@ mod tests {
     async fn traceback_retry_preserves_context_and_succeeds() {
         use cadmark_core::geometry::{FaceId, TopologyElement};
         use cadmark_core::ledger::{
-            ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+            LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
         };
 
         let first_edit = "```python\nFIRST_BAD_CODE = True\n```\nSummary: First";
@@ -725,7 +944,7 @@ mod tests {
                 "retry request",
                 GeometryContext {
                     element: TopologyElement::Face(FaceId(7)),
-                    provenance: ProvenanceEntry {
+                    provenance: LedgerValue::Resolved(ProvenanceEntry {
                         source: SourceRef {
                             line: 23,
                             code: "DISTINCTIVE_SOURCE_SNIPPET".to_string(),
@@ -733,7 +952,7 @@ mod tests {
                         operation: SemanticOperation::Fillet,
                         operation_id: 9,
                         relation: ProvenanceRelation::Modified,
-                    },
+                    }),
                     identification,
                 },
             )
@@ -741,8 +960,11 @@ mod tests {
         server.await.unwrap();
         assert!(matches!(
             result,
-            OrchestratorResult::Success {
-                applied_spatial_message_id: Some(id),
+            OrchestratorResult::ModelReady {
+                origin: ModelOrigin::Edit(EditOutcome {
+                    applied_spatial_message_id: Some(id),
+                    ..
+                }),
                 ..
             } if id == spatial_message_id
         ));
@@ -766,7 +988,7 @@ mod tests {
             "DISTINCTIVE_RETRY_DOCS",
             "ORIGINAL_CODE = 1",
             "retry request",
-            "face #7",
+            "face 7",
             "line 23",
             "DISTINCTIVE_SOURCE_SNIPPET",
             "DISTINCTIVE_FEATURE",

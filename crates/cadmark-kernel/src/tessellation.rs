@@ -196,6 +196,17 @@ pub fn tessellate_from_namespace(
     parse_tessellation_result(py, &result)
 }
 
+/// The raw OCP shape behind a build123d object (or the object itself when it
+/// is already an OCP shape).
+pub(crate) fn unwrap_shape<'py>(
+    shape: &Bound<'py, PyAny>,
+) -> Result<Bound<'py, PyAny>, TessellationError> {
+    match get_non_none_attr(shape, "wrapped")? {
+        Some(wrapped) => Ok(wrapped),
+        None => Ok(shape.clone()),
+    }
+}
+
 pub(crate) fn find_result_shape<'py>(
     namespace: &Bound<'py, PyDict>,
 ) -> Result<Bound<'py, PyAny>, TessellationError> {

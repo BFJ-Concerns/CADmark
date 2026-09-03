@@ -6,19 +6,26 @@
 use cadmark_core::geometry::{GeometryContext, ScreenPosition};
 
 fn context_summary(context: &GeometryContext) -> String {
-    format!(
-        "{:?} · {:?} · line {} · {:?}",
-        context.element,
-        context.provenance.operation,
-        context.provenance.source.line,
-        context.provenance.relation
-    )
+    let mut summary = format!(
+        "{}: {}",
+        context.element.display_label(),
+        context.provenance.describe()
+    );
+    if let Some(surface) = context
+        .identification
+        .get("surface")
+        .or_else(|| context.identification.get("curve"))
+    {
+        summary.push_str(&format!(" ({surface})"));
+    }
+    summary
 }
 
 /// State for the spatial comment overlay.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum OverlayState {
     /// No overlay visible.
+    #[default]
     Hidden,
     /// Overlay is open at a screen position, user is writing.
     Active {
@@ -29,12 +36,6 @@ pub enum OverlayState {
         /// Provenance resolved at pick time and retained through submission.
         context: GeometryContext,
     },
-}
-
-impl Default for OverlayState {
-    fn default() -> Self {
-        Self::Hidden
-    }
 }
 
 /// Result of showing the overlay — what action the user took.
@@ -131,7 +132,7 @@ impl OverlayState {
                 let painter = ui.painter();
                 painter.line_segment(
                     [egui::pos2(anchor.x, anchor.y), overlay_pos],
-                    egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 200, 255)),
+                    egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(100, 200, 255)),
                 );
 
                 action
@@ -143,15 +144,19 @@ impl OverlayState {
 #[cfg(test)]
 mod tests {
     use cadmark_core::geometry::{FaceId, GeometryContext, TopologyElement};
-    use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
+    use cadmark_core::ledger::{
+        LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+    };
 
     use super::context_summary;
 
     #[test]
-    fn overlay_summary_exposes_the_retained_resolved_context() {
+    fn overlay_summary_reads_as_plain_language() {
+        let mut identification = std::collections::HashMap::new();
+        identification.insert("surface".to_string(), "plane".to_string());
         let context = GeometryContext {
             element: TopologyElement::Face(FaceId(2)),
-            provenance: ProvenanceEntry {
+            provenance: LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
                     line: 4,
                     code: "Box(20, 15, 10)".into(),
@@ -159,13 +164,23 @@ mod tests {
                 operation: SemanticOperation::Box,
                 operation_id: 1,
                 relation: ProvenanceRelation::Generated,
-            },
-            identification: Default::default(),
+            }),
+            identification,
         };
 
         assert_eq!(
             context_summary(&context),
-            "Face(FaceId(2)) · Box · line 4 · Generated"
+            "face 2: created by box at line 4 (plane)"
         );
+    }
+
+    #[test]
+    fn overlay_summary_admits_an_untraced_source() {
+        let context = GeometryContext {
+            element: TopologyElement::Face(FaceId(0)),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+        };
+        assert!(context_summary(&context).starts_with("face 0: no source line"));
     }
 }

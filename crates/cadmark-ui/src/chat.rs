@@ -4,7 +4,27 @@
 // geometry chip header), and AI responses. Applied spatial comments
 // are shown in a muted state.
 
+use cadmark_core::geometry::GeometryContext;
+use cadmark_core::ledger::LedgerValue;
 use cadmark_core::message::{Conversation, MessageKind};
+
+/// The short label beside a spatial comment: which element, and which line
+/// it came from when that is known.
+fn spatial_chip(context: &GeometryContext) -> String {
+    let element = context.element.display_label();
+    match &context.provenance {
+        LedgerValue::Resolved(entry) => format!("{element} · line {}", entry.source.line),
+        LedgerValue::Ambiguous(candidates) => format!(
+            "{element} · lines {}",
+            candidates
+                .iter()
+                .map(|candidate| candidate.source.line.to_string())
+                .collect::<Vec<_>>()
+                .join("/")
+        ),
+        LedgerValue::Untraced => format!("{element} · untraced"),
+    }
+}
 
 /// State for the chat pane UI.
 #[derive(Debug, Default)]
@@ -70,12 +90,7 @@ impl ChatPane {
                                         ),
                                     );
                                     ui.label(
-                                        egui::RichText::new(format!(
-                                            "line {}",
-                                            context.provenance.source.line
-                                        ))
-                                        .small()
-                                        .color(
+                                        egui::RichText::new(spatial_chip(context)).small().color(
                                             egui::Color32::from_rgba_premultiplied(
                                                 150, 150, 150, alpha,
                                             ),
@@ -148,5 +163,49 @@ impl ChatPane {
         });
 
         submitted
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cadmark_core::geometry::{EdgeId, FaceId, GeometryContext, TopologyElement};
+    use cadmark_core::ledger::{
+        LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+    };
+
+    use super::spatial_chip;
+
+    fn entry(line: u32) -> ProvenanceEntry {
+        ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: String::new(),
+            },
+            operation: SemanticOperation::Box,
+            operation_id: u64::from(line),
+            relation: ProvenanceRelation::Generated,
+        }
+    }
+
+    #[test]
+    fn chip_names_element_and_known_lines() {
+        let resolved = GeometryContext {
+            element: TopologyElement::Face(FaceId(1)),
+            provenance: LedgerValue::Resolved(entry(7)),
+            identification: Default::default(),
+        };
+        assert_eq!(spatial_chip(&resolved), "face 1 · line 7");
+        let ambiguous = GeometryContext {
+            element: TopologyElement::Edge(EdgeId(2)),
+            provenance: LedgerValue::Ambiguous(vec![entry(3), entry(9)]),
+            identification: Default::default(),
+        };
+        assert_eq!(spatial_chip(&ambiguous), "edge 2 · lines 3/9");
+        let untraced = GeometryContext {
+            element: TopologyElement::Edge(EdgeId(2)),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+        };
+        assert_eq!(spatial_chip(&untraced), "edge 2 · untraced");
     }
 }
