@@ -6,9 +6,11 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- The AI can point back at geometry: its reply names faces and edges in
-  square brackets and exactly those elements light up in the viewport, in
-  their own colour, distinct from the user's selection.
+- The AI can point back at geometry: its reply names faces, edges and
+  vertices in square brackets and exactly those elements are highlighted,
+  in their own colour, distinct from the user's selection. Faces and edges
+  light up in the viewport; the viewport draws no vertex markers yet, so a
+  vertex reference is understood but not yet visible.
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally

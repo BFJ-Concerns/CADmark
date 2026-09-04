@@ -162,7 +162,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             images: input.images.clone(),
         });
         let tools = tools_for(self.model.accepts_images());
-        let mut last_good: Option<(String, Box<ExecutedModel>, String, ExecutionTag)> = None;
+        let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
         // Assigned by the only exit from the loop that reaches the reply;
@@ -242,13 +242,14 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                             model: model.clone(),
                             source: code.clone(),
                         });
-                        // Each execution gets its own tag; the IDs it
-                        // assigns are only referenceable under that tag,
-                        // so an ID quoted from an earlier run of this
-                        // same turn resolves to nothing.
-                        let tag = geometry_reference::next_execution_tag();
+                        // The inventory names every ID with this
+                        // execution's own tag — the fingerprint of the
+                        // model it just built — so an ID quoted from any
+                        // other execution, including an earlier run of
+                        // this same turn, resolves to nothing.
+                        let tag = geometry_reference::execution_tag(&model);
                         let output = describe_model(&model, &tag);
-                        last_good = Some((code, model, summary, tag));
+                        last_good = Some((code, model, summary));
                         last_failure = None;
                         (output, false)
                     }
@@ -291,7 +292,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         // an ID quoted from an earlier turn, resolves to nothing.
         let anchors = anchored_elements(input);
         let scope = match &last_good {
-            Some((_, model, _, tag)) => ReferenceScope::Model { model, tag },
+            Some((_, model, _)) => ReferenceScope::Model { model },
             None => ReferenceScope::Anchors(&anchors),
         };
         emit(TurnEvent::GeometryReferenced {
@@ -299,7 +300,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         });
 
         match last_good {
-            Some((code, model, summary, _)) => {
+            Some((code, model, summary)) => {
                 // A later attempt may have failed after the last success;
                 // the script on disk must be the one the model on screen
                 // came from.
@@ -606,7 +607,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cadmark_bridge::backend::{DeltaSink, ModelResponse};
-    use cadmark_core::geometry::{EdgeId, FaceId};
+    use cadmark_core::geometry::{EdgeId, FaceId, VertexId};
     use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation,
@@ -747,9 +748,9 @@ mod tests {
     }
 
     /// The model every scripted execution produces: a box on line 2 whose
-    /// one line made four edges, and a fillet on line 3 that made a fifth.
-    /// One line owning several elements is what makes a reference to one
-    /// of them discriminating.
+    /// one line made four edges, a corner vertex and a face, and a fillet
+    /// on line 3 that made a fifth edge. One line owning several elements
+    /// is what makes a reference to one of them discriminating.
     fn sample_model() -> ExecutedModel {
         let mut ledger = ProvenanceLedger::new();
         for id in 0..4 {
@@ -762,6 +763,9 @@ mod tests {
             .unwrap();
         ledger
             .record_face(FaceId(0), sample_source(2, SemanticOperation::Box))
+            .unwrap();
+        ledger
+            .record_vertex(VertexId(0), sample_source(2, SemanticOperation::Box))
             .unwrap();
         ExecutedModel {
             mesh: TessellatedMesh::default(),
@@ -1253,7 +1257,7 @@ mod tests {
     async fn a_reference_to_an_element_the_model_does_not_have_highlights_nothing() {
         let model = ScriptedModel::new([
             run_script("c1", "part = Box(1, 1, 1)", "Box"),
-            text("Rounded [edge 40 @{tag}] and [vertex 0 @{tag}] and [edge 1]."),
+            text("Rounded [edge 40 @{tag}] and [vertex 9 @{tag}] and [edge 1]."),
         ]);
         let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
 
@@ -1291,7 +1295,25 @@ mod tests {
         assert!(output.contains(&format!("[edge 1 @{tag}]")), "{output}");
         assert!(output.contains(&format!("[edge 4 @{tag}]")), "{output}");
         assert!(output.contains(&format!("[face 0 @{tag}]")), "{output}");
-        assert!(!output.contains("[vertex "), "{output}");
+        assert!(output.contains(&format!("[vertex 0 @{tag}]")), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_naming_a_vertex_highlights_that_vertex() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("The corner you asked about is [vertex 0 @{tag}]."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("which corner is that?"), CancelFlag::new())
+            .await;
+
+        assert_eq!(
+            harness.references(),
+            vec![TopologyElement::Vertex(VertexId(0))]
+        );
     }
 
     #[tokio::test]
