@@ -18,7 +18,7 @@ static PYTHON_HOME_CONFIGURED: Once = Once::new();
 /// The interpreter PyO3 builds against, with symlinks resolved so a
 /// virtual environment's `bin/python` leads to the real install. `None`
 /// when `PYO3_PYTHON` is unset or names nothing on disk.
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub fn configured_interpreter() -> Option<PathBuf> {
     let path = std::env::var_os("PYO3_PYTHON").map(PathBuf::from)?;
     std::fs::canonicalize(path).ok()

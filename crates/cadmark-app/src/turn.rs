@@ -656,7 +656,8 @@ mod tests {
     }
 
     struct Harness {
-        project: tempfile::TempDir,
+        /// Held so the project folder outlives the harness.
+        _project: tempfile::TempDir,
         script: PathBuf,
         executor: FakeExecutor,
         events: Vec<TurnEvent>,
@@ -670,7 +671,7 @@ mod tests {
                 std::fs::write(&script, original).unwrap();
             }
             Self {
-                project,
+                _project: project,
                 script,
                 executor,
                 events: Vec::new(),
