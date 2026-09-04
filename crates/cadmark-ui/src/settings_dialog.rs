@@ -26,6 +26,7 @@ pub struct SettingsForm {
     pub credential_from_environment: bool,
     pub wall_clock_seconds: u64,
     pub memory_megabytes: u64,
+    pub context_window_tokens: usize,
 }
 
 impl SettingsForm {
@@ -175,6 +176,31 @@ impl SettingsDialog {
                         ui.end_row();
                     });
 
+                ui.add_space(12.0);
+                ui.label(
+                    egui::RichText::new("Conversation context")
+                        .strong()
+                        .color(theme::TEXT_STRONG),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "Set this to the configured model's context window. CADmark condenses \n                         conversation before it approaches this limit.",
+                    )
+                    .small()
+                    .color(theme::TEXT_MUTED),
+                );
+                egui::Grid::new("settings_context")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Context window (tokens)");
+                        ui.add(
+                            egui::DragValue::new(&mut form.context_window_tokens)
+                                .range(1_024..=10_000_000),
+                        );
+                        ui.end_row();
+                    });
+
                 if let Some(error) = &self.error {
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new(error).color(theme::ERROR));
@@ -227,6 +253,7 @@ mod tests {
             credential_from_environment: false,
             wall_clock_seconds: 0,
             memory_megabytes: 1,
+            context_window_tokens: 1,
         };
         let limits = form.limits();
         assert_eq!(limits.wall_clock, Duration::from_secs(1));

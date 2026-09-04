@@ -27,7 +27,7 @@ use cadmark_ui::view_gizmo::GizmoAction;
 
 use crate::orchestrator::OrchestratorResult;
 use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
-use crate::turn::{TurnEvent, TurnInput, TurnOutcome, reference_images};
+use crate::turn::{TurnEvent, TurnInput, TurnOutcome, context_usage, reference_images};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::viewport::{
     PickTransition, ViewportCallback, ViewportResources, completed_pick_transition,
@@ -63,6 +63,8 @@ struct TurnRecord {
     comment_ids: Vec<MessageId>,
     /// The model summary before the turn, for the change report.
     summary_before: Option<cadmark_core::geometry::ModelSummary>,
+    /// Messages before the active turn, which a condensation event may replace.
+    history_len: usize,
 }
 
 /// Top-level application state.
@@ -250,6 +252,7 @@ impl CadmarkApp {
                 chat: Some(text),
                 comments: Vec::new(),
                 images: reference_images(&self.project.dir),
+                context_window_tokens: self.settings.context_window_tokens,
             },
             history,
             Vec::new(),
@@ -268,6 +271,7 @@ impl CadmarkApp {
                 chat: None,
                 comments: vec![GroundedComment { text, anchors }],
                 images: reference_images(&self.project.dir),
+                context_window_tokens: self.settings.context_window_tokens,
             },
             history,
             vec![id],
@@ -277,6 +281,7 @@ impl CadmarkApp {
     /// `history` is the conversation before this turn's messages were
     /// recorded; the model sees it plus the turn's input, once.
     fn start_turn(&mut self, input: TurnInput, history: Conversation, comment_ids: Vec<MessageId>) {
+        let history_len = history.len();
         let summary_before = self
             .project
             .model
@@ -290,6 +295,7 @@ impl CadmarkApp {
                     tools: None,
                     comment_ids,
                     summary_before,
+                    history_len,
                 });
             }
             Err(error) => {
@@ -303,6 +309,10 @@ impl CadmarkApp {
         let Some(turn) = &mut self.turn else { return };
         let conversation = &mut self.project.conversation;
         match event {
+            TurnEvent::ConversationCondensed { summary } => {
+                conversation.condense_before(turn.history_len, summary);
+                turn.history_len = 1;
+            }
             TurnEvent::Phase(phase) => {
                 self.project.note_turn_event(Some(phase));
             }
@@ -707,6 +717,7 @@ impl CadmarkApp {
             credential_from_environment: std::env::var_os(CREDENTIAL_ENV).is_some(),
             wall_clock_seconds: self.settings.limits.wall_clock.as_secs(),
             memory_megabytes: self.settings.limits.memory_bytes / (1024 * 1024),
+            context_window_tokens: self.settings.context_window_tokens,
         });
     }
 
@@ -730,6 +741,7 @@ impl CadmarkApp {
         let mut candidate = self.settings.clone();
         candidate.ai = (!ai.base_url.is_empty() || !ai.model.is_empty()).then_some(ai);
         candidate.limits = form.limits();
+        candidate.context_window_tokens = form.context_window_tokens.max(1_024);
 
         if !form.credential.trim().is_empty() {
             match &self.settings_store {
@@ -847,6 +859,14 @@ impl CadmarkApp {
             }
             ToolbarAction::NameVersion => self.version_dialog.open(),
             ToolbarAction::OpenProject => self.pick_project_folder(),
+            ToolbarAction::NewConversation => match self.project.start_fresh_conversation() {
+                Ok(()) => {
+                    self.turn = None;
+                    self.chat.focus_input();
+                    self.status = Some(Status::info("Started a new conversation"));
+                }
+                Err(error) => self.status = Some(Status::error(error)),
+            },
             ToolbarAction::OpenRecent(path) => self.open_project(ctx, path),
             ToolbarAction::RevealProject => {
                 let dir = self.project.dir.clone();
@@ -955,7 +975,12 @@ impl CadmarkApp {
                         last_event: *last_event,
                     }),
                 };
-                action = self.chat.show(ui, &self.project.conversation);
+                let usage = context_usage(
+                    &self.project.conversation,
+                    &reference_images(&self.project.dir),
+                    self.settings.context_window_tokens,
+                );
+                action = self.chat.show(ui, &self.project.conversation, usage);
             });
         match action {
             ChatAction::Send(text) => self.send_chat_message(text),
