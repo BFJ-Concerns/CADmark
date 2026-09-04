@@ -436,8 +436,14 @@ mod tests {
 
     #[test]
     fn a_mapped_pixel_decodes_to_its_element_or_the_background() {
-        assert_eq!(decode_pick_result(&[0, 0, 0, 0], SelectionFilter::default()), None);
-        assert_eq!(decode_pick_result(&[1, 0], SelectionFilter::default()), None);
+        assert_eq!(
+            decode_pick_result(&[0, 0, 0, 0], SelectionFilter::default()),
+            None
+        );
+        assert_eq!(
+            decode_pick_result(&[1, 0], SelectionFilter::default()),
+            None
+        );
         assert_eq!(
             decode_pick_result(&[4, 0, 0, 0, 9, 9], SelectionFilter::default()),
             Some(PickedElement::Solid(TopologyElement::Face(FaceId(3))))

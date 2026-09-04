@@ -46,6 +46,62 @@ impl StandardView {
     }
 }
 
+/// The kinds of element a click may land on, mirrored from the renderer
+/// so the toolbar names no renderer type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    Face,
+    Edge,
+    Vertex,
+}
+
+impl SelectionKind {
+    pub const ALL: [SelectionKind; 3] = [Self::Face, Self::Edge, Self::Vertex];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Face => "Faces",
+            Self::Edge => "Edges",
+            Self::Vertex => "Vertices",
+        }
+    }
+}
+
+/// Which kinds are currently clickable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionKinds {
+    pub faces: bool,
+    pub edges: bool,
+    pub vertices: bool,
+}
+
+impl SelectionKinds {
+    pub fn enabled(self, kind: SelectionKind) -> bool {
+        match kind {
+            SelectionKind::Face => self.faces,
+            SelectionKind::Edge => self.edges,
+            SelectionKind::Vertex => self.vertices,
+        }
+    }
+
+    /// A short summary for the control's own label: nothing when every
+    /// kind is clickable, otherwise what is left.
+    pub fn summary(self) -> Option<String> {
+        let enabled: Vec<&str> = SelectionKind::ALL
+            .iter()
+            .filter(|kind| self.enabled(**kind))
+            .map(|kind| kind.label())
+            .collect();
+        if enabled.len() == SelectionKind::ALL.len() {
+            None
+        } else if enabled.is_empty() {
+            Some("nothing".to_string())
+        } else {
+            Some(enabled.join(", ").to_lowercase())
+        }
+    }
+}
+
 use crate::theme;
 
 /// The axis a section plane cuts along, mirrored from the renderer so the
@@ -124,6 +180,8 @@ pub enum ToolbarAction {
     ToggleProjection,
     /// Snap the camera to a standard view.
     StandardView(StandardView),
+    /// Turn one kind of element on or off for clicking.
+    ToggleSelectionKind(SelectionKind),
     /// Turn the section plane on or off.
     ToggleSection,
     /// Cut the section along a different axis.
@@ -176,6 +234,8 @@ pub struct ToolbarState<'a> {
     pub orthographic: bool,
     /// A non-blocking explanation shown before an unavailable export.
     pub export_warning: Option<&'a str>,
+    /// Which kinds of element a click may land on.
+    pub selection_kinds: SelectionKinds,
     /// The AI model in use, or `None` when AI is unavailable.
     pub ai_model: Option<&'a str>,
     /// The section plane's current state.
@@ -487,6 +547,27 @@ pub fn show_toolbar(
                 }
             }
         });
+
+        let selection_label = match state.selection_kinds.summary() {
+            Some(summary) => format!("Select: {summary} \u{25BE}"),
+            None => "Select \u{25BE}".to_string(),
+        };
+        ui.menu_button(selection_label, |ui| {
+            ui.set_min_width(180.0);
+            ui.label(
+                egui::RichText::new("What a click in the viewport can land on")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            for kind in SelectionKind::ALL {
+                let mut enabled = state.selection_kinds.enabled(kind);
+                if ui.checkbox(&mut enabled, kind.label()).changed() {
+                    action = ToolbarAction::ToggleSelectionKind(kind);
+                }
+            }
+        })
+        .response
+        .on_hover_text("Turn a kind off to click past it to what is behind");
 
         // ── Seeing inside the part ─────────────────────────────────
         // Both controls sit in the row itself rather than behind a menu or
