@@ -4,7 +4,7 @@
 // pass, a section-plane pass) is added here and drawn from there.
 
 use crate::mesh::{GpuMesh, GpuSketch};
-use crate::picking::{self, PickingPass};
+use crate::picking::{self, PickingPass, SelectionFilter};
 use crate::pipeline::RenderPipelines;
 
 /// Encode the shaded mesh, wireframe overlay and sketch profile into the
@@ -81,6 +81,15 @@ pub fn render_scene_into(
             pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
             pass.draw(0..mesh.edge_vertex_count, 0..1);
         }
+
+        // Markers last within the part, so a vertex reads in front of the
+        // edges meeting at it.
+        if mesh.marker_vertex_count > 0 {
+            pass.set_pipeline(&pipelines.vertex_marker_pipeline);
+            pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
+            pass.set_vertex_buffer(0, mesh.marker_vertex_buffer.slice(..));
+            pass.draw(0..mesh.marker_vertex_count, 0..1);
+        }
     }
 
     // The profile comes last, and its pipelines ignore depth, so the
@@ -103,14 +112,22 @@ pub fn render_scene_into(
 }
 
 /// Render every pickable element into the colour-ID texture: faces
-/// first, then edges drawn over them so a cursor on an edge picks the
-/// edge.
+/// first, then edges drawn over them, then vertex markers over those, so
+/// a cursor on an edge picks the edge and one on a vertex picks the
+/// vertex.
+///
+/// `filter` decides which kinds are drawn at all. A kind the filter
+/// refuses leaves the ID texture holding whatever is behind it, so a
+/// click there falls through rather than reading as empty space. The
+/// depth prepass is unfiltered: hidden geometry must still lose to a part
+/// in front of it however the user has narrowed the selection.
 pub fn render_picking(
     encoder: &mut wgpu::CommandEncoder,
     pipelines: &RenderPipelines,
     picking: &PickingPass,
     all_meshes: &[GpuMesh],
     meshes: &[GpuMesh],
+    filter: SelectionFilter,
 ) {
     // First establish scene depth with every part. The selected part's local
     // IDs are rendered afterwards, but hidden geometry must still lose to a
@@ -163,7 +180,7 @@ pub fn render_picking(
             ..Default::default()
         });
 
-        for mesh in meshes {
+        for mesh in meshes.iter().filter(|_| filter.faces) {
             pass.set_pipeline(&pipelines.picking_pipeline);
             pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -172,7 +189,10 @@ pub fn render_picking(
         }
     }
 
-    for mesh in meshes.iter().filter(|mesh| mesh.edge_vertex_count > 0) {
+    for mesh in meshes
+        .iter()
+        .filter(|mesh| filter.edges && mesh.edge_vertex_count > 0)
+    {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("edge_picking_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -198,6 +218,37 @@ pub fn render_picking(
         pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
         pass.draw(0..mesh.edge_vertex_count, 0..1);
+    }
+
+    for mesh in meshes
+        .iter()
+        .filter(|mesh| filter.vertices && mesh.marker_vertex_count > 0)
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("marker_picking_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &picking.texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &pipelines.depth_texture,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&pipelines.marker_picking_pipeline);
+        pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.marker_vertex_buffer.slice(..));
+        pass.draw(0..mesh.marker_vertex_count, 0..1);
     }
 }
 
@@ -277,12 +328,24 @@ pub fn copy_pick_pixel(
 
 /// Decode a mapped pick pixel into the element under it, or `None` for
 /// the background.
-pub fn decode_pick_result(data: &[u8]) -> Option<cadmark_core::geometry::PickedElement> {
+///
+/// The filter is applied here as well as at draw time: a readback already
+/// in flight when the user narrows the selection carries IDs the filter
+/// now refuses, and honouring the old frame would select a kind the user
+/// has just turned off.
+pub fn decode_pick_result(
+    data: &[u8],
+    filter: SelectionFilter,
+) -> Option<cadmark_core::geometry::PickedElement> {
     if data.len() < 4 {
         return None;
     }
     let pixel = [data[0], data[1], data[2], data[3]];
-    picking::decode_pick(picking::colour_to_id(pixel))
+    let picked = picking::decode_pick(picking::colour_to_id(pixel))?;
+    match &picked {
+        cadmark_core::geometry::PickedElement::Solid(element) if !filter.allows(element) => None,
+        _ => Some(picked),
+    }
 }
 
 #[cfg(test)]
@@ -373,10 +436,16 @@ mod tests {
 
     #[test]
     fn a_mapped_pixel_decodes_to_its_element_or_the_background() {
-        assert_eq!(decode_pick_result(&[0, 0, 0, 0]), None);
-        assert_eq!(decode_pick_result(&[1, 0]), None);
         assert_eq!(
-            decode_pick_result(&[4, 0, 0, 0, 9, 9]),
+            decode_pick_result(&[0, 0, 0, 0], SelectionFilter::default()),
+            None
+        );
+        assert_eq!(
+            decode_pick_result(&[1, 0], SelectionFilter::default()),
+            None
+        );
+        assert_eq!(
+            decode_pick_result(&[4, 0, 0, 0, 9, 9], SelectionFilter::default()),
             Some(PickedElement::Solid(TopologyElement::Face(FaceId(3))))
         );
     }
@@ -396,17 +465,25 @@ mod tests {
                     [0.0, 0.0, 0.0, 1.0],
                 ],
                 section_plane: [0.0; 4],
+                marker_size: crate::markers::MarkerSizing::default().extent(64, 64),
             }),
         );
-        let near = upload_mesh(&device, &triangle(0.2), PartId(0));
-        let far = upload_mesh(&device, &triangle(0.8), PartId(1));
+        let near = upload_mesh(&device, &triangle(0.2), PartId(0), &[]);
+        let far = upload_mesh(&device, &triangle(0.8), PartId(1), &[]);
         let meshes = [near, far];
         let picking = PickingPass::new(&device, 64, 64);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("topology_pick_occlusion_test"),
         });
-        render_picking(&mut encoder, &pipelines, &picking, &meshes, &meshes[1..]);
+        render_picking(
+            &mut encoder,
+            &pipelines,
+            &picking,
+            &meshes,
+            &meshes[1..],
+            SelectionFilter::default(),
+        );
         copy_pick_pixel(&mut encoder, &picking, &picking.staging_buffer, 32, 32);
         queue.submit([encoder.finish()]);
         assert_eq!(
@@ -423,11 +500,15 @@ mod tests {
             &picking,
             &meshes[..1],
             &meshes[..1],
+            SelectionFilter::default(),
         );
         copy_pick_pixel(&mut encoder, &picking, &picking.staging_buffer, 32, 32);
         queue.submit([encoder.finish()]);
         assert_eq!(
-            decode_pick_result(&read_pick_pixel(&device, &picking.staging_buffer)),
+            decode_pick_result(
+                &read_pick_pixel(&device, &picking.staging_buffer),
+                SelectionFilter::default(),
+            ),
             Some(PickedElement::Solid(TopologyElement::Face(FaceId(0))))
         );
     }
@@ -469,10 +550,11 @@ mod tests {
                 _pad6: 0.0,
                 _pad7: 0.0,
                 _pad8: 0.0,
+                marker_size: crate::markers::MarkerSizing::default().extent(64, 64),
             }),
         );
-        let near = upload_mesh(&device, &triangle_with_face(0.2, 0), PartId(0));
-        let far = upload_mesh(&device, &triangle_with_face(0.8, 5), PartId(1));
+        let near = upload_mesh(&device, &triangle_with_face(0.2, 0), PartId(0), &[]);
+        let far = upload_mesh(&device, &triangle_with_face(0.8, 5), PartId(1), &[]);
         let colour = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("main_scene_depth_test_colour"),
             size: wgpu::Extent3d {
@@ -570,13 +652,14 @@ mod tests {
                 _pad6: 0.0,
                 _pad7: 0.0,
                 _pad8: 0.0,
+                marker_size: crate::markers::MarkerSizing::default().extent(64, 64),
             }),
         );
         // Two parts side by side: the left half is part zero's alone, the
         // right half part one's, so a frame missing either is legible as a
         // background pixel where that part's own triangle should be.
-        let left = upload_mesh(&device, &triangle_in_half(-0.9, -0.1, 0.5), PartId(0));
-        let right = upload_mesh(&device, &triangle_in_half(0.1, 0.9, 0.5), PartId(1));
+        let left = upload_mesh(&device, &triangle_in_half(-0.9, -0.1, 0.5), PartId(0), &[]);
+        let right = upload_mesh(&device, &triangle_in_half(0.1, 0.9, 0.5), PartId(1), &[]);
         let colour = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("multi_part_scene_colour"),
             size: wgpu::Extent3d {
@@ -657,7 +740,7 @@ mod tests {
     fn a_sketch_pixel_decodes_to_the_sketch_element_it_encodes() {
         // 400_001 = the first sketch curve, above the part range.
         assert_eq!(
-            decode_pick_result(&(400_001u32).to_le_bytes()),
+            decode_pick_result(&(400_001u32).to_le_bytes(), SelectionFilter::default()),
             Some(PickedElement::Sketch(SketchElement {
                 kind: SketchElementKind::Curve,
                 index: 0,

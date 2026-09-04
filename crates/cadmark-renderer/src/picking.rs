@@ -26,6 +26,43 @@ const SKETCH_CURVE_OFFSET: u32 = 400_000;
 const SKETCH_CORNER_OFFSET: u32 = 500_000;
 const SKETCH_REGION_OFFSET: u32 = 600_000;
 
+/// Which kinds of element a click may land on. Every kind is enabled
+/// until the user turns one off; a disabled kind is not drawn into the
+/// colour-ID texture at all, so a click where it would have been reaches
+/// whatever is behind it rather than reading as empty space.
+///
+/// The filter governs the three topology kinds the user aims at within a
+/// part. A whole-part pick is a different question — which part, not
+/// which element of it — so it passes through untouched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionFilter {
+    pub faces: bool,
+    pub edges: bool,
+    pub vertices: bool,
+}
+
+impl Default for SelectionFilter {
+    fn default() -> Self {
+        Self {
+            faces: true,
+            edges: true,
+            vertices: true,
+        }
+    }
+}
+
+impl SelectionFilter {
+    /// Whether a readback may resolve to this element.
+    pub fn allows(&self, element: &TopologyElement) -> bool {
+        match element {
+            TopologyElement::Face(_) => self.faces,
+            TopologyElement::Edge(_) => self.edges,
+            TopologyElement::Vertex(_) => self.vertices,
+            TopologyElement::Part(_) => true,
+        }
+    }
+}
+
 /// Encode a topology element as a picking ID for the colour buffer.
 pub fn encode_picking_id(element: &TopologyElement) -> u32 {
     match element {
@@ -210,6 +247,60 @@ mod tests {
     #[test]
     fn background_decodes_to_none() {
         assert_eq!(decode_picking_id(0), None);
+    }
+
+    #[test]
+    fn the_filter_enables_every_kind_by_default() {
+        let filter = SelectionFilter::default();
+        assert!(filter.allows(&TopologyElement::Face(FaceId(0))));
+        assert!(filter.allows(&TopologyElement::Edge(EdgeId(0))));
+        assert!(filter.allows(&TopologyElement::Vertex(VertexId(0))));
+    }
+
+    #[test]
+    fn a_disabled_kind_is_the_only_kind_the_filter_refuses() {
+        // Each arm is independent, so each one is turned off in turn: a
+        // filter that refuses the wrong kind, or refuses nothing, shows here.
+        let elements = [
+            TopologyElement::Face(FaceId(9)),
+            TopologyElement::Edge(EdgeId(9)),
+            TopologyElement::Vertex(VertexId(9)),
+        ];
+        let disabled = [
+            SelectionFilter {
+                faces: false,
+                ..SelectionFilter::default()
+            },
+            SelectionFilter {
+                edges: false,
+                ..SelectionFilter::default()
+            },
+            SelectionFilter {
+                vertices: false,
+                ..SelectionFilter::default()
+            },
+        ];
+        for (off, filter) in disabled.iter().enumerate() {
+            for (kind, element) in elements.iter().enumerate() {
+                assert_eq!(
+                    filter.allows(element),
+                    kind != off,
+                    "{filter:?} judged {element:?} wrongly"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_part_pick_is_not_a_kind_the_filter_can_turn_off() {
+        // Picking a part answers "which part", not "which element of it".
+        // Turning every topology kind off must still leave a part pickable.
+        let nothing = SelectionFilter {
+            faces: false,
+            edges: false,
+            vertices: false,
+        };
+        assert!(nothing.allows(&TopologyElement::Part(PartId(3))));
     }
 
     #[test]

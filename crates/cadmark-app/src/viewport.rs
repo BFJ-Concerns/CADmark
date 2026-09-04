@@ -11,13 +11,14 @@ use cadmark_core::geometry::PartId;
 use cadmark_core::sketch::SketchProfile;
 use cadmark_kernel::protocol::ExecutedPart;
 use cadmark_renderer::mesh::{GpuMesh, GpuSketch};
-use cadmark_renderer::picking::PickingPass;
+use cadmark_renderer::picking::{PickingPass, SelectionFilter};
 use cadmark_renderer::pipeline::{
     MeshUniforms, RenderPipelines, SimpleUniforms, ViewportMarker, upload_mesh, upload_sketch,
 };
 use cadmark_renderer::viewport::{
     copy_pick_pixel, decode_pick_result, render_part_picking, render_picking, render_scene,
 };
+use cadmark_ui::toolbar::{SelectionKind, SelectionKinds};
 
 /// GPU resources for the 3D viewport, stored in egui_wgpu's
 /// `callback_resources` so both `prepare()` and `paint()` can reach them.
@@ -86,7 +87,17 @@ impl ViewportResources {
     pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[ExecutedPart]) {
         self.meshes = parts
             .iter()
-            .map(|part| upload_mesh(device, &part.mesh, PartId(part.id)))
+            .map(|part| {
+                // The marker pass draws the part's topological vertices in
+                // ID order, which the descriptors carry beside the mesh.
+                let vertex_positions: Vec<[f32; 3]> = part
+                    .descriptors
+                    .vertices
+                    .iter()
+                    .map(|vertex| vertex.position.map(|axis| axis as f32))
+                    .collect();
+                upload_mesh(device, &part.mesh, PartId(part.id), &vertex_positions)
+            })
             .collect();
         self.active_part = parts.len().checked_sub(1);
     }
@@ -281,6 +292,33 @@ pub fn completed_pick_transition(
 /// Per-frame data passed into the egui_wgpu paint callback.
 /// Carries everything that changes frame-to-frame (uniforms,
 /// whether a pick was requested, viewport dimensions).
+/// Turn one kind of element on or off for clicking.
+pub fn toggle_selection_kind(filter: SelectionFilter, kind: SelectionKind) -> SelectionFilter {
+    match kind {
+        SelectionKind::Face => SelectionFilter {
+            faces: !filter.faces,
+            ..filter
+        },
+        SelectionKind::Edge => SelectionFilter {
+            edges: !filter.edges,
+            ..filter
+        },
+        SelectionKind::Vertex => SelectionFilter {
+            vertices: !filter.vertices,
+            ..filter
+        },
+    }
+}
+
+/// The filter as the toolbar shows it.
+pub fn selection_kinds(filter: SelectionFilter) -> SelectionKinds {
+    SelectionKinds {
+        faces: filter.faces,
+        edges: filter.edges,
+        vertices: filter.vertices,
+    }
+}
+
 pub struct ViewportCallback {
     pub mesh_uniforms: MeshUniforms,
     /// Picking IDs of the candidate-footprint highlight, uploaded whole:
@@ -300,6 +338,8 @@ pub struct ViewportCallback {
     pub viewport_size: (u32, u32),
     /// Background colour in the offscreen target's own colour space.
     pub clear_colour: wgpu::Color,
+    /// Which kinds of element this frame's picking pass may resolve to.
+    pub selection_filter: SelectionFilter,
 }
 
 impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
@@ -342,10 +382,12 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                             match rx.recv() {
                                 Ok(Ok(())) => {
                                     let data = slice.get_mapped_range();
-                                    res.pick_result = Some(match decode_pick_result(&data) {
-                                        Some(element) => CompletedPick::Hit(element),
-                                        None => CompletedPick::Background,
-                                    });
+                                    res.pick_result = Some(
+                                        match decode_pick_result(&data, self.selection_filter) {
+                                            Some(element) => CompletedPick::Hit(element),
+                                            None => CompletedPick::Background,
+                                        },
+                                    );
                                     drop(data);
                                     res.picking.staging_buffer.unmap();
                                 }
@@ -439,6 +481,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                         &res.picking,
                         &res.meshes,
                         topology_meshes,
+                        self.selection_filter,
                     );
                 }
 
@@ -484,6 +527,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     &res.picking,
                     &res.meshes,
                     topology_meshes,
+                    self.selection_filter,
                 );
                 copy_pick_pixel(&mut hover_encoder, &res.picking, &res.hover.staging, x, y);
                 queue.submit(std::iter::once(hover_encoder.finish()));
@@ -660,6 +704,42 @@ mod tests {
             PickTransition::Background
         );
         assert_eq!(in_flight, None);
+    }
+
+    #[test]
+    fn every_kind_is_clickable_before_the_user_changes_anything() {
+        let kinds = selection_kinds(SelectionFilter::default());
+        assert!(kinds.faces && kinds.edges && kinds.vertices);
+    }
+
+    #[test]
+    fn toggling_one_kind_leaves_the_others_alone() {
+        let filter = toggle_selection_kind(SelectionFilter::default(), SelectionKind::Edge);
+        assert_eq!(
+            filter,
+            SelectionFilter {
+                faces: true,
+                edges: false,
+                vertices: true
+            }
+        );
+        // And toggling it again puts it back.
+        assert_eq!(
+            toggle_selection_kind(filter, SelectionKind::Edge),
+            SelectionFilter::default()
+        );
+    }
+
+    #[test]
+    fn each_kind_toggles_its_own_flag() {
+        for (kind, disabled) in [
+            (SelectionKind::Face, [false, true, true]),
+            (SelectionKind::Edge, [true, false, true]),
+            (SelectionKind::Vertex, [true, true, false]),
+        ] {
+            let kinds = selection_kinds(toggle_selection_kind(SelectionFilter::default(), kind));
+            assert_eq!([kinds.faces, kinds.edges, kinds.vertices], disabled);
+        }
     }
 
     #[test]
