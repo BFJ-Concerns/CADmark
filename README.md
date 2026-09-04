@@ -38,7 +38,7 @@ Without a provider configured, the model still loads and rebuilds — only the A
 
 A project is a folder holding one or more build123d scripts, each defining a part. Open or create a project from the start view, then describe what you want in the chat. The AI writes a script, executes it, and the result appears in the viewport. After each build, the status bar reports each part's validity — "Part 1 is closed and valid." or "Part 1 is NOT a closed valid solid; it will not print."
 
-Click a face, edge, or vertex to select it and write a spatial comment anchored to that geometry — the AI sees the source line that produced the selected element. Pending comments are sent together with chat text as one turn.
+Click a face, edge, or vertex to select it and write a spatial comment anchored to that geometry — the AI sees the source line that produced the selected element. The Select menu in the toolbar turns each kind of click target on or off, so a disabled kind's click falls through to what is behind it. Pending comments are sent together with chat text as one turn.
 
 The parameters panel lists every named number in the script; drag a value to change it directly without an AI turn. Every accepted edit is a design step — undo with `Ctrl+Z`, name a version with `Ctrl+S`.
 

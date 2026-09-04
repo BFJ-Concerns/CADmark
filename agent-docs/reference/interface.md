@@ -39,13 +39,19 @@ Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/s
 
 ## Selection
 
-Clicking geometry selects it: faces, edges, vertices. "Pick part" in the toolbar selects a whole part with the next click.
+Clicking geometry selects it: faces, edges, vertices. Edges are drawn at a clickable screen-space width and every vertex gets a marker; both hold their size on screen at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
 
 Sketch elements are selectable when the design has reached only a sketch: curves, corners, and regions draw face-on to the sketch's plane in orthographic view, with any existing solid ghosted behind them.
 
-Selected elements glow in the viewport. The status bar shows which element is selected.
+Selected elements glow in the viewport. The status bar shows which element is selected. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable.
 
-Source: `crates/cadmark-app/src/viewport.rs`, `crates/cadmark-ui/src/toolbar.rs:457–465`.
+### Select menu
+
+The "Select" menu in the toolbar controls which element kinds a viewport click can land on. Three checkboxes — "Faces", "Edges", "Vertices" — all on by default. Disabling a kind makes the click pass through it to whatever is behind. The button label reads "Select" when all kinds are on, or "Select: edges, vertices" (for example) when one is off.
+
+The filter does not affect whole-part picks or sketch element picks.
+
+Source: `crates/cadmark-ui/src/toolbar.rs:551–570` (menu UI), `crates/cadmark-renderer/src/picking.rs:38–63` (`SelectionFilter`), `crates/cadmark-renderer/src/shaders/vertex_markers.wgsl:105–109` (section discard).
 
 ## Standard views and projection
 
