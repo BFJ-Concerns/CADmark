@@ -544,7 +544,6 @@ class _CadmarkSession:
                     builder._cadmark_source_line = original_line
                 return
             if adapter == "history" and semantic_operation == "Mirror":
-                self.capture_history(builder, result, operation, api_class)
                 self.capture_active_semantic_relation(
                     result, source_line, semantic_operation, semantic_api_class
                 )
