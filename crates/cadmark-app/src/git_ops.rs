@@ -128,19 +128,49 @@ pub fn checkout_branch_tip(project_dir: &Path, branch: &str) -> Result<(), GitEr
     Ok(())
 }
 
-/// List recent microversions from every reachable design-history ref, most recent first.
+/// List recent microversions from the current lane and CADmark-owned alternatives.
 pub fn list_microversions(project_dir: &Path, count: usize) -> Result<Vec<Microversion>, GitError> {
-    // Use null byte as record separator — it cannot appear in commit text,
-    // unlike the old "---END---" delimiter which could collide with user input.
-    let log_output = run_git(
+    let mut refs = vec!["HEAD".to_string()];
+    refs.extend(design_history_alternative_refs(project_dir)?);
+    list_microversions_from_refs(project_dir, count, &refs)
+}
+
+/// List the microversions on the lane currently checked out by the user.
+pub fn list_current_lane_microversions(
+    project_dir: &Path,
+    count: usize,
+) -> Result<Vec<Microversion>, GitError> {
+    list_microversions_from_refs(project_dir, count, &["HEAD".to_string()])
+}
+
+/// Return the local branch refs CADmark creates for edit-after-undo alternatives.
+fn design_history_alternative_refs(project_dir: &Path) -> Result<Vec<String>, GitError> {
+    let output = run_git(
         project_dir,
         &[
-            "log",
-            "--all",
-            &format!("-{count}"),
-            "--format=%H%n%s%n%aI%n%b%x00",
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads/cadmark-edit-*",
         ],
     )?;
+    Ok(output.lines().map(str::to_owned).collect())
+}
+
+fn list_microversions_from_refs(
+    project_dir: &Path,
+    count: usize,
+    refs: &[String],
+) -> Result<Vec<Microversion>, GitError> {
+    // Use null byte as record separator — it cannot appear in commit text,
+    // unlike the old "---END---" delimiter which could collide with user input.
+    let mut args = vec![
+        "log".to_string(),
+        format!("-{count}"),
+        "--format=%H%n%s%n%aI%n%b%x00".to_string(),
+    ];
+    args.extend(refs.iter().cloned());
+    let arg_refs: Vec<_> = args.iter().map(String::as_str).collect();
+    let log_output = run_git(project_dir, &arg_refs)?;
 
     let mut versions = Vec::new();
 
@@ -493,6 +523,42 @@ mod tests {
                 alternative.summary
             );
         }
+
+        checkout_commit(dir.path(), &base.commit_hash).unwrap();
+        let current_lane = list_current_lane_microversions(dir.path(), 10).unwrap();
+        assert_eq!(current_lane.len(), 1);
+        assert_eq!(current_lane[0].commit_hash, base.commit_hash);
+    }
+
+    #[test]
+    fn history_ignores_refs_cadmark_does_not_own() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        create_microversion(dir.path(), "Design step", "make a box", script).unwrap();
+
+        create_branch(dir.path(), "unrelated-work").unwrap();
+        fs::write(dir.path().join("notes.txt"), "not a design step").unwrap();
+        run_git(dir.path(), &["add", "notes.txt"]).unwrap();
+        run_git(dir.path(), &["commit", "-m", "Unrelated work"]).unwrap();
+        let unrelated = run_git(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        run_git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/main", unrelated.trim()],
+        )
+        .unwrap();
+        switch_branch(dir.path(), "main").unwrap();
+        run_git(dir.path(), &["tag", "unrelated-tag", unrelated.trim()]).unwrap();
+        fs::write(dir.path().join("scratch.txt"), "stash content").unwrap();
+        run_git(
+            dir.path(),
+            &["stash", "push", "-u", "-m", "not a design step"],
+        )
+        .unwrap();
+
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].summary, "Design step");
     }
 
     #[test]
