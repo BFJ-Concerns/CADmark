@@ -287,9 +287,15 @@ mod tests {
                 "JSON syntax",
             ),
             (
+                r#"{"ai":{"base_url":"https://provider.example/v1","model":"m","unknown-data-key-sentinel":"value"}}"#,
+                "unknown-data-key-sentinel",
+                None,
+                "field type",
+            ),
+            (
                 r#"{"context_window_tokens":"malformed-literal-sentinel"#,
                 "malformed-literal-sentinel",
-                None,
+                Some("context_window_tokens"),
                 "JSON syntax",
             ),
             (
