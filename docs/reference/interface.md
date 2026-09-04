@@ -118,9 +118,18 @@ The Export menu in the toolbar writes the model to a file next to the part scrip
 
 Multi-part models can export one part or all parts. An open or invalid solid shows a warning before export.
 
+## Solid validity
+
+After each build, the status bar reports every produced part's validity:
+
+- "Part 1 is closed and valid." — a solid that will print and export correctly.
+- "Part 1 is NOT a closed valid solid; it will not print." — open or invalid geometry that needs fixing.
+
+The export menu shows a warning before writing an invalid part.
+
 ## Reference images
 
-Place PNG, JPEG, or WebP files in a `references/` folder inside the project directory. When the provider's "accepts images" setting is on, these images are sent with every AI turn so the model knows what you are aiming for.
+Place PNG or JPEG files (`.png`, `.jpg`, `.jpeg`) in a `references/` folder inside the project directory. When the provider's "accepts images" setting is on, these images are sent with every AI turn so the model knows what you are aiming for. Other file types are ignored.
 
 ## Keyboard shortcuts
 

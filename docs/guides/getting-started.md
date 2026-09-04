@@ -39,13 +39,13 @@ cargo test
 ## Launch
 
 ```sh
-cargo run
+cargo run --bin cadmark
 ```
 
 CADmark opens the start view. From here you can create a new project in an empty folder or open an existing one. To skip the start view and open a folder directly:
 
 ```sh
-cargo run -- /path/to/project
+cargo run --bin cadmark -- /path/to/project
 ```
 
 ## Connect an AI provider
@@ -56,7 +56,7 @@ Open Settings (the gear button, or `Ctrl+,`) and fill in:
 - **Model** — the model your endpoint serves.
 - **Credential** — the API key. It is stored in a separate file with restricted permissions, never inside the settings file.
 
-Tick "The model reads images" if the model supports vision — this lets the AI render and inspect the model it builds, and sends any reference images from the project's `references/` folder.
+Tick "The model reads images" if the model supports vision — this lets the AI render and inspect the model it builds, and sends any PNG or JPEG reference images from the project's `references/` folder.
 
 Save, and the toolbar shows the model name where "AI off" was.
 
