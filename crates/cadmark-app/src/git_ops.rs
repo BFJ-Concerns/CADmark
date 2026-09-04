@@ -59,10 +59,11 @@ pub fn create_microversion(
 ) -> Result<Microversion, GitError> {
     // If HEAD is detached (e.g. after undo navigation), create a branch
     // so the new commit isn't orphaned. The branch name encodes the short
-    // hash we diverged from, making it discoverable and unique.
+    // hash we diverged from and an attempt number, so revisiting the same
+    // design step creates a distinct alternative rather than colliding.
     if is_head_detached(project_dir)? {
         let base = run_git(project_dir, &["rev-parse", "--short", "HEAD"])?;
-        let branch_name = format!("cadmark-edit-{}", base.trim());
+        let branch_name = next_edit_branch_name(project_dir, base.trim())?;
         run_git(project_dir, &["checkout", "-b", &branch_name])?;
     }
 
@@ -209,6 +210,19 @@ fn is_head_detached(project_dir: &Path) -> Result<bool, GitError> {
     }
 }
 
+/// Name the next alternative branch from `base` without reusing an existing
+/// design-edit branch.
+fn next_edit_branch_name(project_dir: &Path, base: &str) -> Result<String, GitError> {
+    let branches = list_branches(project_dir)?;
+    for attempt in 1.. {
+        let candidate = format!("cadmark-edit-{base}-{attempt}");
+        if !branches.iter().any(|branch| branch == &candidate) {
+            return Ok(candidate);
+        }
+    }
+    unreachable!("an unbounded branch-name sequence must find a free name")
+}
+
 /// Get the current branch name (or "HEAD" if detached).
 pub fn current_branch(project_dir: &Path) -> Result<String, GitError> {
     let output = run_git(project_dir, &["branch", "--show-current"])?;
@@ -334,6 +348,33 @@ mod tests {
         assert!(
             branch.starts_with("cadmark-edit-"),
             "branch name should encode the base commit"
+        );
+    }
+
+    #[test]
+    fn repeated_edits_from_the_same_undone_step_create_distinct_branches() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let base = create_microversion(dir.path(), "First version", "make a box", script).unwrap();
+
+        checkout_commit(dir.path(), &base.commit_hash).unwrap();
+        fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
+        create_microversion(dir.path(), "First alternative", "make it wider", script).unwrap();
+        let first_branch = current_branch(dir.path()).unwrap();
+
+        checkout_commit(dir.path(), &base.commit_hash).unwrap();
+        fs::write(dir.path().join(script), "box = Box(30, 30, 30)").unwrap();
+        let second =
+            create_microversion(dir.path(), "Second alternative", "make it taller", script)
+                .unwrap();
+        let second_branch = current_branch(dir.path()).unwrap();
+
+        assert_ne!(first_branch, second_branch);
+        assert_eq!(second.summary, "Second alternative");
+        assert!(
+            list_branches(dir.path()).unwrap().contains(&second_branch),
+            "the second edit must be recorded on its own branch"
         );
     }
 
