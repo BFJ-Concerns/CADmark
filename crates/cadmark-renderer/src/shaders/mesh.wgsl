@@ -20,7 +20,8 @@ struct Uniforms {
     _pad3: u32,
     marker_count: u32,
     _pad4: u32,
-    _pad5: vec2<u32>,
+    selected_part_id: u32,
+    hover_part_id: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }
@@ -61,6 +62,8 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) face_id: f32,
     @location(3) _padding: f32,
+    @location(4) part_id: f32,
+    @location(5) _part_padding: vec3<f32>,
 }
 
 struct VertexOutput {
@@ -68,6 +71,7 @@ struct VertexOutput {
     @location(0) world_pos: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) face_id: f32,
+    @location(3) part_id: f32,
 }
 
 @vertex
@@ -77,6 +81,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.world_pos = in.position;
     out.world_normal = in.normal;
     out.face_id = in.face_id;
+    out.part_id = in.part_id;
     return out;
 }
 
@@ -126,6 +131,7 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
 
     // Application-provided markers come before transient highlights.
     let fid = u32(in.face_id + 0.5);
+    let pid = u32(in.part_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if fid == markers[index].element_id && fid != 0u {
             let marker = markers[index].colour;
@@ -133,9 +139,12 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
             break;
         }
     }
-    if fid == uniforms.selected_id && uniforms.selected_id != 0u {
+    // A whole part is selected when its own picking ID matches; a face is
+    // selected only within the part the selection came from, because face
+    // IDs restart at zero in every part.
+    if (pid == uniforms.selected_id || (fid == uniforms.selected_id && pid == uniforms.selected_part_id)) && uniforms.selected_id != 0u {
         colour = mix(colour, uniforms.selected_colour.rgb, uniforms.selected_colour.a);
-    } else if fid == uniforms.hover_id && uniforms.hover_id != 0u {
+    } else if fid == uniforms.hover_id && pid == uniforms.hover_part_id && uniforms.hover_id != 0u {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a);
     } else if in_highlight(fid) {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a * 0.7);
