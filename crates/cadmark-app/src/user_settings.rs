@@ -245,6 +245,31 @@ mod tests {
     }
 
     #[test]
+    fn the_real_environment_credential_wins_without_changing_the_test_process() {
+        const CHILD: &str = "CADMARK_PROVIDER_SETTINGS_ENV_CHILD";
+        const STORE: &str = "CADMARK_PROVIDER_SETTINGS_ENV_STORE";
+        const EXPECTED: &str = "test-only-environment-token";
+
+        if std::env::var_os(CHILD).is_some() {
+            let store = SettingsStore::at(std::env::var_os(STORE).map(PathBuf::from).unwrap());
+            assert_eq!(store.credential().as_deref(), Some(EXPECTED));
+            return;
+        }
+
+        let (directory, store) = store();
+        store.save_credential("test-only-stored-token").unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "user_settings::tests::the_real_environment_credential_wins_without_changing_the_test_process"])
+            .env(CHILD, "1")
+            .env(STORE, &store.dir)
+            .env(CREDENTIAL_ENV, EXPECTED)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        drop(directory);
+    }
+
+    #[test]
     fn recent_projects_move_to_the_front_and_are_capped() {
         let mut settings = UserSettings::default();
         settings.remember_project(Path::new("/a"));
