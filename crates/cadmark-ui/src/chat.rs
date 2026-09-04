@@ -126,17 +126,20 @@ impl ChatPane {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| self.show_messages(ui, conversation, context));
+            .show_inside(ui, |ui| {
+                egui::TopBottomPanel::top("chat_context_usage")
+                    .frame(egui::Frame::NONE)
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| show_context_usage(ui, context));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.show_messages(ui, conversation));
+            });
 
         action
     }
 
-    fn show_messages(
-        &mut self,
-        ui: &mut egui::Ui,
-        conversation: &Conversation,
-        context: ContextUsage,
-    ) {
+    fn show_messages(&mut self, ui: &mut egui::Ui, conversation: &Conversation) {
         let new_message = conversation.len() != self.seen_messages;
         self.seen_messages = conversation.len();
 
@@ -145,27 +148,6 @@ impl ChatPane {
             .auto_shrink([false, false])
             .stick_to_bottom(true)
             .show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Context: {} / {} tokens ({}%)",
-                        context.used_tokens(),
-                        context.window_tokens,
-                        context.percent()
-                    ))
-                    .small()
-                    .color(theme::TEXT_MUTED),
-                );
-                if context.reference_image_tokens > 0 {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Includes {} tokens reserved for reference images",
-                            context.reference_image_tokens
-                        ))
-                        .small()
-                        .color(theme::TEXT_MUTED),
-                    );
-                }
                 ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let width = ui.available_width();
@@ -277,6 +259,32 @@ impl ChatPane {
 
         action
     }
+}
+
+fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "Context: {} / {} tokens ({}%)",
+                context.used_tokens(),
+                context.window_tokens,
+                context.percent()
+            ))
+            .small()
+            .color(theme::TEXT_MUTED),
+        );
+        if context.reference_image_tokens > 0 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Includes {} tokens reserved for reference images",
+                    context.reference_image_tokens
+                ))
+                .small()
+                .color(theme::TEXT_MUTED),
+            );
+        }
+    });
+    ui.add_space(4.0);
 }
 
 /// "looking up build123d docs · 1m 12s · last event 3s ago".

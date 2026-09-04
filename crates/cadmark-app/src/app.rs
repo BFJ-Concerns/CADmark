@@ -27,7 +27,9 @@ use cadmark_ui::view_gizmo::GizmoAction;
 
 use crate::orchestrator::OrchestratorResult;
 use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
-use crate::turn::{TurnEvent, TurnInput, TurnOutcome, context_usage, reference_images};
+use crate::turn::{
+    TurnEvent, TurnInput, TurnOutcome, context_usage, reference_image_count, reference_images,
+};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::viewport::{
     PickTransition, ViewportCallback, ViewportResources, completed_pick_transition,
@@ -977,7 +979,7 @@ impl CadmarkApp {
                 };
                 let usage = context_usage(
                     &self.project.conversation,
-                    &reference_images(&self.project.dir),
+                    reference_image_count(&self.project.dir),
                     self.settings.context_window_tokens,
                 );
                 action = self.chat.show(ui, &self.project.conversation, usage);

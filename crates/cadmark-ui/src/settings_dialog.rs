@@ -184,7 +184,8 @@ impl SettingsDialog {
                 );
                 ui.label(
                     egui::RichText::new(
-                        "Set this to the configured model's context window. CADmark condenses \n                         conversation before it approaches this limit.",
+                        "Set this to the configured model's context window. CADmark condenses \
+                         conversation before it approaches this limit.",
                     )
                     .small()
                     .color(theme::TEXT_MUTED),
