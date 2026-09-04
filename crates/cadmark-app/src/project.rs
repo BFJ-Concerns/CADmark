@@ -31,6 +31,19 @@ const CONVERSATION_FILENAME: &str = ".cadmark/conversation.json";
 /// How often the script on disk is compared with the model on screen.
 pub const SCRIPT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
+fn load_history(dir: &Path) -> VersionHistory {
+    match (
+        crate::git_ops::list_microversions(dir, 100),
+        crate::git_ops::list_current_lane_microversions(dir, 100),
+    ) {
+        (Ok(versions), Ok(current_lane)) => VersionHistory::from_history(versions, current_lane),
+        (Err(e), _) | (_, Err(e)) => {
+            log::warn!("Failed to load microversion history: {e}");
+            VersionHistory::new()
+        }
+    }
+}
+
 /// The model on screen: what the application keeps from the last
 /// successful execution besides the mesh, which lives on the GPU.
 pub struct LoadedModel {
@@ -95,6 +108,11 @@ pub struct Project {
 }
 
 impl Project {
+    /// Reload both the complete history listing and the lane at the checked-out step.
+    pub fn reload_history(&mut self) {
+        self.history = load_history(&self.dir);
+    }
+
     /// Open a folder: initialise its git repository, load its history and
     /// conversation, start a worker, and ask for the script to be built.
     pub fn open(dir: PathBuf, ai: Result<AiServices, String>, limits: ExecutionLimits) -> Self {
@@ -126,13 +144,7 @@ impl Project {
         let (cmd_tx, result_rx) =
             spawn_orchestrator(dir.clone(), SCRIPT_FILENAME.to_string(), ai, limits);
 
-        let history = match crate::git_ops::list_microversions(&dir, 100) {
-            Ok(versions) => VersionHistory::from_versions(versions),
-            Err(e) => {
-                log::warn!("Failed to load microversion history: {e}");
-                VersionHistory::new()
-            }
-        };
+        let history = load_history(&dir);
 
         let mut project = Self {
             dir,

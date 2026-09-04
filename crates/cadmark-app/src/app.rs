@@ -405,7 +405,7 @@ impl CadmarkApp {
                     &summary,
                     SCRIPT_FILENAME,
                 ) {
-                    Ok(version) => self.project.history.push(version),
+                    Ok(_) => self.project.reload_history(),
                     Err(e) => {
                         log::error!("Failed to record the design step: {e}");
                         self.status = Some(Status::error(format!(
@@ -574,6 +574,7 @@ impl CadmarkApp {
         match crate::git_ops::checkout_commit(&self.project.dir, &commit_hash) {
             Ok(()) => {
                 log::info!("Restored design step {commit_hash}");
+                self.project.reload_history();
                 self.project.request_reload();
             }
             Err(e) => {
@@ -587,8 +588,8 @@ impl CadmarkApp {
 
     fn save_named_version(&mut self, name: String) {
         match crate::git_ops::create_snapshot(&self.project.dir, &name, SCRIPT_FILENAME) {
-            Ok(version) => {
-                self.project.history.push(version);
+            Ok(_) => {
+                self.project.reload_history();
                 self.status = Some(Status::info(format!(
                     "Saved version \u{201C}{name}\u{201D}"
                 )));
