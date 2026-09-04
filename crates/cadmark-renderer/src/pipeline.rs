@@ -578,7 +578,8 @@ pub struct Renderer {
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
     /// Picking IDs of the elements the AI's last reply referred to.
-    /// Beyond `MAX_HIGHLIGHTS` the rest are not drawn.
+    /// Beyond `MAX_HIGHLIGHTS` the rest are not drawn, and an ID no drawn
+    /// geometry carries simply tints nothing.
     pub highlight_ids: Vec<u32>,
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.

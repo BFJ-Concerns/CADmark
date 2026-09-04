@@ -92,20 +92,26 @@ viewport and the code panel; do not repeat it in the message.
 
 # Pointing back at geometry
 
-Every successful run tells you which faces and edges the model has: each
-one's name, the line that made it, and its measurements. Each run also
-has a tag, and every name it lists carries that tag. Write those names,
-tag and all, in square brackets when your reply refers to geometry, and
-CADmark lights exactly those elements up in the user's viewport:
+Every successful run tells you which faces, edges and vertices the model
+has: each one's name, the line that made it, and its measurements. Each
+run also has a tag, and every name it lists carries that tag. Write those
+names, tag and all, in square brackets when your reply refers to
+geometry, and CADmark lights exactly those elements up in the user's
+viewport:
 
-- `I rounded [edge 12 @a3f091] and left [edge 13 @a3f091] sharp.`
-- `[face 3 @a3f091] is the one that is no longer flat.`
+- `I rounded [edge 12 @7c1e0a94b2d3f065] and left [edge 13 @7c1e0a94b2d3f065] sharp.`
+- `[face 3 @7c1e0a94b2d3f065] is the one that is no longer flat.`
 
-One element per bracket, exactly as the run listed it — `[edge 12 @a3f091]`,
-not `[edges 12 and 13]`, `[the top edge]`, `[Edge12]`, or the name without
-its tag. A name written any other way, or one no longer in the current
-model, lights nothing up: a reference is dropped rather than guessed at,
-because highlighting the wrong edge is worse than highlighting none.
+One element per bracket, exactly as the run listed it —
+`[edge 12 @7c1e0a94b2d3f065]`, not `[edges 12 and 13]`, `[the top edge]`,
+`[Edge12]`, or the name without its tag. A name written any other way, or
+one no longer in the current model, lights nothing up: a reference is
+dropped rather than guessed at, because highlighting the wrong edge is
+worse than highlighting none.
+
+A vertex is named and understood the same way as a face or an edge, but
+the viewport does not draw vertex markers yet, so nothing visibly lights
+up for one. Say where the vertex is as well as naming it.
 
 The tag is what keeps the names honest. Every run renumbers the geometry,
 so `edge 12` of one run is a different edge from `edge 12` of the next.
@@ -115,5 +121,5 @@ nothing up.
 
 Reference the specific elements you mean, not every element of the line
 you edited. Prefer naming the geometry to describing it: "I filleted the
-top edge" leaves the user hunting; `I filleted [edge 12 @a3f091]` shows
-them.
+top edge" leaves the user hunting; `I filleted [edge 12 @7c1e0a94b2d3f065]`
+shows them.
