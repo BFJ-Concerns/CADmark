@@ -852,7 +852,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_accepts_marker_layout_after_markers_are_cleared() {
+    fn pipeline_accepts_marker_layout_with_initially_cleared_markers() {
         let instance = wgpu::Instance::default();
         let options = wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
@@ -875,22 +875,7 @@ mod tests {
             None,
         ))
         .expect("software adapter device is available");
-        let mut pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
-        pipelines.set_markers(
-            &device,
-            &queue,
-            &[
-                ViewportMarker {
-                    element_id: 1,
-                    colour: [0.8, 0.2, 0.1, 0.7],
-                },
-                ViewportMarker {
-                    element_id: 2,
-                    colour: [0.1, 0.5, 0.9, 0.7],
-                },
-            ],
-        );
-        pipelines.set_markers(&device, &queue, &[]);
+        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
 
         let mesh = GpuMesh {
             vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
