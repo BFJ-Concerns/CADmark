@@ -549,7 +549,9 @@ pub fn viewport_clear_colour(target_is_srgb: bool) -> wgpu::Color {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::{FaceId, TopologyElement};
+    use cadmark_core::geometry::{
+        FaceId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
+    };
 
     use super::*;
 
@@ -612,6 +614,42 @@ mod tests {
             PickTransition::Hit(element, (120.0, 240.0))
         );
         assert_eq!(in_flight, None);
+    }
+
+    /// A sketch pick travels the same arm as a solid one: the lane's
+    /// `CompletedPick::Hit` carries the picked element whatever its kind,
+    /// so a sketch element reaches the application with the anchor of the
+    /// click that asked for it.
+    #[test]
+    fn a_completed_sketch_hit_consumes_and_returns_the_pick_anchor() {
+        let element = PickedElement::Sketch(SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 2,
+        });
+        let mut in_flight = Some((120.0, 240.0));
+        assert_eq!(
+            completed_pick_transition(Some(CompletedPick::Hit(element.clone())), &mut in_flight),
+            PickTransition::Hit(element, (120.0, 240.0))
+        );
+        assert_eq!(in_flight, None);
+    }
+
+    /// A sketch hit with no anchor is a stale readback, the same as a
+    /// solid one: it puts the selection down rather than opening an
+    /// overlay at a position nobody clicked.
+    #[test]
+    fn a_sketch_hit_without_an_anchor_falls_back_to_the_background() {
+        let mut in_flight = None;
+        assert_eq!(
+            completed_pick_transition(
+                Some(CompletedPick::Hit(PickedElement::Sketch(SketchElement {
+                    kind: SketchElementKind::Region,
+                    index: 0,
+                }))),
+                &mut in_flight
+            ),
+            PickTransition::Background
+        );
     }
 
     #[test]
