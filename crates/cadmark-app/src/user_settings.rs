@@ -216,6 +216,37 @@ mod tests {
     }
 
     #[test]
+    fn malformed_settings_are_actionable_without_echoing_their_contents() {
+        let (_dir, store) = store();
+        let cases = [
+            (
+                r#"{"context_window_tokens":"wrong-type-sentinel"}"#,
+                "wrong-type-sentinel",
+            ),
+            (
+                r#"{"context_window_tokens":"malformed-literal-sentinel"#,
+                "malformed-literal-sentinel",
+            ),
+            (
+                r#"{"context_window_tokens":128000} trailing-junk-sentinel"#,
+                "trailing-junk-sentinel",
+            ),
+        ];
+
+        for (contents, sentinel) in cases {
+            std::fs::create_dir_all(&store.dir).unwrap();
+            std::fs::write(store.dir.join(SETTINGS_FILE), contents).unwrap();
+
+            let error = store.load().unwrap_err();
+
+            assert!(error.contains("settings.json"));
+            assert!(!error.contains(sentinel));
+            assert!(error.contains("line 1"));
+            assert!(error.contains("correct"));
+        }
+    }
+
+    #[test]
     fn the_credential_file_is_owner_only_and_the_environment_wins() {
         let (_dir, store) = store();
         assert_eq!(store.credential_with_env(|_| None), None);
