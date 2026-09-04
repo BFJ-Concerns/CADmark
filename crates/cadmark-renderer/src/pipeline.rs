@@ -1849,7 +1849,7 @@ mod tests {
 
         assert_eq!(
             kept,
-            Some(face),
+            Some(cadmark_core::geometry::PickedElement::Solid(face)),
             "the half the section keeps stopped answering a click"
         );
         assert_eq!(
@@ -1884,7 +1884,7 @@ mod tests {
         mesh: &crate::mesh::GpuMesh,
         x: u32,
         y: u32,
-    ) -> Option<cadmark_core::geometry::TopologyElement> {
+    ) -> Option<cadmark_core::geometry::PickedElement> {
         let mut encoder =
             device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         crate::viewport::render_picking(&mut encoder, pipelines, picking, mesh);
