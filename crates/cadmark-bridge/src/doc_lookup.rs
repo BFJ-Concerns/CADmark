@@ -166,109 +166,134 @@ mod tests {
     }
 
     /// Maps every operation whose provenance CADmark instruments to its
-    /// explanatory build123d documentation entry. This match deliberately has
-    /// no catch-all: an added `SemanticOperation` cannot compile until its
-    /// documentation contract is recorded here.
+    /// explanatory build123d documentation entry. Its key is the stable
+    /// display name, so the documentation boundary does not branch on the
+    /// kernel's instrumentation vocabulary.
     fn documentation_for(
         operation: SemanticOperation,
     ) -> (&'static str, DocumentationSource, &'static str) {
-        match operation {
-            SemanticOperation::Box => (
+        const DOCUMENTATION: &[(&str, &str, DocumentationSource, &str)] = &[
+            (
+                "box",
                 "Box",
                 DocumentationSource::Objects,
                 "**Box** - Box defined by length, width, height",
             ),
-            SemanticOperation::Cylinder => (
+            (
+                "cylinder",
                 "Cylinder",
                 DocumentationSource::Objects,
                 "**Cylinder** - Cylinder defined by radius and height",
             ),
-            SemanticOperation::Sphere => (
+            (
+                "sphere",
                 "Sphere",
                 DocumentationSource::Objects,
                 "**Sphere** - Sphere defined by radius and arc angles",
             ),
-            SemanticOperation::Cone => (
+            (
+                "cone",
                 "Cone",
                 DocumentationSource::Objects,
                 "**Cone** - Cone defined by radii and height",
             ),
-            SemanticOperation::Torus => (
+            (
+                "torus",
                 "Torus",
                 DocumentationSource::Objects,
                 "**Torus** - Torus defined by major and minor radii",
             ),
-            SemanticOperation::Wedge => (
+            (
+                "wedge",
                 "Wedge",
                 DocumentationSource::Objects,
                 "**Wedge** - Wedge defined by lengths along multiple axes",
             ),
-            SemanticOperation::Extrude => (
+            (
+                "extrude",
                 "extrude",
                 DocumentationSource::Operations,
                 "### extrude\nDraw a 2D Shape into a 3D solid",
             ),
-            SemanticOperation::Revolve => (
+            (
+                "revolve",
                 "revolve",
                 DocumentationSource::Operations,
                 "### revolve\nRotate a 2D shape around an axis",
             ),
-            SemanticOperation::Loft => (
+            (
+                "loft",
                 "loft",
                 DocumentationSource::Operations,
                 "### loft\nCreate a 3D form by interpolating",
             ),
-            SemanticOperation::Sweep => (
+            (
+                "sweep",
                 "sweep",
                 DocumentationSource::Operations,
                 "### sweep\nExtrude a 2D or 3D section",
             ),
-            SemanticOperation::Thicken => (
+            (
+                "thicken",
                 "thicken",
                 DocumentationSource::Operations,
                 "### thicken\nExpand a 2D face into a 3D solid",
             ),
-            SemanticOperation::Shell => (
+            (
+                "shell",
                 "offset",
                 DocumentationSource::Operations,
                 "### offset\nInset or outset a shape",
             ),
-            SemanticOperation::Draft => (
+            (
+                "draft",
                 "draft",
                 DocumentationSource::Operations,
                 "### draft\nApply a taper angle",
             ),
-            SemanticOperation::Split => (
+            (
+                "split",
                 "split",
                 DocumentationSource::Operations,
                 "### split\nDivide an object by a plane",
             ),
-            SemanticOperation::BooleanFuse => (
+            (
+                "union",
                 "fuse",
                 DocumentationSource::DirectApi,
                 "fuse(**to_fuse: Shape*",
             ),
-            SemanticOperation::BooleanCut => (
+            (
+                "cut",
                 "cut",
                 DocumentationSource::DirectApi,
                 "cut(**to_cut: Shape*)",
             ),
-            SemanticOperation::BooleanCommon => (
+            (
+                "intersection",
                 "common",
                 DocumentationSource::DirectApi,
                 "intersect(**to_intersect: Shape | Vector | Location | Axis | Plane*",
             ),
-            SemanticOperation::Fillet => (
+            (
+                "fillet",
                 "fillet",
                 DocumentationSource::Operations,
                 "### fillet\nRadius a vertex or edge",
             ),
-            SemanticOperation::Chamfer => (
+            (
+                "chamfer",
                 "chamfer",
                 DocumentationSource::Operations,
                 "### chamfer\nBevel a vertex or edge",
             ),
-        }
+        ];
+
+        DOCUMENTATION
+            .iter()
+            .find(|(name, ..)| *name == operation.display_name())
+            .map(|(_, construct, source, anchor)| (*construct, *source, *anchor))
+            .expect("every instrumented operation has documentation")
     }
 
     #[test]
