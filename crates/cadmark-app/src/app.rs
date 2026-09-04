@@ -17,8 +17,9 @@ use cadmark_core::geometry::{
     TopologyElement,
 };
 use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
+use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
-use cadmark_renderer::pipeline::Renderer;
+use cadmark_renderer::pipeline::{Renderer, ViewportMarker};
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
@@ -154,6 +155,8 @@ pub struct CadmarkApp {
     settings: UserSettings,
     settings_store: Option<SettingsStore>,
     chat: ChatPane,
+    /// Editable spatial comments for the current design state, not yet sent.
+    pending_comments: PendingComments,
     overlay: OverlayState,
     renderer: Renderer,
     selection: SelectionState,
@@ -232,6 +235,7 @@ impl CadmarkApp {
             settings,
             settings_store,
             chat: ChatPane::new(),
+            pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::new(),
             selection: SelectionState::None,
@@ -347,6 +351,7 @@ impl CadmarkApp {
         self.chat.ai_available = project.ai_model.is_some();
         self.project = Some(project);
         self.start_notice = None;
+        self.pending_comments = PendingComments::default();
         self.status = None;
         self.turn = None;
         self.clear_loaded_model();
@@ -415,34 +420,81 @@ impl CadmarkApp {
         );
     }
 
-    /// Send a spatial comment: one turn anchored to the elements.
-    fn send_spatial_comment(&mut self, text: String, anchors: Vec<GeometryContext>) {
-        let Some(project) = self.project_mut() else {
+    /// Leave a spatial comment pending so several comments can form one turn.
+    fn stage_spatial_comment(&mut self, text: String, anchors: Vec<GeometryContext>) {
+        let (project, pending_comments) = (&mut self.project, &mut self.pending_comments);
+        let Some(project) = project.as_mut() else {
+            return;
+        };
+        stage_pending_comment(&mut project.conversation, pending_comments, text, anchors);
+        self.chat.focus_input();
+    }
+
+    /// Send all pending spatial comments, with optional chat text, as one turn.
+    fn send_pending_comments(&mut self, chat: Option<String>) {
+        if !self.pending_comments.can_send() {
+            self.status = Some(Status::error(
+                "Re-point or complete every pending comment before sending.",
+            ));
+            return;
+        }
+        let Some(project) = self.project() else {
             return;
         };
         let history = project.conversation.clone();
-        let id = project
-            .conversation
-            .push(Message::spatial_comment(&text, anchors.clone()));
-        let dir = project.dir.clone();
-        self.start_turn(
+        let pending = self.pending_comments.drain();
+        let mut comment_ids = Vec::with_capacity(pending.len());
+        let comments = grounded_comments(&pending);
+        let (chat_id, dir) = {
+            let project = self.project_mut().expect("project was checked above");
+            for comment in &pending {
+                let anchors = comment
+                    .live_anchors()
+                    .expect("sendable pending comments have only live anchors");
+                comment_ids.push(
+                    project
+                        .conversation
+                        .push(Message::spatial_comment(&comment.text, anchors)),
+                );
+            }
+            let chat_id = chat
+                .as_ref()
+                .map(|text| project.conversation.push(Message::user_chat(text)));
+            (chat_id, project.dir.clone())
+        };
+        let rollback_ids = comment_ids.clone();
+        if !self.start_turn(
             TurnInput {
-                chat: None,
-                comments: vec![GroundedComment { text, anchors }],
+                chat,
+                comments,
                 images: reference_images(&dir),
                 context_window_tokens: self.settings.context_window_tokens,
             },
             history,
-            vec![id],
-        );
+            comment_ids,
+        ) {
+            let project = self.project_mut().expect("project was checked above");
+            if let Some(id) = chat_id {
+                project.conversation.remove(id);
+            }
+            for id in rollback_ids {
+                project.conversation.remove(id);
+            }
+            self.pending_comments.restore(pending);
+        }
     }
 
     /// `history` is the conversation before this turn's messages were
     /// recorded; the model sees it plus the turn's input, once.
-    fn start_turn(&mut self, input: TurnInput, history: Conversation, comment_ids: Vec<MessageId>) {
+    fn start_turn(
+        &mut self,
+        input: TurnInput,
+        history: Conversation,
+        comment_ids: Vec<MessageId>,
+    ) -> bool {
         let history_len = history.len();
         let Some(project) = self.project.as_mut() else {
-            return;
+            return false;
         };
         let summary_before = project.model.as_ref().map(|model| model.summary.clone());
         let response = project.conversation.push(Message::ai_response(""));
@@ -455,10 +507,12 @@ impl CadmarkApp {
                     summary_before,
                     history_len,
                 });
+                true
             }
             Err(error) => {
                 project.conversation.remove(response);
                 self.status = Some(Status::error(error));
+                false
             }
         }
     }
@@ -1293,7 +1347,9 @@ impl CadmarkApp {
             )
             .show(ctx, |ui| {
                 let usage = context_usage(&waiting, 0, self.settings.context_window_tokens);
-                chat_action = self.chat.show(ui, &waiting, usage);
+                chat_action = self
+                    .chat
+                    .show(ui, &waiting, usage, &mut self.pending_comments);
             });
         if let ChatAction::Send(text) = chat_action {
             self.pending_first_message = Some(text);
@@ -1398,10 +1454,16 @@ impl CadmarkApp {
                     reference_image_count(&project.dir),
                     self.settings.context_window_tokens,
                 );
-                action = self.chat.show(ui, &project.conversation, usage);
+                action =
+                    self.chat
+                        .show(ui, &project.conversation, usage, &mut self.pending_comments);
             });
         match action {
             ChatAction::Send(text) => self.send_chat_message(text),
+            ChatAction::SendPending { chat } => self.send_pending_comments(chat),
+            ChatAction::RemovePending(id) => {
+                self.pending_comments.remove(id);
+            }
             ChatAction::Cancel => {
                 if let Some(project) = self.project() {
                     project.cancel_turn();
@@ -1545,11 +1607,13 @@ impl CadmarkApp {
                 self.hover_readback_pending = true;
             }
 
+            self.refresh_pending_markers();
             let callback = eframe::egui_wgpu::Callback::new_paint_callback(
                 rect,
                 ViewportCallback {
                     mesh_uniforms: self.renderer.mesh_uniforms(aspect),
                     simple_uniforms: self.renderer.simple_uniforms(aspect),
+                    markers: self.renderer.markers.clone(),
                     pick_request,
                     hover_request,
                     viewport_size,
@@ -1576,12 +1640,18 @@ impl CadmarkApp {
             match self.overlay.show(ui, rect) {
                 OverlayAction::Submit { text, anchors } => {
                     self.overlay.close();
-                    self.send_spatial_comment(text, anchors);
+                    self.stage_spatial_comment(text, anchors);
                 }
                 OverlayAction::Cancel => self.clear_selection(),
                 OverlayAction::None => {}
             }
         });
+    }
+
+    /// Translate application-owned pending anchors into generic renderer
+    /// markers. The renderer receives no conversation or card state.
+    fn refresh_pending_markers(&mut self) {
+        self.renderer.markers = pending_markers(&self.pending_comments);
     }
 
     /// What the empty viewport says: what is happening, what went wrong, or
@@ -1642,6 +1712,49 @@ impl CadmarkApp {
             );
         }
     }
+}
+
+/// Convert sendable pending cards into the comments the turn runner consumes.
+fn grounded_comments(pending: &[PendingComment]) -> Vec<GroundedComment> {
+    pending
+        .iter()
+        .map(|comment| GroundedComment {
+            text: comment.text.clone(),
+            anchors: comment
+                .live_anchors()
+                .expect("sendable pending comments have only live anchors"),
+        })
+        .collect()
+}
+
+/// Project the application-owned card pairing into renderer-neutral markers.
+fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
+    pending
+        .comments()
+        .iter()
+        .flat_map(|comment| {
+            comment.anchors.iter().filter_map(|anchor| match anchor {
+                PendingAnchor::Live(context) => Some(ViewportMarker {
+                    element_id: cadmark_renderer::picking::encode_picking_id(&context.element),
+                    colour: comment.marker_colour(),
+                }),
+                PendingAnchor::Lost { .. } => None,
+            })
+        })
+        .collect()
+}
+
+/// Stage a spatial comment without changing persisted conversation history.
+/// The batch enters history only when it is dispatched as a turn.
+fn stage_pending_comment(
+    conversation: &mut Conversation,
+    pending: &mut PendingComments,
+    text: String,
+    anchors: Vec<GeometryContext>,
+) {
+    let message_count = conversation.len();
+    pending.add(text, anchors);
+    debug_assert_eq!(conversation.len(), message_count);
 }
 
 fn standard_view(view: toolbar::StandardView) -> StandardView {
@@ -1781,8 +1894,8 @@ mod tests {
     use super::{
         CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
         SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, measurement_pair, measurement_readout, record_tool_start,
-        turn_chat_message,
+        VersionDialog, ai_services, grounded_comments, measurement_pair, measurement_readout,
+        pending_markers, record_tool_start, stage_pending_comment, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -1925,6 +2038,7 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
+            pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::default(),
             selection: SelectionState::None,
@@ -1956,6 +2070,7 @@ mod tests {
             }),
         }
     }
+    use cadmark_core::pending_comment::PendingComments;
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -2287,5 +2402,67 @@ mod tests {
         let messages = kinds_and_text(&conversation);
         assert_eq!(messages.len(), 2, "{messages:?}");
         assert!(matches!(messages[0].0, MessageKind::ToolCalls(_)));
+    }
+
+    fn anchor(face: u32) -> GeometryContext {
+        GeometryContext {
+            element: TopologyElement::Face(FaceId(face)),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn removing_a_pending_card_keeps_the_remaining_turn_input_and_markers_paired() {
+        let mut pending = PendingComments::default();
+        pending.add("round this".into(), vec![anchor(1)]);
+        let remove = pending.add("remove this comment".into(), vec![anchor(2)]);
+        pending.add("chamfer this".into(), vec![anchor(3)]);
+
+        pending.remove(remove);
+        let comments = grounded_comments(pending.comments());
+        let markers = pending_markers(&pending);
+
+        assert_eq!(
+            comments
+                .iter()
+                .map(|comment| (comment.text.as_str(), &comment.anchors[0].element))
+                .collect::<Vec<_>>(),
+            vec![
+                ("round this", &TopologyElement::Face(FaceId(1))),
+                ("chamfer this", &TopologyElement::Face(FaceId(3))),
+            ]
+        );
+        assert_eq!(markers.len(), 2);
+        assert_eq!(markers[0].colour, pending.comments()[0].marker_colour());
+        assert_eq!(markers[1].colour, pending.comments()[1].marker_colour());
+    }
+
+    #[test]
+    fn staging_a_second_comment_keeps_the_first_unsent_and_intact() {
+        let mut pending = PendingComments::default();
+        let mut conversation = Conversation::new();
+        stage_pending_comment(
+            &mut conversation,
+            &mut pending,
+            "round this".into(),
+            vec![anchor(1)],
+        );
+        stage_pending_comment(
+            &mut conversation,
+            &mut pending,
+            "chamfer this".into(),
+            vec![anchor(2)],
+        );
+
+        assert!(conversation.is_empty(), "staging must not start a turn");
+        assert_eq!(pending.comments().len(), 2);
+        assert_eq!(pending.comments()[0].text, "round this");
+        assert_eq!(
+            pending.comments()[0].anchors[0].element(),
+            &TopologyElement::Face(FaceId(1))
+        );
     }
 }

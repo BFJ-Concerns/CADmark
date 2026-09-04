@@ -6,6 +6,22 @@ use bytemuck::{Pod, Zeroable};
 use crate::camera::Camera;
 use crate::mesh::{EdgeVertex, GpuMesh, GpuVertex};
 
+/// One application-owned viewport marker. The renderer receives topology IDs
+/// and colours only; it does not know why an element is marked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportMarker {
+    pub element_id: u32,
+    pub colour: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MarkerGpu {
+    element_id: u32,
+    _padding: [u32; 3],
+    colour: [f32; 4],
+}
+
 /// Configuration for the selection glow effect.
 #[derive(Debug, Clone)]
 pub struct SelectionStyle {
@@ -40,8 +56,9 @@ pub struct MeshUniforms {
     pub _pad1: f32,
     pub selected_id: u32,
     pub hover_id: u32,
+    /// Number of live entries at the front of the marker storage buffer.
+    pub marker_count: u32,
     pub _pad2: u32,
-    pub _pad3: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
 }
@@ -59,6 +76,8 @@ pub struct RenderPipelines {
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
     pub mesh_uniform_buffer: wgpu::Buffer,
     pub mesh_bind_group: wgpu::BindGroup,
+    marker_buffer: wgpu::Buffer,
+    marker_capacity: usize,
 
     pub picking_pipeline: wgpu::RenderPipeline,
     pub picking_uniform_buffer: wgpu::Buffer,
@@ -106,16 +125,28 @@ impl RenderPipelines {
         let mesh_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("mesh_bind_group_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
             });
 
         let mesh_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -125,13 +156,25 @@ impl RenderPipelines {
             mapped_at_creation: false,
         });
 
+        let marker_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport_markers"),
+            size: std::mem::size_of::<MarkerGpu>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mesh_bind_group"),
             layout: &mesh_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: mesh_uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: mesh_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: marker_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -469,6 +512,8 @@ impl RenderPipelines {
             mesh_bind_group_layout,
             mesh_uniform_buffer,
             mesh_bind_group,
+            marker_buffer,
+            marker_capacity: 1,
             picking_pipeline,
             picking_uniform_buffer,
             picking_bind_group,
@@ -505,6 +550,52 @@ impl RenderPipelines {
                 },
             ],
         });
+    }
+
+    /// Upload generic topology markers for the next viewport pass. The
+    /// storage buffer grows with the application-provided set, so the
+    /// renderer does not impose a comment-count limit.
+    pub fn set_markers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        markers: &[ViewportMarker],
+    ) {
+        let required = markers.len().max(1);
+        if required > self.marker_capacity {
+            self.marker_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("viewport_markers"),
+                size: (required * std::mem::size_of::<MarkerGpu>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.marker_capacity = required;
+            self.mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mesh_bind_group"),
+                layout: &self.mesh_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.mesh_uniform_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.marker_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+        }
+        let data: Vec<_> = markers
+            .iter()
+            .map(|marker| MarkerGpu {
+                element_id: marker.element_id,
+                _padding: [0; 3],
+                colour: marker.colour,
+            })
+            .collect();
+        if !data.is_empty() {
+            queue.write_buffer(&self.marker_buffer, 0, bytemuck::cast_slice(&data));
+        }
     }
 }
 
@@ -563,6 +654,8 @@ pub struct Renderer {
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
+    /// Application-provided topology markers, coloured to pair with UI cards.
+    pub markers: Vec<ViewportMarker>,
 }
 
 impl Renderer {
@@ -573,6 +666,7 @@ impl Renderer {
             selected_id: 0,
             hover_id: 0,
             target_is_srgb: false,
+            markers: Vec::new(),
         }
     }
 
@@ -594,8 +688,8 @@ impl Renderer {
             _pad1: 0.0,
             selected_id: self.selected_id,
             hover_id: self.hover_id,
+            marker_count: self.markers.len().try_into().unwrap_or(u32::MAX),
             _pad2: 0,
-            _pad3: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
         }
@@ -708,6 +802,7 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wgpu::util::DeviceExt;
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {
@@ -730,5 +825,105 @@ mod tests {
         assert_eq!(edge_vertices.len(), 2);
         assert_eq!(edge_vertices[0].edge_id, encoded);
         assert_eq!(edge_vertices[1].edge_id, encoded);
+    }
+
+    #[test]
+    fn marker_uniforms_name_only_live_entries() {
+        let mut renderer = Renderer::new();
+        renderer.markers = vec![
+            ViewportMarker {
+                element_id: 4,
+                colour: [0.8, 0.2, 0.1, 0.7],
+            },
+            ViewportMarker {
+                element_id: 9,
+                colour: [0.1, 0.5, 0.9, 0.7],
+            },
+        ];
+
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(uniforms.marker_count, 2);
+
+        renderer.markers.pop();
+        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 1);
+
+        renderer.markers.clear();
+        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 0);
+    }
+
+    #[test]
+    fn pipeline_accepts_marker_layout_with_initially_cleared_markers() {
+        let instance = wgpu::Instance::default();
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: true,
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options))
+            .or_else(|| {
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: false,
+                    ..options
+                }))
+            })
+            .expect("a wgpu adapter is required for renderer verification");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("renderer-pipeline-test"),
+                ..Default::default()
+            },
+            None,
+        ))
+        .expect("software adapter device is available");
+        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
+
+        let mesh = GpuMesh {
+            vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-mesh-vertices"),
+                contents: bytemuck::cast_slice(&[GpuVertex {
+                    position: [0.0; 3],
+                    normal: [0.0, 0.0, 1.0],
+                    face_id: 1.0,
+                    _padding: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-mesh-indices"),
+                contents: bytemuck::cast_slice(&[0u32, 0, 0]),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+            index_count: 3,
+            edge_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-edge-vertices"),
+                contents: bytemuck::cast_slice(&[
+                    EdgeVertex {
+                        position: [0.0; 3],
+                        edge_id: 1.0,
+                    },
+                    EdgeVertex {
+                        position: [0.0; 3],
+                        edge_id: 1.0,
+                    },
+                ]),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            edge_vertex_count: 2,
+        };
+        let renderer = Renderer::new();
+        queue.write_buffer(
+            &pipelines.mesh_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&renderer.mesh_uniforms(1.0)),
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        crate::viewport::render_scene(&mut encoder, &pipelines, Some(&mesh), wgpu::Color::BLACK);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+        assert!(
+            pollster::block_on(device.pop_error_scope()).is_none(),
+            "marker bindings and both draw pipelines must validate"
+        );
     }
 }

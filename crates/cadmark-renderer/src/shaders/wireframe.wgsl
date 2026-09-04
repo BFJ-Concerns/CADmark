@@ -11,13 +11,23 @@ struct Uniforms {
     _pad1: f32,
     selected_id: u32,
     hover_id: u32,
+    marker_count: u32,
     _pad2: u32,
-    _pad3: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+struct Marker {
+    element_id: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    colour: vec4<f32>,
+}
+
+@group(0) @binding(1) var<storage, read> markers: array<Marker>;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -40,6 +50,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let eid = u32(in.edge_id + 0.5);
+    for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
+        if eid == markers[index].element_id && eid != 0u {
+            return vec4<f32>(markers[index].colour.rgb, 1.0);
+        }
+    }
     if eid == uniforms.selected_id && uniforms.selected_id != 0u {
         return vec4<f32>(uniforms.selected_colour.rgb, 1.0);
     }
