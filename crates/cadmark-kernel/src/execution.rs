@@ -698,7 +698,7 @@ with BuildPart() as part:
     }
 
     #[test]
-    fn real_locations_preserve_primitive_and_pattern_lineage() {
+    fn real_locations_resolve_to_the_pattern_line() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -709,22 +709,12 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 12);
         assert_eq!(result.ledger.edge_count(), 24);
         assert_eq!(result.ledger.vertex_count(), 16);
-        assert_every_element_has_candidates(
-            &result,
-            &[
-                (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
-                (
-                    SemanticOperation::LocationPattern,
-                    ProvenanceRelation::Modified,
-                    4,
-                ),
-            ],
-        );
+        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn real_grid_locations_preserve_primitive_and_pattern_lineage() {
+    fn real_grid_locations_resolve_to_the_pattern_line() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -735,22 +725,12 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 24);
         assert_eq!(result.ledger.edge_count(), 48);
         assert_eq!(result.ledger.vertex_count(), 32);
-        assert_every_element_has_candidates(
-            &result,
-            &[
-                (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
-                (
-                    SemanticOperation::LocationPattern,
-                    ProvenanceRelation::Modified,
-                    4,
-                ),
-            ],
-        );
+        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn real_polar_locations_preserve_primitive_and_pattern_lineage() {
+    fn real_polar_locations_resolve_to_the_pattern_line() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -761,22 +741,12 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 18);
         assert_eq!(result.ledger.edge_count(), 36);
         assert_eq!(result.ledger.vertex_count(), 24);
-        assert_every_element_has_candidates(
-            &result,
-            &[
-                (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
-                (
-                    SemanticOperation::LocationPattern,
-                    ProvenanceRelation::Modified,
-                    4,
-                ),
-            ],
-        );
+        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn location_patterns_preserve_every_primitive_and_pattern_relation() {
+    fn location_patterns_resolve_every_element_to_the_pattern_line() {
         for source in [
             r#"from build123d import *
 
@@ -799,17 +769,7 @@ with BuildPart() as part:
         ] {
             let (_scratch, result) = run(source);
             let result = result.unwrap();
-            assert_every_element_has_candidates(
-                &result,
-                &[
-                    (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
-                    (
-                        SemanticOperation::LocationPattern,
-                        ProvenanceRelation::Modified,
-                        4,
-                    ),
-                ],
-            );
+            assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
         }
     }
 
@@ -882,6 +842,34 @@ result = part.part.rotate(Axis.Z, 30)
                 )],
             );
         }
+    }
+
+    #[test]
+    fn default_rotate_leaves_retained_original_at_its_own_line() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+turned = box.moved(Location((10, 0, 0))).rotate(Axis.Z, 30)
+result = Compound(children=[box, turned])
+"#);
+        let result = result.unwrap();
+        let mut original = 0;
+        let mut rotated = 0;
+        for context in resolved_contexts(&result) {
+            let provenance = entry(&context);
+            match (
+                provenance.operation,
+                provenance.relation.clone(),
+                provenance.source.line,
+            ) {
+                (SemanticOperation::Box, ProvenanceRelation::Generated, 3) => original += 1,
+                (SemanticOperation::Rotate, ProvenanceRelation::Modified, 4) => rotated += 1,
+                found => panic!("unexpected retained-rotate provenance: {found:?}"),
+            }
+        }
+        assert_eq!(original, 26);
+        assert_eq!(rotated, 26);
+        assert_bridge_consumers(&result);
     }
 
     #[test]
