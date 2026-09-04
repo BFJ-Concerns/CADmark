@@ -32,6 +32,9 @@ All notable changes to this project will be documented in this file.
 - Window title carries the project name
 
 ### Fixed
+- Repeated edits from the same undone design step now create separate history
+  alternatives instead of colliding with the earlier edit
+- The project-folder picker is parented to the CADmark window on Wayland
 - Clicking empty viewport space could select a phantom vertex: the
   picking texture now clears every channel to zero
 - Chat panel grew wider on every frame when it held a message
