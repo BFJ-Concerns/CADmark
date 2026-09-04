@@ -1,0 +1,14 @@
+# CADmark
+
+> AI-directed CAD modelling with spatial comments. Select geometry in a 3D viewport, write what you want changed, and an AI edits the build123d Python script that defines the model.
+
+<!-- doc-index:start (generated region; do not hand-edit. Regenerate with the project-docs skill: doc-indexes.sh) -->
+## General
+
+- [Installation and build](agent-docs/installation.md): Build prerequisites, Python runtime setup, and launching CADmark
+
+## Reference
+
+- [Configuration reference](agent-docs/reference/configuration.md): Settings file, credential handling, execution limits, and context-window configuration
+- [Interface reference](agent-docs/reference/interface.md): Viewport, toolbar, chat pane, panels, and all interactive controls
+<!-- doc-index:end -->
