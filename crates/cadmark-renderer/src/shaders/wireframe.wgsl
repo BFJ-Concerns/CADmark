@@ -15,7 +15,8 @@ struct Uniforms {
     _pad3: u32,
     marker_count: u32,
     _pad4: u32,
-    _pad5: vec2<u32>,
+    selected_part_id: u32,
+    hover_part_id: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }

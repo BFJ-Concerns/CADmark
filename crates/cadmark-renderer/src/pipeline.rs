@@ -62,7 +62,11 @@ pub struct MeshUniforms {
     /// Number of live entries at the front of the marker storage buffer.
     pub marker_count: u32,
     pub _pad4: u32,
-    pub _pad5: [u32; 2],
+    /// Picking ID of the part owning the selected element, so a face tint
+    /// applies only within its own part — face IDs restart per part.
+    pub selected_part_id: u32,
+    /// Picking ID of the part owning the hovered element.
+    pub hover_part_id: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
 }
@@ -92,6 +96,9 @@ pub struct RenderPipelines {
     marker_capacity: usize,
 
     pub picking_pipeline: wgpu::RenderPipeline,
+    /// Writes scene depth for topology picking without producing a colour ID.
+    pub topology_depth_pipeline: wgpu::RenderPipeline,
+    pub part_picking_pipeline: wgpu::RenderPipeline,
     pub picking_uniform_buffer: wgpu::Buffer,
     pub picking_bind_group: wgpu::BindGroup,
     pub edge_picking_pipeline: wgpu::RenderPipeline,
@@ -208,6 +215,8 @@ impl RenderPipelines {
                         1 => Float32x3, // normal
                         2 => Float32,   // face_id
                         3 => Float32,   // _padding
+                        4 => Float32,   // part picking ID
+                        5 => Float32x3, // _part_padding
                     ],
                 }],
                 compilation_options: Default::default(),
@@ -299,6 +308,8 @@ impl RenderPipelines {
                         1 => Float32x3,
                         2 => Float32,
                         3 => Float32,
+                        4 => Float32,
+                        5 => Float32x3,
                     ],
                 }],
                 compilation_options: Default::default(),
@@ -320,8 +331,8 @@ impl RenderPipelines {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -329,6 +340,41 @@ impl RenderPipelines {
             multiview: None,
             cache: None,
         });
+
+        let topology_depth_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("topology_depth_pipeline"),
+                layout: Some(&picking_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &picking_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Float32,
+                            4 => Float32, 5 => Float32x3,
+                        ],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
 
         let edge_picking_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -365,6 +411,50 @@ impl RenderPipelines {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: false,
                     depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        let part_picking_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("part_picking_pipeline"),
+                layout: Some(&picking_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &picking_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Float32,
+                            4 => Float32, 5 => Float32x3,
+                        ],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &picking_shader,
+                    entry_point: Some("fs_part"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Uint,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::Less,
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -527,6 +617,8 @@ impl RenderPipelines {
             marker_buffer,
             marker_capacity: 1,
             picking_pipeline,
+            topology_depth_pipeline,
+            part_picking_pipeline,
             picking_uniform_buffer,
             picking_bind_group,
             edge_picking_pipeline,
@@ -617,6 +709,10 @@ pub struct Renderer {
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
+    /// Picking ID of the part owning the selected element.
+    pub selected_part_id: u32,
+    /// Picking ID of the part owning the hovered element.
+    pub hover_part_id: u32,
     /// Picking IDs of a secondary highlight — every element the ledger
     /// attributes to one candidate source line. Unbounded: the buffer the
     /// shaders read grows to hold whatever a footprint contains.
@@ -635,6 +731,8 @@ impl Renderer {
             selection_style: SelectionStyle::default(),
             selected_id: 0,
             hover_id: 0,
+            selected_part_id: 0,
+            hover_part_id: 0,
             highlight_ids: Vec::new(),
             markers: Vec::new(),
             target_is_srgb: false,
@@ -663,7 +761,8 @@ impl Renderer {
             _pad3: 0,
             marker_count: self.markers.len().try_into().unwrap_or(u32::MAX),
             _pad4: 0,
-            _pad5: [0; 2],
+            selected_part_id: self.selected_part_id,
+            hover_part_id: self.hover_part_id,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
         }
@@ -697,7 +796,11 @@ fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 }
 
 /// Upload a tessellated mesh to GPU buffers.
-pub fn upload_mesh(device: &wgpu::Device, mesh: &cadmark_core::mesh::TessellatedMesh) -> GpuMesh {
+pub fn upload_mesh(
+    device: &wgpu::Device,
+    mesh: &cadmark_core::mesh::TessellatedMesh,
+    part: cadmark_core::geometry::PartId,
+) -> GpuMesh {
     use wgpu::util::DeviceExt;
 
     // Build GPU vertices with face IDs.
@@ -719,6 +822,10 @@ pub fn upload_mesh(device: &wgpu::Device, mesh: &cadmark_core::mesh::Tessellated
             normal: v.normal,
             face_id: vertex_face_ids[i] as f32,
             _padding: 0.0,
+            part_id: crate::picking::encode_picking_id(
+                &cadmark_core::geometry::TopologyElement::Part(part),
+            ) as f32,
+            _part_padding: [0.0; 3],
         });
     }
 
@@ -971,7 +1078,14 @@ mod tests {
                 std::mem::offset_of!(MeshUniforms, marker_count),
             ),
             ("_pad4", std::mem::offset_of!(MeshUniforms, _pad4)),
-            ("_pad5", std::mem::offset_of!(MeshUniforms, _pad5)),
+            (
+                "selected_part_id",
+                std::mem::offset_of!(MeshUniforms, selected_part_id),
+            ),
+            (
+                "hover_part_id",
+                std::mem::offset_of!(MeshUniforms, hover_part_id),
+            ),
             (
                 "selected_colour",
                 std::mem::offset_of!(MeshUniforms, selected_colour),
