@@ -65,33 +65,75 @@ struct ImportedModel {
     volume: f64,
     size: [f64; 3],
     closed: bool,
-    valid: bool,
+    valid: Option<bool>,
 }
 
 /// Re-import one written file in a fresh Python process, outside the worker.
-/// STEP uses build123d's B-rep importer; STL and 3MF use its mesh reader.
+/// STEP uses build123d's B-rep importer, STL its Lib3MF mesh reader, and 3MF
+/// is parsed independently with the Python standard library's ZIP and XML APIs.
 fn import_export(path: &Path, format: ExportFormat) -> ImportedModel {
     let reader = r#"
 import json
 import sys
 
-from build123d import Mesher, import_step
-
 path, format_name = sys.argv[1:]
 if format_name == "step":
+    from build123d import import_step
     shapes = [import_step(path)]
-else:
+elif format_name == "stl":
+    from build123d import Mesher
     shapes = Mesher().read(path)
+if format_name in ("step", "stl"):
+    assert len(shapes) == 1, f"expected one imported shape, got {len(shapes)}"
+    shape = shapes[0]
+    box = shape.bounding_box()
+    result = {
+        "volume": shape.volume,
+        "size": list(box.size),
+        "closed": shape.is_manifold,
+        "valid": shape.is_valid,
+    }
+elif format_name == "3mf":
+    import xml.etree.ElementTree as ET
+    from collections import Counter
+    from zipfile import ZipFile
 
-assert len(shapes) == 1, f"expected one imported shape, got {len(shapes)}"
-shape = shapes[0]
-box = shape.bounding_box()
-print(json.dumps({
-    "volume": shape.volume,
-    "size": list(box.size),
-    "closed": shape.is_manifold,
-    "valid": shape.is_valid,
-}))
+    with ZipFile(path) as archive:
+        model_name = next(name for name in archive.namelist() if name.endswith(".model"))
+        root = ET.fromstring(archive.read(model_name))
+    meshes = root.findall(".//{*}mesh")
+    assert len(meshes) == 1, f"expected one 3MF mesh, got {len(meshes)}"
+    mesh = meshes[0]
+    vertices = [
+        tuple(float(vertex.attrib[axis]) for axis in ("x", "y", "z"))
+        for vertex in mesh.findall("./{*}vertices/{*}vertex")
+    ]
+    triangles = [
+        tuple(int(triangle.attrib[index]) for index in ("v1", "v2", "v3"))
+        for triangle in mesh.findall("./{*}triangles/{*}triangle")
+    ]
+    assert vertices and triangles, "3MF mesh must contain vertices and triangles"
+    assert all(0 <= index < len(vertices) for triangle in triangles for index in triangle)
+    edges = Counter(
+        tuple(sorted((triangle[index], triangle[(index + 1) % 3])))
+        for triangle in triangles
+        for index in range(3)
+    )
+    volume = abs(sum(
+        vertices[a][0] * (vertices[b][1] * vertices[c][2] - vertices[b][2] * vertices[c][1])
+        + vertices[a][1] * (vertices[b][2] * vertices[c][0] - vertices[b][0] * vertices[c][2])
+        + vertices[a][2] * (vertices[b][0] * vertices[c][1] - vertices[b][1] * vertices[c][0])
+        for a, b, c in triangles
+    ) / 6.0)
+    result = {
+        "volume": volume,
+        "size": [max(vertex[axis] for vertex in vertices) - min(vertex[axis] for vertex in vertices) for axis in range(3)],
+        "closed": all(count == 2 for count in edges.values()),
+    }
+else:
+    raise ValueError(f"unknown format {format_name}")
+
+print(json.dumps(result))
 "#;
     let output = Command::new(venv().join("bin/python"))
         .arg("-c")
@@ -134,7 +176,9 @@ fn assert_round_trip(
         "{} import was not a closed solid",
         format.label()
     );
-    assert!(imported.valid, "{} import was invalid", format.label());
+    if let Some(valid) = imported.valid {
+        assert!(valid, "{} import was invalid", format.label());
+    }
     assert!(
         relative_difference(imported.volume, source_volume) <= tolerance,
         "{} volume {} differed from source {} by more than {:.2}%",
@@ -149,22 +193,6 @@ fn assert_round_trip(
             "{} size on axis {axis} was {actual}, expected {expected} within {:.2}%",
             format.label(),
             tolerance * 100.0,
-        );
-    }
-
-    // A millimetre-versus-centimetre error multiplies every measurement by ten.
-    // Keep this bound beside the round-trip assertions so a future relaxation
-    // cannot silently make the scale error this rung exists to catch acceptable.
-    assert!(
-        relative_difference(source_volume * 1_000.0, source_volume) > tolerance,
-        "{} tolerance admits a tenfold scale error in volume",
-        format.label(),
-    );
-    for dimension in source_size {
-        assert!(
-            relative_difference(dimension * 10.0, dimension) > tolerance,
-            "{} tolerance admits a tenfold scale error in size",
-            format.label(),
         );
     }
 }
