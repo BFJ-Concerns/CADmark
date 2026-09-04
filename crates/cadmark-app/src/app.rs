@@ -78,6 +78,9 @@ pub struct CadmarkApp {
     code_visible: bool,
     /// Source line of the selected element, when its provenance is known.
     highlighted_line: Option<u32>,
+    /// The line the hovered candidate names, shown in place of the
+    /// selection's own line while the pointer rests on a candidate row.
+    candidate_line: Option<u32>,
     version_dialog: VersionDialog,
     settings_dialog: SettingsDialog,
     /// A folder picker running on its own thread reports here.
@@ -148,6 +151,7 @@ impl CadmarkApp {
             code_panel: CodePanel::default(),
             code_visible: false,
             highlighted_line: None,
+            candidate_line: None,
             version_dialog: VersionDialog::default(),
             settings_dialog: SettingsDialog::default(),
             folder_pick_rx: None,
@@ -548,6 +552,8 @@ impl CadmarkApp {
         self.renderer.selected_id = 0;
         self.renderer.hover_id = 0;
         self.highlighted_line = None;
+        self.candidate_line = None;
+        self.renderer.highlight_ids.clear();
         self.overlay.close();
     }
 
@@ -651,6 +657,35 @@ impl CadmarkApp {
                 },
                 context,
             );
+        }
+    }
+
+    /// Show what the candidate under the pointer accounts for: its own
+    /// source line in the code panel, and the geometry the ledger
+    /// attributes to its operation lit in the viewport.
+    ///
+    /// Where two candidates were recorded against the same elements their
+    /// footprints coincide — the ledger drew no distinction there and this
+    /// invents none; the code panel's line is what tells them apart.
+    fn apply_candidate_hover(&mut self, ctx: &egui::Context) {
+        let hovered = self.overlay.hovered_candidate().cloned();
+        let (line, footprint) = match &hovered {
+            Some(candidate) => (
+                Some(candidate.source.line),
+                cadmark_core::candidates::candidate_footprint(
+                    &self.project.ledger,
+                    candidate.operation_id,
+                )
+                .iter()
+                .map(cadmark_renderer::picking::encode_picking_id)
+                .collect(),
+            ),
+            None => (None, Vec::new()),
+        };
+        if self.candidate_line != line || self.renderer.highlight_ids != footprint {
+            self.candidate_line = line;
+            self.renderer.highlight_ids = footprint;
+            ctx.request_repaint();
         }
     }
 
@@ -986,7 +1021,7 @@ impl CadmarkApp {
                     CodeView {
                         script_filename: SCRIPT_FILENAME,
                         source: self.project.script_source.as_deref(),
-                        highlighted_line: self.highlighted_line,
+                        highlighted_line: self.candidate_line.or(self.highlighted_line),
                         modified_on_disk: self.project.script_modified_on_disk,
                         controls_enabled: self.project.busy.is_none(),
                     },
@@ -1110,7 +1145,9 @@ impl CadmarkApp {
                 }
             }
 
-            match self.overlay.show(ui, rect) {
+            let action = self.overlay.show(ui, rect);
+            self.apply_candidate_hover(ui.ctx());
+            match action {
                 OverlayAction::Submit { text, anchors } => {
                     self.overlay.close();
                     self.send_spatial_comment(text, anchors);

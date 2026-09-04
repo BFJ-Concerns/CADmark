@@ -119,6 +119,7 @@ pub fn resolve_context(
         element: element.clone(),
         provenance,
         identification,
+        chosen_candidate: None,
     })
 }
 

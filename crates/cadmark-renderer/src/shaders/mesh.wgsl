@@ -16,13 +16,29 @@ struct Uniforms {
     _pad1: f32,
     selected_id: u32,
     hover_id: u32,
-    _pad2: u32,
+    highlight_count: u32,
     _pad3: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
+    // Picking IDs of the candidate-footprint highlight, four to a row.
+    highlight_ids: array<vec4<u32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+// Whether this element belongs to the highlighted candidate's footprint.
+fn in_highlight(id: u32) -> bool {
+    if id == 0u {
+        return false;
+    }
+    for (var i = 0u; i < uniforms.highlight_count; i = i + 1u) {
+        if uniforms.highlight_ids[i / 4u][i % 4u] == id {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -98,6 +114,8 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
         colour = mix(colour, uniforms.selected_colour.rgb, uniforms.selected_colour.a);
     } else if fid == uniforms.hover_id && uniforms.hover_id != 0u {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a);
+    } else if in_highlight(fid) {
+        colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a * 0.7);
     }
 
     colour = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));

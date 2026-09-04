@@ -1,6 +1,7 @@
 // How a spatial comment's anchors are put into words for the model: the
 // element, the line that produced it (or the honest alternative — several
-// candidate lines, or none), the operation and its relation, and the
+// candidate lines, the one the user chose among them, or none), the
+// operation and its relation, and the
 // element's measurements. This text is the grounding the pointing channel
 // exists to deliver; every anchor of a comment is rendered, in order.
 
@@ -45,21 +46,34 @@ fn render_anchor(context: &GeometryContext) -> String {
             entry.source.line,
             entry.source.code
         )),
-        LedgerValue::Ambiguous(candidates) => {
-            out.push_str(
-                "its source is ambiguous; it was produced by one of these lines (decide from the \
-                 measurements and the user's words, and say which you chose):",
-            );
-            for candidate in candidates {
-                out.push_str(&format!(
-                    "\n    - {} {} at line {}: `{}`",
-                    candidate.relation.display_phrase(),
-                    candidate.operation.display_name(),
-                    candidate.source.line,
-                    candidate.source.code
-                ));
+        LedgerValue::Ambiguous(candidates) => match &context.chosen_candidate {
+            // The user was offered the candidates and picked one. That is
+            // knowledge the model cannot derive, so it is stated as theirs
+            // and the candidates they rejected are not sent.
+            Some(chosen) => out.push_str(&format!(
+                "its source was ambiguous and the user chose which line it is: {} {} at line \
+                 {}: `{}`",
+                chosen.relation.display_phrase(),
+                chosen.operation.display_name(),
+                chosen.source.line,
+                chosen.source.code
+            )),
+            None => {
+                out.push_str(
+                    "its source is ambiguous; it was produced by one of these lines (decide from \
+                     the measurements and the user's words, and say which you chose):",
+                );
+                for candidate in candidates {
+                    out.push_str(&format!(
+                        "\n    - {} {} at line {}: `{}`",
+                        candidate.relation.display_phrase(),
+                        candidate.operation.display_name(),
+                        candidate.source.line,
+                        candidate.source.code
+                    ));
+                }
             }
-        }
+        },
         LedgerValue::Untraced => out.push_str(
             "no source line is known for it (it came from an operation CADmark cannot trace); \
              locate it from the measurements",
@@ -99,6 +113,43 @@ mod tests {
         }
     }
 
+    fn ambiguous_edge(chosen: Option<ProvenanceEntry>) -> GroundedComment {
+        GroundedComment {
+            text: "round this".into(),
+            anchors: vec![GeometryContext {
+                element: TopologyElement::Edge(EdgeId(4)),
+                provenance: LedgerValue::Ambiguous(vec![
+                    entry(2, SemanticOperation::Box),
+                    entry(3, SemanticOperation::Fillet),
+                ]),
+                identification: Default::default(),
+                chosen_candidate: chosen,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_chosen_candidate_is_the_only_line_the_model_is_given() {
+        let text = render_comment(&ambiguous_edge(Some(entry(3, SemanticOperation::Fillet))));
+        assert!(
+            text.contains("the user chose which line it is: modified by fillet at line 3"),
+            "the model must be told the choice was the user's: {text}"
+        );
+        assert!(
+            !text.contains("line 2"),
+            "the rejected candidate must not reach the model: {text}"
+        );
+        assert!(!text.contains("decide from"));
+    }
+
+    #[test]
+    fn an_unchosen_ambiguity_still_reaches_the_model_with_every_candidate() {
+        let text = render_comment(&ambiguous_edge(None));
+        assert!(text.contains("its source is ambiguous"));
+        assert!(text.contains("    - modified by box at line 2"));
+        assert!(text.contains("    - modified by fillet at line 3"));
+    }
+
     #[test]
     fn a_plain_chat_message_is_rendered_as_itself() {
         let comment = GroundedComment {
@@ -120,6 +171,7 @@ mod tests {
                     element: TopologyElement::Face(FaceId(3)),
                     provenance: LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
                     identification,
+                    chosen_candidate: None,
                 },
                 GeometryContext {
                     element: TopologyElement::Edge(EdgeId(4)),
@@ -128,11 +180,13 @@ mod tests {
                         entry(3, SemanticOperation::Fillet),
                     ]),
                     identification: Default::default(),
+                    chosen_candidate: None,
                 },
                 GeometryContext {
                     element: TopologyElement::Edge(EdgeId(9)),
                     provenance: LedgerValue::Untraced,
                     identification: Default::default(),
+                    chosen_candidate: None,
                 },
             ],
         };

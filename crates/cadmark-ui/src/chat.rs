@@ -534,18 +534,21 @@ mod tests {
             element: TopologyElement::Face(FaceId(1)),
             provenance: LedgerValue::Resolved(entry(7)),
             identification: Default::default(),
+            chosen_candidate: None,
         };
         assert_eq!(spatial_chip(&resolved), "face 1 · line 7");
         let ambiguous = GeometryContext {
             element: TopologyElement::Edge(EdgeId(2)),
             provenance: LedgerValue::Ambiguous(vec![entry(3), entry(9)]),
             identification: Default::default(),
+            chosen_candidate: None,
         };
         assert_eq!(spatial_chip(&ambiguous), "edge 2 · lines 3/9");
         let untraced = GeometryContext {
             element: TopologyElement::Edge(EdgeId(2)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
+            chosen_candidate: None,
         };
         assert_eq!(spatial_chip(&untraced), "edge 2 · untraced");
     }
