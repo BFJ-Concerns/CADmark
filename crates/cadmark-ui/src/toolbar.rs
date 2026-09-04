@@ -103,8 +103,8 @@ pub struct ToolbarState<'a> {
     pub code_visible: bool,
     /// Whether the viewport is orthographic.
     pub orthographic: bool,
-    /// Whether the model on screen is a closed, valid solid.
-    pub printable: Option<bool>,
+    /// A non-blocking explanation shown before an unavailable export.
+    pub export_warning: Option<&'a str>,
     /// The AI model in use, or `None` when AI is unavailable.
     pub ai_model: Option<&'a str>,
 }
@@ -369,14 +369,8 @@ pub fn show_toolbar(
         ui.add_enabled_ui(state.has_model, |ui| {
             ui.menu_button("Export \u{25BE}", |ui| {
                 ui.set_min_width(220.0);
-                if state.printable == Some(false) {
-                    ui.label(
-                        egui::RichText::new(
-                            "The model is not a closed, valid solid; it will not print as is.",
-                        )
-                        .small()
-                        .color(theme::WARNING),
-                    );
+                if let Some(warning) = state.export_warning {
+                    ui.label(egui::RichText::new(warning).small().color(theme::WARNING));
                     ui.separator();
                 }
                 for format in ExportFormat::ALL {

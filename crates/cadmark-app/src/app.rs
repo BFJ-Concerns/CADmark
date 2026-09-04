@@ -29,7 +29,7 @@ use crate::orchestrator::OrchestratorResult;
 use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
 use crate::turn::{TurnEvent, TurnInput, TurnOutcome, reference_images};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
-use crate::validity::describe_validity;
+use crate::validity::{describe_validity, export_decision, export_warning};
 use crate::viewport::{
     PickTransition, ViewportCallback, ViewportResources, completed_pick_transition,
     viewport_clear_colour,
@@ -886,6 +886,11 @@ impl CadmarkApp {
             )
             .show(ctx, |ui| {
                 let recent = self.settings.other_recent_projects(&self.project.dir);
+                let export_warning = self
+                    .project
+                    .model
+                    .as_ref()
+                    .and_then(|model| export_warning(&export_decision(&model.validity)));
                 let state = ToolbarState {
                     project_dir: &self.project.dir,
                     script_filename: SCRIPT_FILENAME,
@@ -895,7 +900,7 @@ impl CadmarkApp {
                     has_model: self.project.model.is_some(),
                     code_visible: self.code_visible,
                     orthographic: self.renderer.camera.projection() == Projection::Orthographic,
-                    printable: self.project.model.as_ref().map(|model| model.printable),
+                    export_warning: export_warning.as_deref(),
                     ai_model: self.project.ai_model.as_deref(),
                 };
                 action = toolbar::show_toolbar(ui, &self.project.history, state);
