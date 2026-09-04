@@ -1530,6 +1530,13 @@ impl CadmarkApp {
                 }
             }
             ToolbarAction::OpenSettings => self.open_settings(),
+            ToolbarAction::ToggleSelectionKind(kind) => {
+                self.renderer.selection_filter =
+                    crate::viewport::toggle_selection_kind(self.renderer.selection_filter, kind);
+                // What is under the cursor may have changed kind.
+                self.renderer.hover_id = 0;
+                self.last_hover_probe = None;
+            }
             ToolbarAction::ToggleProjection => {
                 let next = match self.renderer.camera.projection() {
                     Projection::Perspective => Projection::Orthographic,
@@ -1614,6 +1621,9 @@ impl CadmarkApp {
                     code_visible: self.code_visible,
                     orthographic: self.renderer.camera.projection() == Projection::Orthographic,
                     export_warning: export_warning.as_deref(),
+                    selection_kinds: crate::viewport::selection_kinds(
+                        self.renderer.selection_filter,
+                    ),
                     ai_model: project.ai_model.as_deref(),
                     section: toolbar::SectionState {
                         enabled: self.renderer.section.enabled,
@@ -2044,15 +2054,16 @@ impl CadmarkApp {
             let callback = eframe::egui_wgpu::Callback::new_paint_callback(
                 rect,
                 ViewportCallback {
-                    mesh_uniforms: self.renderer.mesh_uniforms(aspect),
+                    mesh_uniforms: self.renderer.mesh_uniforms(viewport_size),
                     highlight_ids: self.renderer.highlight_ids.clone(),
-                    simple_uniforms: self.renderer.simple_uniforms(aspect),
+                    simple_uniforms: self.renderer.simple_uniforms(viewport_size),
                     markers: self.renderer.markers.clone(),
                     pick_request,
                     part_pick_request,
                     hover_request,
                     viewport_size,
                     clear_colour: viewport_clear_colour(self.renderer.target_is_srgb),
+                    selection_filter: self.renderer.selection_filter,
                 },
             );
             ui.painter().add(callback);

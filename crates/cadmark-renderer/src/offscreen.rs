@@ -121,12 +121,7 @@ impl OffscreenRenderer {
                 // No vertex markers: this path renders a framed picture,
                 // and a marker is an aiming aid for a viewport the user
                 // is clicking in.
-                crate::pipeline::upload_mesh(
-                    device,
-                    mesh,
-                    cadmark_core::geometry::PartId(0),
-                    &[],
-                )
+                crate::pipeline::upload_mesh(device, mesh, cadmark_core::geometry::PartId(0), &[])
             })
             .into_iter()
             .collect();

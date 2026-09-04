@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Edges and vertices are clickable: edges are drawn at a width you can
+  hit and every vertex gets a marker, both keeping their size on screen
+  however far you zoom
+- Select menu in the toolbar turns face, edge or vertex clicks off, so a
+  click passes through to what is behind; all three start on
 - Parameters panel listing every module-level numeric name in the open
   part's script: editing a value rewrites that one number, rebuilds the
   model and records a design step, with no AI turn; names derived from
