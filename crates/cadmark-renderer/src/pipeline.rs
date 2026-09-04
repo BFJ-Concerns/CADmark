@@ -801,9 +801,12 @@ impl RenderPipelines {
 mod tests {
     use super::*;
 
-    /// Compile a shader and report the byte size its `Uniforms` struct
-    /// occupies, which is what the uniform buffer must match.
-    fn uniform_struct_size(source: &str) -> u32 {
+    /// Compile a shader and report its `Uniforms` struct as the field names
+    /// and byte offsets the GPU will actually read, which is what the uniform
+    /// buffer must match. Sizes alone do not say this: two same-width fields
+    /// in the wrong order leave the total unchanged while every read after
+    /// them lands on the wrong word.
+    fn uniform_struct_layout(source: &str) -> Vec<(String, u32)> {
         let module = naga::front::wgsl::parse_str(source).expect("shader must compile");
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
@@ -814,25 +817,85 @@ mod tests {
         layouter
             .update(module.to_ctx())
             .expect("shader types must lay out");
-        let (handle, _) = module
+        let (handle, ty) = module
             .types
             .iter()
             .find(|(_, ty)| ty.name.as_deref() == Some("Uniforms"))
             .expect("shader must declare Uniforms");
-        layouter[handle].size
+        let naga::TypeInner::Struct { members, .. } = &ty.inner else {
+            panic!("Uniforms must be a struct");
+        };
+        let fields: Vec<(String, u32)> = members
+            .iter()
+            .map(|member| {
+                (
+                    member
+                        .name
+                        .clone()
+                        .expect("every Uniforms field must be named"),
+                    member.offset,
+                )
+            })
+            .collect();
+        assert_eq!(
+            layouter[handle].size,
+            std::mem::size_of::<MeshUniforms>() as u32,
+            "the shader's Uniforms is a different size from MeshUniforms"
+        );
+        fields
     }
 
     #[test]
     fn every_shader_binding_mesh_uniforms_declares_the_same_layout() {
-        // A field added on one side and not the other renders garbage
-        // silently, so the sizes are compared rather than trusted.
-        let expected = std::mem::size_of::<MeshUniforms>() as u32;
+        // A field added, removed, renamed or reordered on one side and not
+        // the other renders garbage silently, so the offset of every named
+        // field is compared against the Rust struct rather than trusted.
+        let expected: Vec<(String, u32)> = vec![
+            ("view_proj", std::mem::offset_of!(MeshUniforms, view_proj)),
+            ("eye_pos", std::mem::offset_of!(MeshUniforms, eye_pos)),
+            (
+                "encode_srgb",
+                std::mem::offset_of!(MeshUniforms, encode_srgb),
+            ),
+            (
+                "key_light_dir",
+                std::mem::offset_of!(MeshUniforms, key_light_dir),
+            ),
+            ("_pad0", std::mem::offset_of!(MeshUniforms, _pad0)),
+            (
+                "fill_light_dir",
+                std::mem::offset_of!(MeshUniforms, fill_light_dir),
+            ),
+            ("_pad1", std::mem::offset_of!(MeshUniforms, _pad1)),
+            (
+                "selected_id",
+                std::mem::offset_of!(MeshUniforms, selected_id),
+            ),
+            ("hover_id", std::mem::offset_of!(MeshUniforms, hover_id)),
+            (
+                "highlight_count",
+                std::mem::offset_of!(MeshUniforms, highlight_count),
+            ),
+            ("_pad3", std::mem::offset_of!(MeshUniforms, _pad3)),
+            (
+                "selected_colour",
+                std::mem::offset_of!(MeshUniforms, selected_colour),
+            ),
+            (
+                "hover_colour",
+                std::mem::offset_of!(MeshUniforms, hover_colour),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, offset)| (name.to_string(), offset as u32))
+        .collect();
+
         assert_eq!(
-            uniform_struct_size(include_str!("shaders/mesh.wgsl")),
+            uniform_struct_layout(include_str!("shaders/mesh.wgsl")),
             expected
         );
         assert_eq!(
-            uniform_struct_size(include_str!("shaders/wireframe.wgsl")),
+            uniform_struct_layout(include_str!("shaders/wireframe.wgsl")),
             expected
         );
     }
