@@ -18,6 +18,9 @@ use config::{AiConfiguration, ConfigurationError};
 use doc_lookup::DocLookup;
 use openai_compatible::OpenAiCompatibleClient;
 
+/// The instructions every turn is run under.
+pub const SYSTEM_PROMPT: &str = include_str!("system_prompt.md");
+
 /// The configured model and the documentation consumer that shares its
 /// client.
 pub struct AiServices {
