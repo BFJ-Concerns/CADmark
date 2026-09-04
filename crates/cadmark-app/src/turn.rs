@@ -26,17 +26,31 @@ use cadmark_bridge::tools::{
     RunScriptArgs, tools_for,
 };
 use cadmark_core::cancellation::CancelFlag;
-use cadmark_core::message::{Conversation, MessageKind};
+use cadmark_core::message::{ContextUsage, Conversation, MessageKind};
 use cadmark_kernel::protocol::ExecutedModel;
 use cadmark_kernel::worker::WorkerError;
 
 /// What the user sent to start a turn: any chat text, the pending
 /// comments with their anchors, and the project's reference images.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TurnInput {
     pub chat: Option<String>,
     pub comments: Vec<GroundedComment>,
     pub images: Vec<ImageData>,
+    /// The configured provider context window. Compatible providers do not
+    /// expose one shared capability, so this comes from user settings.
+    pub context_window_tokens: usize,
+}
+
+impl Default for TurnInput {
+    fn default() -> Self {
+        Self {
+            chat: None,
+            comments: Vec::new(),
+            images: Vec::new(),
+            context_window_tokens: crate::user_settings::DEFAULT_CONTEXT_WINDOW_TOKENS,
+        }
+    }
 }
 
 /// Something the turn did, reported as it happens.
@@ -63,6 +77,9 @@ pub enum TurnEvent {
         model: Box<ExecutedModel>,
         source: String,
     },
+    /// The earlier conversation has been replaced by this model-written
+    /// account before the next request could approach its context limit.
+    ConversationCondensed { summary: String },
 }
 
 /// How a turn ended.
@@ -151,6 +168,19 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
     ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
         let mut items = history_items(conversation);
+        let usage = context_usage(conversation, &input.images, input.context_window_tokens);
+        if usage.needs_condensing() && !conversation.is_empty() {
+            let summary = match self.condense(conversation).await {
+                Ok(summary) => summary,
+                Err(outcome) => return outcome,
+            };
+            emit(TurnEvent::ConversationCondensed {
+                summary: summary.clone(),
+            });
+            items = vec![ModelItem::Assistant {
+                text: format!("Conversation summary:\n{summary}"),
+            }];
+        }
         items.push(ModelItem::User {
             text: render_input(input),
             images: input.images.clone(),
@@ -288,6 +318,32 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 Some(error) => self.abort(original.as_deref(), TurnOutcome::Failed { error }),
                 None => TurnOutcome::Answered,
             },
+        }
+    }
+
+    /// Ask the same configured model to retain the information that makes a
+    /// resumed project useful before old detail uses the available context.
+    async fn condense(&self, conversation: &Conversation) -> Result<String, TurnOutcome> {
+        let request = ModelRequest {
+            instructions: "Condense this earlier CAD conversation for the next turn. Retain every decision already made and every request still open, including dimensions, constraints, and unresolved questions. Drop only chatter and completed detail. Return the compact account alone; do not call tools.".to_string(),
+            items: history_items(conversation),
+            tools: Vec::new(),
+        };
+        let mut sink = |_delta: StreamDelta| {};
+        match self.model.respond(request, self.cancel.clone(), &mut sink).await {
+            Ok(response) if !response.tool_calls.is_empty() => Err(TurnOutcome::Failed {
+                error: "The AI tried to use a tool while condensing the conversation; the earlier conversation was kept."
+                    .to_string(),
+            }),
+            Ok(response) if response.text.trim().is_empty() => Err(TurnOutcome::Failed {
+                error: "The AI returned an empty conversation summary; the earlier conversation was kept."
+                    .to_string(),
+            }),
+            Ok(response) => Ok(response.text),
+            Err(BackendError::Cancelled) => Err(TurnOutcome::Cancelled),
+            Err(error) => Err(TurnOutcome::Failed {
+                error: format!("Could not condense the conversation: {error}"),
+            }),
         }
     }
 
@@ -452,6 +508,9 @@ fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
                     });
                 }
             }
+            MessageKind::ConversationSummary => items.push(ModelItem::Assistant {
+                text: format!("Conversation summary:\n{}", message.text),
+            }),
             MessageKind::ToolCalls(activities) => {
                 for activity in activities {
                     items.push(ModelItem::ToolCall(ToolCall {
@@ -469,6 +528,23 @@ fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
         }
     }
     items
+}
+
+/// The accounting shown to the user and used to start condensation. Text is
+/// estimated provider-neutrally; images reserve a conservative fixed budget
+/// until the image attachment work can supply model-specific measurements.
+pub const REFERENCE_IMAGE_TOKENS: usize = 765;
+
+pub fn context_usage(
+    conversation: &Conversation,
+    images: &[ImageData],
+    window_tokens: usize,
+) -> ContextUsage {
+    ContextUsage {
+        conversation_tokens: conversation.estimated_tokens(),
+        reference_image_tokens: images.len() * REFERENCE_IMAGE_TOKENS,
+        window_tokens,
+    }
 }
 
 /// What the model reads after a successful execution.
@@ -567,6 +643,7 @@ mod tests {
     use cadmark_core::ledger::ProvenanceLedger;
     use cadmark_core::limits::{ExecutionLimits, LimitHit};
     use cadmark_core::mesh::TessellatedMesh;
+    use cadmark_core::message::Message;
     use cadmark_kernel::protocol::ModelFile;
 
     /// A model that answers from a script of responses and records what
@@ -616,6 +693,64 @@ mod tests {
                 }
                 Ok(response)
             })
+        }
+    }
+
+    /// A summary stand-in whose output is derived from what the loop actually
+    /// sent. It makes the retention assertion fail if either commitment never
+    /// reaches the condensation request, rather than seeding the answer in a
+    /// canned fixture.
+    struct RetainingSummaryModel {
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl RetainingSummaryModel {
+        fn new() -> Self {
+            Self {
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl TurnModel for RetainingSummaryModel {
+        fn model_name(&self) -> &str {
+            "retaining-summary"
+        }
+
+        fn accepts_images(&self) -> bool {
+            false
+        }
+
+        fn respond<'a>(
+            &'a self,
+            request: ModelRequest,
+            _cancel: CancelFlag,
+            _sink: DeltaSink<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ModelResponse, BackendError>> + Send + 'a>,
+        > {
+            let mut requests = self.requests.lock().unwrap();
+            let response = if requests.is_empty() {
+                let transcript = request
+                    .items
+                    .iter()
+                    .map(|item| match item {
+                        ModelItem::User { text, .. } | ModelItem::Assistant { text } => text,
+                        ModelItem::ToolCall(_) | ModelItem::ToolResult { .. } => "",
+                    })
+                    .collect::<String>();
+                if transcript.contains("Decision: use a 5 mm wall")
+                    && transcript.contains("Open request: add a lid")
+                {
+                    text("Decision: use a 5 mm wall. Open request: add a lid after review.")
+                } else {
+                    text("Conversation summary was incomplete.")
+                }
+            } else {
+                text("I will continue from the summary.")
+            };
+            requests.push(request);
+            Box::pin(async move { response })
         }
     }
 
@@ -775,6 +910,28 @@ mod tests {
                 .await
         }
 
+        async fn run_with_conversation<M: TurnModel>(
+            &mut self,
+            model: &M,
+            conversation: &Conversation,
+            input: TurnInput,
+            cancel: CancelFlag,
+        ) -> TurnOutcome {
+            let mut render = NoRender;
+            let mut runner = TurnRunner {
+                model,
+                executor: &mut self.executor,
+                docs: &FakeDocs,
+                render: &mut render,
+                script_path: self.script.clone(),
+                cancel,
+            };
+            let events = &mut self.events;
+            runner
+                .run(conversation, &input, |event| events.push(event))
+                .await
+        }
+
         fn on_disk(&self) -> Option<String> {
             std::fs::read_to_string(&self.script).ok()
         }
@@ -795,6 +952,51 @@ mod tests {
             chat: Some(text.to_string()),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn condensation_shows_the_next_request_a_summary_with_decisions_and_open_requests() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat(format!(
+            "Decision: use a 5 mm wall. {}",
+            "detail ".repeat(700)
+        )));
+        conversation.push(Message::ai_response("The wall will be 5 mm."));
+        conversation.push(Message::user_chat(
+            "Open request: add a lid after the next review.",
+        ));
+        let model = RetainingSummaryModel::new();
+        let mut harness = Harness::with_script(Some("original"), FakeExecutor::new([]));
+
+        let outcome = harness
+            .run_with_conversation(
+                &model,
+                &conversation,
+                TurnInput {
+                    chat: Some("What remains?".into()),
+                    context_window_tokens: 1_000,
+                    ..Default::default()
+                },
+                CancelFlag::new(),
+            )
+            .await;
+
+        assert_eq!(outcome, TurnOutcome::Answered);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].items.iter().any(
+            |item| matches!(item, ModelItem::User { text, .. } if text.contains("5 mm wall"))
+        ));
+        let summary_shown = requests[1].items.iter().find_map(|item| match item {
+            ModelItem::Assistant { text } => Some(text),
+            _ => None,
+        });
+        assert!(summary_shown.is_some_and(|text| text.contains("5 mm wall")));
+        assert!(summary_shown.is_some_and(|text| text.contains("add a lid")));
+        assert!(matches!(
+            harness.events.first(),
+            Some(TurnEvent::ConversationCondensed { summary }) if summary.contains("5 mm wall")
+        ));
     }
 
     #[tokio::test]
@@ -996,6 +1198,7 @@ mod tests {
                 },
             ],
             images: Vec::new(),
+            ..Default::default()
         };
         let model = ScriptedModel::new([
             run_script("c1", "GOOD = 1", "Rounded"),
