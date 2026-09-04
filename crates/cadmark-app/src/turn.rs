@@ -26,6 +26,7 @@ use cadmark_bridge::tools::{
     RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
+use cadmark_core::mesh::TessellatedMesh;
 use cadmark_core::message::{Conversation, MessageKind};
 use cadmark_kernel::protocol::ExecutedModel;
 use cadmark_kernel::worker::WorkerError;
@@ -109,6 +110,12 @@ pub trait DocSource: Send + Sync {
 /// in production this hands the request to the UI thread and waits.
 pub trait RenderSource: Send {
     fn render(&mut self, view: RenderView) -> Result<ImageData, String>;
+
+    /// The model an in-turn execution just produced. The viewport puts
+    /// the same mesh on screen, but only once the UI thread next runs a
+    /// frame; a render asked for in the same response as the execution
+    /// would otherwise be of the previous model, or of nothing at all.
+    fn model_built(&mut self, _mesh: &TessellatedMesh) {}
 }
 
 /// A render source for a model that cannot see: the tool is not offered,
@@ -229,6 +236,10 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                         model,
                         summary,
                     } => {
+                        // Before the event: the UI thread shows this mesh
+                        // a frame later, and a render may be asked for in
+                        // this same response.
+                        self.render.model_built(&model.mesh);
                         emit(TurnEvent::ModelBuilt {
                             model: model.clone(),
                             source: code.clone(),
@@ -577,7 +588,6 @@ mod tests {
     use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
     use cadmark_core::ledger::ProvenanceLedger;
     use cadmark_core::limits::{ExecutionLimits, LimitHit};
-    use cadmark_core::mesh::TessellatedMesh;
     use cadmark_kernel::protocol::ModelFile;
 
     /// A model that answers from a script of responses and records what
@@ -725,6 +735,23 @@ mod tests {
             Ok(ImageData {
                 media_type: "image/png".into(),
                 bytes: vec![1, 2, 3],
+            })
+        }
+    }
+
+    /// An executor whose every run produces a model with real geometry,
+    /// for the tests that then render what was built.
+    struct CubeExecutor;
+
+    impl ScriptExecutor for CubeExecutor {
+        fn execute(
+            &mut self,
+            _script_path: &Path,
+            _cancel: &CancelFlag,
+        ) -> Result<ExecutedModel, WorkerError> {
+            Ok(ExecutedModel {
+                mesh: cube_mesh(),
+                ..sample_model()
             })
         }
     }
@@ -1124,29 +1151,35 @@ mod tests {
         mesh
     }
 
-    /// A device for the GPU-backed test, or `None` where no adapter is
-    /// available.
-    async fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+    /// A device for the rendering tests: the real adapter where there is
+    /// one, the software fallback otherwise. A runner with neither fails
+    /// the test rather than passing without rendering anything.
+    async fn gpu() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await?;
+        let mut found = None;
+        for force_fallback_adapter in [false, true] {
+            found = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: None,
+                    force_fallback_adapter,
+                })
+                .await;
+            if found.is_some() {
+                break;
+            }
+        }
+        let adapter = found
+            .expect("no GPU adapter and no software fallback: install a Vulkan ICD or lavapipe");
         adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
             .await
-            .ok()
+            .expect("the adapter gave no device")
     }
 
     #[tokio::test]
     async fn the_model_is_shown_a_real_render_of_what_is_on_screen() {
-        let Some((device, queue)) = gpu().await else {
-            eprintln!("no GPU adapter: skipping the production render test");
-            return;
-        };
+        let (device, queue) = gpu().await;
         let scene = SceneHandle::new();
         scene.set_mesh(Some((
             std::sync::Arc::new(cube_mesh()),
@@ -1178,14 +1211,35 @@ mod tests {
             script_path: project.path().join("part.py"),
             cancel: CancelFlag::new(),
         };
+        let mut events = Vec::new();
         let outcome = runner
-            .run(&Conversation::new(), &chat("check it"), |_event| {})
+            .run(&Conversation::new(), &chat("check it"), |event| {
+                events.push(event)
+            })
             .await;
         assert_eq!(outcome, TurnOutcome::Answered);
 
+        // The user is told what the turn is doing while it looks.
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TurnEvent::Phase(phase) if phase.contains("looking at the render") && phase.contains("front")
+            )),
+            "the render phase is announced, got {events:?}"
+        );
+
         let requests = model.requests.lock().unwrap();
-        let ModelItem::User { text, images } = &requests[1].items[3] else {
-            panic!("the render is shown as a user item");
+        // The image is joined to the call it answers: the tool result for
+        // c1, then the image item that follows it.
+        let result_at = requests[1]
+            .items
+            .iter()
+            .position(
+                |item| matches!(item, ModelItem::ToolResult { call_id, .. } if call_id == "c1"),
+            )
+            .expect("the render call is answered");
+        let ModelItem::User { text, images } = &requests[1].items[result_at + 1] else {
+            panic!("the render is shown as a user item straight after its result");
         };
         assert!(text.contains("front"));
         let image = images.first().expect("an image item, not an apology");
@@ -1216,6 +1270,88 @@ mod tests {
             covered / total > 0.2,
             "the model fills the frame, covered {:.3}",
             covered / total
+        );
+    }
+
+    #[tokio::test]
+    async fn a_render_asked_for_beside_the_execution_shows_the_model_just_built() {
+        // Nothing has ever been published into the scene: the UI thread
+        // has not run a frame since the script executed, which is the
+        // normal case when the model asks to run and to look in one
+        // response.
+        let (device, queue) = gpu().await;
+        let scene = SceneHandle::new();
+        scene.set_view(cadmark_renderer::camera::Camera::default(), (400, 300));
+        let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
+
+        let build_and_look = Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: RUN_SCRIPT.into(),
+                    arguments: serde_json::json!({"code": "X = 1", "summary": "Box"}),
+                },
+                ToolCall {
+                    id: "c2".into(),
+                    name: RENDER_VIEW.into(),
+                    arguments: serde_json::json!({"view": "front"}),
+                },
+            ],
+        });
+        let mut model = ScriptedModel::new([build_and_look, text("Looks right.")]);
+        model.accepts_images = true;
+        let project = tempfile::tempdir().unwrap();
+        let mut executor = CubeExecutor;
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            script_path: project.path().join("part.py"),
+            cancel: CancelFlag::new(),
+        };
+        let outcome = runner
+            .run(
+                &Conversation::new(),
+                &chat("build a box and check it"),
+                |_e| {},
+            )
+            .await;
+        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+
+        let requests = model.requests.lock().unwrap();
+        let result_at = requests[1]
+            .items
+            .iter()
+            .position(
+                |item| matches!(item, ModelItem::ToolResult { call_id, .. } if call_id == "c2"),
+            )
+            .expect("the render call is answered");
+        let ModelItem::User { images, .. } = &requests[1].items[result_at + 1] else {
+            panic!("the render is shown as a user item, not an apology that nothing is on screen");
+        };
+        let image = images.first().expect("an image of the model just built");
+        let decoder = png::Decoder::new(std::io::Cursor::new(&image.bytes));
+        let mut reader = decoder.read_info().expect("PNG header");
+        let mut pixels = vec![0; reader.output_buffer_size().expect("PNG buffer size")];
+        let info = reader.next_frame(&mut pixels).expect("PNG data");
+        assert_eq!((info.width, info.height), (400, 300));
+        let background = [36u8, 38, 43];
+        let covered = pixels[..info.buffer_size()]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| {
+                [p[0], p[1], p[2]]
+                    .iter()
+                    .zip(background)
+                    .any(|(got, base)| got.abs_diff(base) > 8)
+            })
+            .count() as f32;
+        assert!(
+            covered / (info.width * info.height) as f32 > 0.2,
+            "the freshly built model fills the frame"
         );
     }
 

@@ -20,14 +20,9 @@ use cadmark_renderer::pipeline::Renderer;
 
 use crate::turn::RenderSource;
 
-/// The shortest side of a render the AI is expected to judge geometry
-/// from. A viewport smaller than this is scaled up rather than sent as a
-/// thumbnail nothing can be read from.
-const MIN_SHORT_SIDE: u32 = 512;
-
-/// The longest side sent to a provider. Beyond this the image costs more
-/// than the detail is worth.
-const MAX_LONG_SIDE: u32 = 1536;
+/// The size a render falls back to before the viewport has one — the
+/// window has not been laid out yet, so there is no resolution to match.
+const FALLBACK_SIZE: (u32, u32) = (1024, 768);
 
 /// The background the AI's render is drawn on. Mid-grey reads against
 /// both lit and shadowed faces; the offscreen target is not an sRGB
@@ -129,6 +124,12 @@ impl ViewportRender {
 }
 
 impl RenderSource for ViewportRender {
+    fn model_built(&mut self, mesh: &TessellatedMesh) {
+        // Bounds are left to the scene to derive from the vertices, so
+        // this is the same published shape the UI thread produces.
+        self.scene.set_mesh(Some((Arc::new(mesh.clone()), None)));
+    }
+
     fn render(&mut self, view: RenderView) -> Result<ImageData, String> {
         let scene = self.scene.snapshot();
         let (Some(mesh), Some(bounds)) = (scene.mesh.clone(), scene.bounds) else {
@@ -206,27 +207,15 @@ fn standard_view(view: RenderView) -> Option<StandardView> {
     }
 }
 
-/// The pixel size one render is produced at: the viewport's own, scaled
-/// to stay legible and to stay affordable, keeping its shape. A viewport
-/// too small to have a shape yet falls back to a usable default.
+/// The pixel size one render is produced at: the viewport's own, so the
+/// AI sees the model at the resolution the user is judging it at. A
+/// viewport with no size yet falls back to a usable default.
 pub fn render_size(viewport_size: (u32, u32)) -> (u32, u32) {
     let (width, height) = viewport_size;
     if width == 0 || height == 0 {
-        return (MIN_SHORT_SIDE * 4 / 3, MIN_SHORT_SIDE);
+        return FALLBACK_SIZE;
     }
-    let short = width.min(height) as f32;
-    let long = width.max(height) as f32;
-    let mut scale = 1.0f32;
-    if short < MIN_SHORT_SIDE as f32 {
-        scale = MIN_SHORT_SIDE as f32 / short;
-    }
-    if long * scale > MAX_LONG_SIDE as f32 {
-        scale = MAX_LONG_SIDE as f32 / long;
-    }
-    (
-        ((width as f32 * scale).round() as u32).max(1),
-        ((height as f32 * scale).round() as u32).max(1),
-    )
+    (width, height)
 }
 
 /// Encode a rendered image as a PNG the provider can carry.
@@ -356,23 +345,15 @@ mod tests {
 
     #[test]
     fn a_render_is_the_viewports_size_unless_that_is_unusable() {
-        // A normal viewport is rendered at its own resolution.
+        // Whatever the viewport's resolution, the render carries it —
+        // small, large, and unusual shapes alike.
         assert_eq!(render_size((1200, 800)), (1200, 800));
-        // A viewport too small to judge geometry from is scaled up,
-        // keeping its shape.
-        let (width, height) = render_size((160, 120));
-        assert_eq!(height, MIN_SHORT_SIDE);
-        // Scaled up keeping its 4:3 shape, to the nearest whole pixel.
-        assert!((width as i64 - (MIN_SHORT_SIDE as i64 * 4 / 3)).abs() <= 1);
-        // A very large viewport is scaled down to the affordable cap.
-        let (width, height) = render_size((3840, 2160));
-        assert_eq!(width, MAX_LONG_SIDE);
-        assert!(height < MAX_LONG_SIDE);
+        assert_eq!(render_size((160, 120)), (160, 120));
+        assert_eq!(render_size((3840, 2160)), (3840, 2160));
+        assert_eq!(render_size((900, 1600)), (900, 1600));
         // A viewport with no size yet still gives a usable image.
-        assert_eq!(
-            render_size((0, 0)),
-            (MIN_SHORT_SIDE * 4 / 3, MIN_SHORT_SIDE)
-        );
+        assert_eq!(render_size((0, 0)), FALLBACK_SIZE);
+        assert_eq!(render_size((800, 0)), FALLBACK_SIZE);
     }
 
     #[test]

@@ -214,17 +214,29 @@ mod tests {
         assert_eq!(padded_bytes_per_row(1), 256);
     }
 
-    /// A device for the GPU-backed tests, or `None` where no adapter is
-    /// available. The test that needs one says so rather than passing
-    /// silently.
-    fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+    /// A device for the rendering tests: the real adapter where there is
+    /// one, the software fallback otherwise. A runner with neither fails
+    /// the test rather than passing without rendering anything.
+    fn gpu() -> (wgpu::Device, wgpu::Queue) {
         let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))?;
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).ok()
+        let adapter = pollster::block_on(async {
+            for force_fallback_adapter in [false, true] {
+                let adapter = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::LowPower,
+                        compatible_surface: None,
+                        force_fallback_adapter,
+                    })
+                    .await;
+                if adapter.is_some() {
+                    return adapter;
+                }
+            }
+            None
+        })
+        .expect("no GPU adapter and no software fallback: install a Vulkan ICD or lavapipe");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            .expect("the adapter gave no device")
     }
 
     /// A unit cube centred on the origin, with its twelve edges as the
@@ -293,9 +305,7 @@ mod tests {
 
     #[test]
     fn a_rendered_model_fills_the_image_and_is_shaded() {
-        let Some((device, queue)) = gpu() else {
-            panic!("no wgpu adapter available; this test needs a GPU or software adapter");
-        };
+        let (device, queue) = gpu();
         let (width, height) = (320u32, 240u32);
         let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
 
@@ -371,9 +381,7 @@ mod tests {
 
     #[test]
     fn an_empty_render_is_the_clear_colour_alone() {
-        let Some((device, queue)) = gpu() else {
-            panic!("no wgpu adapter available; this test needs a GPU or software adapter");
-        };
+        let (device, queue) = gpu();
         let renderer = OffscreenRenderer::new(&device, 64, 64).expect("offscreen renderer");
         let scene = crate::pipeline::Renderer::new();
         let image = renderer
