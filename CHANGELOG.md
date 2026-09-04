@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- New conversation control archives the current chat before starting a blank
+  one, leaving the project script unchanged
+- Chat shows estimated model-context occupancy, including reserved reference
+  image budget, with the configured context-window setting
+- Long conversations are condensed before approaching the configured context
+  limit while retaining decisions and outstanding requests
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally

@@ -23,15 +23,38 @@ pub const CREDENTIAL_ENV: &str = "CADMARK_AI_API_KEY";
 const SETTINGS_FILE: &str = "settings.json";
 const CREDENTIAL_FILE: &str = "credential";
 
+/// A conservative default for contemporary provider context windows. The
+/// provider setting is editable because compatible endpoints do not expose a
+/// shared context-window capability on the wire.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
+
 /// Everything in the settings file.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserSettings {
     /// The provider, absent until the user configures one.
     pub ai: Option<AiConfiguration>,
     pub limits: ExecutionLimits,
+    /// The configured model's context window, used for early condensation.
+    #[serde(default = "default_context_window_tokens")]
+    pub context_window_tokens: usize,
     /// Recently opened project folders, most recent first.
     pub recent_projects: Vec<PathBuf>,
+}
+
+fn default_context_window_tokens() -> usize {
+    DEFAULT_CONTEXT_WINDOW_TOKENS
+}
+
+impl Default for UserSettings {
+    fn default() -> Self {
+        Self {
+            ai: None,
+            limits: ExecutionLimits::default(),
+            context_window_tokens: default_context_window_tokens(),
+            recent_projects: Vec::new(),
+        }
+    }
 }
 
 impl UserSettings {

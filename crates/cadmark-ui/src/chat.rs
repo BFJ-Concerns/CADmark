@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use cadmark_core::geometry::GeometryContext;
 use cadmark_core::ledger::LedgerValue;
-use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
+use cadmark_core::message::{ContextUsage, Conversation, Message, MessageKind, ToolActivity};
 
 use crate::theme;
 
@@ -104,7 +104,12 @@ impl ChatPane {
     }
 
     /// Render the chat pane and report what the user did.
-    pub fn show(&mut self, ui: &mut egui::Ui, conversation: &Conversation) -> ChatAction {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        conversation: &Conversation,
+        context: ContextUsage,
+    ) -> ChatAction {
         // The input sits in a bottom panel so it is laid out first and the
         // messages take whatever height remains: however tall the input
         // grows, the send row below it stays on screen.
@@ -121,7 +126,15 @@ impl ChatPane {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| self.show_messages(ui, conversation));
+            .show_inside(ui, |ui| {
+                egui::TopBottomPanel::top("chat_context_usage")
+                    .frame(egui::Frame::NONE)
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| show_context_usage(ui, context));
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| self.show_messages(ui, conversation));
+            });
 
         action
     }
@@ -248,6 +261,32 @@ impl ChatPane {
     }
 }
 
+fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!(
+                "Context: {} / {} tokens ({}%)",
+                context.used_tokens(),
+                context.window_tokens,
+                context.percent()
+            ))
+            .small()
+            .color(theme::TEXT_MUTED),
+        );
+        if context.reference_image_tokens > 0 {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Includes {} tokens reserved for reference images",
+                    context.reference_image_tokens
+                ))
+                .small()
+                .color(theme::TEXT_MUTED),
+            );
+        }
+    });
+    ui.add_space(4.0);
+}
+
 /// "looking up build123d docs · 1m 12s · last event 3s ago".
 fn turn_status_line(status: &TurnStatus) -> String {
     let quiet = status.last_event.elapsed().as_secs();
@@ -343,6 +382,18 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
                         .small()
                         .strong()
                         .color(theme::AI),
+                );
+                ui.add(egui::Label::new(&message.text).wrap());
+            });
+        }
+        MessageKind::ConversationSummary => {
+            let frame = theme::tinted_card(theme::ACCENT.gamma_multiply(0.35));
+            frame.show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new("Earlier conversation condensed")
+                        .small()
+                        .strong()
+                        .color(theme::TEXT_MUTED),
                 );
                 ui.add(egui::Label::new(&message.text).wrap());
             });

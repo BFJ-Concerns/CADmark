@@ -27,6 +27,7 @@ pub const SCRIPT_FILENAME: &str = "part.py";
 
 /// Where the conversation is kept, inside the project folder.
 const CONVERSATION_FILENAME: &str = ".cadmark/conversation.json";
+const CONVERSATION_ARCHIVE_DIRECTORY: &str = ".cadmark/conversations";
 
 /// How often the script on disk is compared with the model on screen.
 pub const SCRIPT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
@@ -298,6 +299,14 @@ impl Project {
         }
     }
 
+    /// Archive the conversation before beginning a blank one. The script is
+    /// intentionally untouched: it remains the project's source of truth.
+    pub fn start_fresh_conversation(&mut self) -> Result<(), String> {
+        fresh_conversation(&self.dir, &mut self.conversation)?;
+        self.save_conversation();
+        Ok(())
+    }
+
     /// Remember the script's modification time so later edits on disk can
     /// be noticed.
     pub fn record_script_state(&mut self) {
@@ -332,6 +341,31 @@ fn load_conversation(dir: &Path) -> Conversation {
     }
 }
 
+fn archive_conversation(dir: &Path, conversation: &Conversation) -> Result<PathBuf, String> {
+    let archive_dir = dir.join(CONVERSATION_ARCHIVE_DIRECTORY);
+    std::fs::create_dir_all(&archive_dir)
+        .map_err(|error| format!("Could not create the conversation archive: {error}"))?;
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|error| format!("Could not name the conversation archive: {error}"))?
+        .as_nanos();
+    let path = archive_dir.join(format!("conversation-{timestamp}.json"));
+    let contents = serde_json::to_string(conversation)
+        .map_err(|error| format!("Could not archive the conversation: {error}"))?;
+    std::fs::write(&path, contents)
+        .map_err(|error| format!("Could not archive the conversation: {error}"))?;
+    Ok(path)
+}
+
+fn fresh_conversation(dir: &Path, conversation: &mut Conversation) -> Result<PathBuf, String> {
+    let archive = archive_conversation(dir, conversation)?;
+    *conversation = Conversation::new();
+    conversation.push(Message::notice(
+        "Started a new conversation. The earlier conversation is saved in .cadmark/conversations; part.py is unchanged.",
+    ));
+    Ok(archive)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +384,33 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(load_conversation(dir.path()).is_empty());
         assert!(load_conversation(&dir.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn fresh_conversation_archives_chat_without_touching_the_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join(SCRIPT_FILENAME);
+        std::fs::write(&script, "part = Box(10, 10, 10)").unwrap();
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("Keep the wall at 5 mm."));
+        let earlier = conversation.clone();
+
+        let archive = fresh_conversation(dir.path(), &mut conversation).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Conversation>(&std::fs::read_to_string(archive).unwrap())
+                .unwrap(),
+            earlier
+        );
+        assert_eq!(conversation.len(), 1);
+        assert!(
+            conversation.messages()[0]
+                .text
+                .contains("Started a new conversation")
+        );
+        assert_eq!(
+            std::fs::read_to_string(script).unwrap(),
+            "part = Box(10, 10, 10)"
+        );
     }
 }
