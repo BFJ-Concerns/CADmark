@@ -3,15 +3,27 @@
 // up.
 //
 // The convention is one element per square bracket, written the way the
-// grounding already names elements to the model — `[edge 12]`, `[face 3]`,
-// `[vertex 7]`. A bracket is what separates a reference from prose, so
-// "the top edge" in a sentence names nothing and lights nothing.
+// inventory names it — `[edge 12 @a3f091]`, where the trailing tag is the
+// execution that assigned the ID. A bracket is what separates a reference
+// from prose, so "the top edge" in a sentence names nothing and lights
+// nothing.
+//
+// The tag is what makes a stale ID harmless. IDs are reassigned by every
+// execution, so `edge 1` of one run is unrelated to `edge 1` of the next;
+// a reference resolves only when its tag is the tag of the execution
+// being resolved against, which no earlier run's tag ever is.
+//
+// Only faces and edges are referenceable. The renderer draws no vertex
+// geometry, so a vertex reference could be resolved but never seen, and a
+// highlight the user cannot see is worse than a name the model does not
+// have.
 //
 // Parsing fails closed at every step. A bracket whose contents are not
-// exactly a kind and a number is not a reference; a reference to an
-// element the resolving scope does not contain is dropped. Nothing here
-// ever widens a reference to its source line's other elements: a reply
-// about one edge highlights that edge alone.
+// exactly a kind, a number and (where the scope has one) a matching tag
+// is not a reference; a reference to an element the resolving scope does
+// not contain is dropped. Nothing here ever widens a reference to its
+// source line's other elements: a reply about one edge highlights that
+// edge alone.
 //
 // The other end of the convention is the inventory: the model can only
 // name an element whose ID it has seen, so `describe_elements` renders
@@ -24,6 +36,9 @@
 use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
 use cadmark_core::ledger::{LedgerValue, ProvenanceLedger};
 use cadmark_kernel::protocol::ExecutedModel;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Beyond this many elements the inventory drops per-element measurements
 /// and lists ID ranges only. A tool result rides in the model's context
@@ -36,24 +51,73 @@ const DETAIL_LIMIT: usize = 60;
 /// renderer's highlight set is bounded anyway.
 pub const MAX_REFERENCES: usize = 32;
 
+/// The identity of one execution, quoted alongside every ID that
+/// execution assigned. Tags are unique for the life of the process and
+/// start from a clock-derived base, so a tag from an earlier run — of
+/// this process or a previous one — does not match a later execution's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionTag(String);
+
+impl ExecutionTag {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ExecutionTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The tag for a fresh execution. Never returns the same value twice.
+pub fn next_execution_tag() -> ExecutionTag {
+    static COUNTER: OnceLock<AtomicU64> = OnceLock::new();
+    let counter = COUNTER.get_or_init(|| {
+        let base = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|since| since.as_nanos() as u64)
+            .unwrap_or_default();
+        AtomicU64::new(base & 0xff_ffff)
+    });
+    ExecutionTag(format!("{:06x}", counter.fetch_add(1, Ordering::Relaxed)))
+}
+
 /// What a reference is allowed to resolve against. Provenance is rebuilt
 /// by every execution and never persisted, so a reference resolves only
-/// against a ledger this turn produced, or against the elements the user
-/// pointed at in this turn's own comments. An ID quoted from an earlier
-/// turn has no scope to resolve in and highlights nothing.
+/// against the ledger of the execution whose tag it quotes, or against
+/// the elements the user pointed at in this turn's own comments. An ID
+/// quoted from any other execution highlights nothing.
 pub enum ReferenceScope<'a> {
-    /// A script executed in this turn: any element of its ledger.
-    Model(&'a ExecutedModel),
+    /// A script executed in this turn: an element of its ledger, named
+    /// with the tag that execution was given.
+    Model {
+        model: &'a ExecutedModel,
+        tag: &'a ExecutionTag,
+    },
     /// Nothing executed this turn: only the elements the user's comments
-    /// anchored, which came from the model on screen.
+    /// anchored, which came from the model on screen and carry no tag.
     Anchors(&'a [TopologyElement]),
 }
 
+/// One well-formed bracket: the element named, and the execution tag it
+/// was named with, if any.
+#[derive(Debug, PartialEq)]
+struct Reference {
+    element: TopologyElement,
+    tag: Option<String>,
+}
+
 impl ReferenceScope<'_> {
-    fn contains(&self, element: &TopologyElement) -> bool {
+    fn contains(&self, reference: &Reference) -> bool {
         match self {
-            Self::Model(model) => in_ledger(&model.ledger, element),
-            Self::Anchors(anchors) => anchors.contains(element),
+            Self::Model { model, tag } => {
+                reference.tag.as_deref() == Some(tag.as_str())
+                    && in_ledger(&model.ledger, &reference.element)
+            }
+            Self::Anchors(anchors) => {
+                reference.tag.is_none() && anchors.contains(&reference.element)
+            }
         }
     }
 }
@@ -62,7 +126,8 @@ fn in_ledger(ledger: &ProvenanceLedger, element: &TopologyElement) -> bool {
     match element {
         TopologyElement::Face(id) => ledger.lookup_face(*id).is_some(),
         TopologyElement::Edge(id) => ledger.lookup_edge(*id).is_some(),
-        TopologyElement::Vertex(id) => ledger.lookup_vertex(*id).is_some(),
+        // Nothing draws vertices, so none is referenceable.
+        TopologyElement::Vertex(_) => false,
     }
 }
 
@@ -72,11 +137,11 @@ fn in_ledger(ledger: &ProvenanceLedger, element: &TopologyElement) -> bool {
 /// contain.
 pub fn resolve_references(reply: &str, scope: &ReferenceScope<'_>) -> Vec<TopologyElement> {
     let mut resolved: Vec<TopologyElement> = Vec::new();
-    for element in parse_references(reply) {
-        if !scope.contains(&element) || resolved.contains(&element) {
+    for reference in parse_references(reply) {
+        if !scope.contains(&reference) || resolved.contains(&reference.element) {
             continue;
         }
-        resolved.push(element);
+        resolved.push(reference.element);
         if resolved.len() == MAX_REFERENCES {
             break;
         }
@@ -86,7 +151,7 @@ pub fn resolve_references(reply: &str, scope: &ReferenceScope<'_>) -> Vec<Topolo
 
 /// Every well-formed reference in `reply`, in order, before any check
 /// that the elements exist.
-fn parse_references(reply: &str) -> Vec<TopologyElement> {
+fn parse_references(reply: &str) -> Vec<Reference> {
     let mut references = Vec::new();
     let bytes = reply.as_bytes();
     let mut start = 0;
@@ -104,34 +169,46 @@ fn parse_references(reply: &str) -> Vec<TopologyElement> {
     references
 }
 
-/// One bracket's contents as an element, or None when it is anything but
-/// a kind and a number.
-fn parse_reference(inner: &str) -> Option<TopologyElement> {
-    let (kind, id) = inner.trim().split_once(char::is_whitespace)?;
-    let id: u32 = id.trim().parse().ok()?;
-    match kind.trim().to_ascii_lowercase().as_str() {
-        "face" => Some(TopologyElement::Face(FaceId(id))),
-        "edge" => Some(TopologyElement::Edge(EdgeId(id))),
-        "vertex" => Some(TopologyElement::Vertex(VertexId(id))),
-        _ => None,
+/// One bracket's contents as a reference, or None when it is anything
+/// but a kind, a number and an optional `@tag`.
+fn parse_reference(inner: &str) -> Option<Reference> {
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    let (kind, id, tag) = match parts.as_slice() {
+        [kind, id] => (*kind, *id, None),
+        [kind, id, tag] => (*kind, *id, Some(tag.strip_prefix('@')?.to_string())),
+        _ => return None,
+    };
+    if tag.as_ref().is_some_and(|tag| tag.is_empty()) {
+        return None;
     }
+    let id: u32 = id.parse().ok()?;
+    let element = match kind.to_ascii_lowercase().as_str() {
+        "face" => TopologyElement::Face(FaceId(id)),
+        "edge" => TopologyElement::Edge(EdgeId(id)),
+        _ => return None,
+    };
+    Some(Reference { element, tag })
 }
 
 /// The elements of `model` as the AI reads them in a tool result: what it
 /// may reference, and enough about each to tell them apart.
-pub fn describe_elements(model: &ExecutedModel) -> String {
+pub fn describe_elements(model: &ExecutedModel, tag: &ExecutionTag) -> String {
     let ledger = &model.ledger;
-    let total = ledger.len();
+    let elements = elements_in_order(ledger);
+    let total = elements.len();
     if total == 0 {
         return String::new();
     }
 
-    let mut text = String::from("\nElements of this model you can reference in your reply");
+    let mut text = format!(
+        "\nElements of this model you can reference in your reply, named with \
+         this run's tag @{tag}"
+    );
     if total <= DETAIL_LIMIT {
         text.push_str(", with the measurement that tells them apart:\n");
-        for element in elements_in_order(ledger) {
+        for element in elements {
             text.push_str(&format!(
-                "- [{}]: {}{}\n",
+                "- [{} @{tag}]: {}{}\n",
                 element.display_label(),
                 source_of(ledger, &element),
                 measurement_of(model, &element)
@@ -142,27 +219,27 @@ pub fn describe_elements(model: &ExecutedModel) -> String {
         for (source, elements) in grouped_by_source(ledger) {
             text.push_str(&format!("- {source}: {}\n", ranges_of(&elements)));
         }
-        text.push_str(
-            "Ask for a render, or work from the user's own selections, when you need to \
-             tell two elements of one operation apart.\n",
-        );
+        text.push_str(&format!(
+            "Write any of them as [edge 12 @{tag}]. Ask for a render, or work from the \
+             user's own selections, when you need to tell two elements of one operation \
+             apart.\n"
+        ));
     }
     text
 }
 
-/// Faces, then edges, then vertices, each in ID order.
+/// Faces then edges, each in ID order. Vertices are left out: nothing
+/// draws them, so naming one to the model would promise a highlight the
+/// viewport cannot show.
 fn elements_in_order(ledger: &ProvenanceLedger) -> Vec<TopologyElement> {
     let mut faces: Vec<_> = ledger.face_ids().collect();
     faces.sort_by_key(|id| id.0);
     let mut edges: Vec<_> = ledger.edge_ids().collect();
     edges.sort_by_key(|id| id.0);
-    let mut vertices: Vec<_> = ledger.vertex_ids().collect();
-    vertices.sort_by_key(|id| id.0);
     faces
         .into_iter()
         .map(TopologyElement::Face)
         .chain(edges.into_iter().map(TopologyElement::Edge))
-        .chain(vertices.into_iter().map(TopologyElement::Vertex))
         .collect()
 }
 
@@ -364,20 +441,66 @@ mod tests {
     #[test]
     fn a_reference_resolves_to_that_element_alone() {
         let model = filleted_model();
-        let scope = ReferenceScope::Model(&model);
+        let tag = next_execution_tag();
+        let scope = ReferenceScope::Model {
+            model: &model,
+            tag: &tag,
+        };
         assert_eq!(
-            resolve_references("I rounded [edge 4] only.", &scope),
+            resolve_references(&format!("I rounded [edge 4 @{tag}] only."), &scope),
             vec![TopologyElement::Edge(EdgeId(4))]
         );
     }
 
     #[test]
+    fn a_reference_tagged_with_another_execution_resolves_to_nothing() {
+        let model = filleted_model();
+        let earlier = next_execution_tag();
+        let current = next_execution_tag();
+        let scope = ReferenceScope::Model {
+            model: &model,
+            tag: &current,
+        };
+        // The same ID, valid in both runs, quoted from the earlier one.
+        assert!(resolve_references(&format!("I rounded [edge 4 @{earlier}]."), &scope).is_empty());
+        // And an untagged name, which no inventory ever offered.
+        assert!(resolve_references("I rounded [edge 4].", &scope).is_empty());
+    }
+
+    #[test]
+    fn every_execution_is_tagged_differently() {
+        assert_ne!(next_execution_tag(), next_execution_tag());
+    }
+
+    #[test]
+    fn a_vertex_is_neither_offered_nor_resolvable() {
+        let mut model = filleted_model();
+        model
+            .ledger
+            .record_vertex(VertexId(0), made_at(6, SemanticOperation::Box))
+            .unwrap();
+        let tag = next_execution_tag();
+        let scope = ReferenceScope::Model {
+            model: &model,
+            tag: &tag,
+        };
+        assert!(resolve_references(&format!("[vertex 0 @{tag}]"), &scope).is_empty());
+        assert!(!describe_elements(&model, &tag).contains("vertex"));
+    }
+
+    #[test]
     fn prose_naming_geometry_without_the_convention_references_nothing() {
         let model = filleted_model();
-        let scope = ReferenceScope::Model(&model);
+        let tag = next_execution_tag();
+        let scope = ReferenceScope::Model {
+            model: &model,
+            tag: &tag,
+        };
         assert!(
             resolve_references(
-                "I filleted the top edge of the box and the face beside it (edge 4).",
+                &format!(
+                    "I filleted the top edge of the box and the face beside it (edge 4 @{tag})."
+                ),
                 &scope
             )
             .is_empty()
@@ -387,18 +510,25 @@ mod tests {
     #[test]
     fn a_malformed_or_unknown_bracket_references_nothing() {
         let model = filleted_model();
-        let scope = ReferenceScope::Model(&model);
+        let tag = next_execution_tag();
+        let scope = ReferenceScope::Model {
+            model: &model,
+            tag: &tag,
+        };
         for reply in [
-            "[the top edge]",
-            "[edge]",
-            "[edge four]",
-            "[edges 4]",
-            "[edge 4 and edge 5]",
-            "[loop 4]",
-            "see [the docs](https://example.com/edge 4)",
+            "[the top edge]".to_string(),
+            "[edge]".to_string(),
+            format!("[edge @{tag}]"),
+            format!("[edge four @{tag}]"),
+            format!("[edges 4 @{tag}]"),
+            format!("[edge 4 and edge 5 @{tag}]"),
+            format!("[loop 4 @{tag}]"),
+            format!("[edge 4 {tag}]"),
+            "[edge 4 @]".to_string(),
+            format!("see [the docs](https://example.com/edge 4 @{tag})"),
         ] {
             assert!(
-                resolve_references(reply, &scope).is_empty(),
+                resolve_references(&reply, &scope).is_empty(),
                 "{reply} should reference nothing"
             );
         }
@@ -407,17 +537,28 @@ mod tests {
     #[test]
     fn a_reference_the_model_does_not_contain_is_dropped() {
         let model = filleted_model();
-        let scope = ReferenceScope::Model(&model);
-        assert!(resolve_references("I changed [edge 99].", &scope).is_empty());
-        assert!(resolve_references("I changed [vertex 0].", &scope).is_empty());
+        let tag = next_execution_tag();
+        let scope = ReferenceScope::Model {
+            model: &model,
+            tag: &tag,
+        };
+        assert!(resolve_references(&format!("I changed [edge 99 @{tag}]."), &scope).is_empty());
+        assert!(resolve_references(&format!("I changed [face 9 @{tag}]."), &scope).is_empty());
     }
 
     #[test]
     fn several_references_resolve_in_order_without_repeats() {
         let model = filleted_model();
-        let scope = ReferenceScope::Model(&model);
+        let tag = next_execution_tag();
+        let scope = ReferenceScope::Model {
+            model: &model,
+            tag: &tag,
+        };
         assert_eq!(
-            resolve_references("[edge 5], [face 0] and [edge 5] again.", &scope),
+            resolve_references(
+                &format!("[edge 5 @{tag}], [face 0 @{tag}] and [edge 5 @{tag}] again."),
+                &scope
+            ),
             vec![
                 TopologyElement::Edge(EdgeId(5)),
                 TopologyElement::Face(FaceId(0)),
@@ -434,11 +575,19 @@ mod tests {
                 .record_edge(EdgeId(id), made_at(6, SemanticOperation::Box))
                 .unwrap();
         }
+        let tag = next_execution_tag();
         let reply: String = (0..(MAX_REFERENCES as u32 + 10))
-            .map(|id| format!("[edge {id}] "))
+            .map(|id| format!("[edge {id} @{tag}] "))
             .collect();
         assert_eq!(
-            resolve_references(&reply, &ReferenceScope::Model(&model)).len(),
+            resolve_references(
+                &reply,
+                &ReferenceScope::Model {
+                    model: &model,
+                    tag: &tag
+                }
+            )
+            .len(),
             MAX_REFERENCES
         );
     }
@@ -455,17 +604,24 @@ mod tests {
 
     #[test]
     fn the_inventory_names_every_element_with_its_source_and_measurement() {
-        let text = describe_elements(&filleted_model());
-        assert!(text.contains("- [face 0]: created by box at line 6, plane face, area 100 mm²"));
-        assert!(text.contains("- [edge 4]: created by fillet at line 8, line edge, length 14 mm"));
-        assert!(text.contains("- [edge 5]: created by fillet at line 8, line edge, length 15 mm"));
+        let tag = next_execution_tag();
+        let text = describe_elements(&filleted_model(), &tag);
+        assert!(text.contains(&format!(
+            "- [face 0 @{tag}]: created by box at line 6, plane face, area 100 mm²"
+        )));
+        assert!(text.contains(&format!(
+            "- [edge 4 @{tag}]: created by fillet at line 8, line edge, length 14 mm"
+        )));
+        assert!(text.contains(&format!(
+            "- [edge 5 @{tag}]: created by fillet at line 8, line edge, length 15 mm"
+        )));
         // Each element is named singly, so the model can pick one of a line's several.
         assert_eq!(text.matches("- [edge ").count(), 6);
     }
 
     #[test]
     fn a_model_with_no_elements_has_no_inventory() {
-        assert_eq!(describe_elements(&empty_model()), "");
+        assert_eq!(describe_elements(&empty_model(), &next_execution_tag()), "");
     }
 
     #[test]
@@ -483,7 +639,9 @@ mod tests {
                 .record_edge(EdgeId(id), made_at(line, operation))
                 .unwrap();
         }
-        let text = describe_elements(&model);
+        let tag = next_execution_tag();
+        let text = describe_elements(&model, &tag);
+        assert!(text.contains(&format!("[edge 12 @{tag}]")));
         assert!(text.contains("- created by box at line 6: edges 0–39"));
         assert!(text.contains("- created by fillet at line 8: edges 40–79"));
         assert!(!text.contains("- [edge 0]"));
