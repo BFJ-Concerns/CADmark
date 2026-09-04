@@ -131,7 +131,6 @@ pub fn resolve_context(
         identification,
         source_context: String::new(),
         neighbours,
-        chosen_candidate: None,
     })
 }
 

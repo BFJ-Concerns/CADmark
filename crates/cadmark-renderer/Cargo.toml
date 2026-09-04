@@ -10,8 +10,3 @@ bytemuck = { workspace = true }
 pollster = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-# Already in the lockfile as wgpu's own shader front end; used here to
-# compile the shaders and read back their uniform layout without a GPU.
-naga = { version = "24.0.0", features = ["wgsl-in"] }
