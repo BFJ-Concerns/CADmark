@@ -459,4 +459,153 @@ mod tests {
         };
         assert!(context_summary(&context).starts_with("face 0: no source line"));
     }
+
+    /// Lay the candidate rows out with the pointer at `pointer`, returning
+    /// which candidate the overlay published as hovered.
+    fn hover_at(
+        ctx: &egui::Context,
+        anchors: &mut [GeometryContext],
+        pointer: egui::Pos2,
+    ) -> Option<ProvenanceEntry> {
+        let mut hovered = None;
+        for _ in 0..2 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(pointer));
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    super::show_candidate_choices(ui, anchors, &mut hovered);
+                });
+            });
+        }
+        hovered
+    }
+
+    /// The first pointer y at which each candidate's row is hovered, so the
+    /// interaction tests do not depend on egui's exact row metrics.
+    fn row_positions(
+        ctx: &egui::Context,
+        anchors: &mut [GeometryContext],
+        candidates: &[ProvenanceEntry],
+    ) -> Vec<egui::Pos2> {
+        candidates
+            .iter()
+            .map(|candidate| {
+                (0..600)
+                    .map(|y| egui::pos2(20.0, y as f32))
+                    .find(|pointer| hover_at(ctx, anchors, *pointer).as_ref() == Some(candidate))
+                    .unwrap_or_else(|| {
+                        panic!("no row of the overlay publishes {candidate:?} on hover")
+                    })
+            })
+            .collect()
+    }
+
+    fn click_at(ctx: &egui::Context, anchors: &mut [GeometryContext], pointer: egui::Pos2) {
+        let mut hovered = None;
+        for pressed in [true, false] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(pointer));
+            input.events.push(egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    super::show_candidate_choices(ui, anchors, &mut hovered);
+                });
+            });
+        }
+    }
+
+    fn ambiguous_anchor() -> (GeometryContext, Vec<ProvenanceEntry>) {
+        let candidate =
+            |line: u32, operation_id: u64, relation: ProvenanceRelation| ProvenanceEntry {
+                source: SourceRef {
+                    line,
+                    code: format!("line {line}"),
+                },
+                operation: SemanticOperation::Box,
+                operation_id,
+                relation,
+            };
+        let candidates = vec![
+            candidate(2, 1, ProvenanceRelation::Generated),
+            candidate(7, 2, ProvenanceRelation::GeneratedDescendant),
+        ];
+        (
+            GeometryContext {
+                element: TopologyElement::Face(FaceId(2)),
+                provenance: LedgerValue::Ambiguous(candidates.clone()),
+                identification: Default::default(),
+                chosen_candidate: None,
+            },
+            candidates,
+        )
+    }
+
+    #[test]
+    fn hovering_a_candidate_row_publishes_that_candidate_and_no_other() {
+        let ctx = egui::Context::default();
+        let (context, candidates) = ambiguous_anchor();
+        let mut anchors = vec![context];
+
+        let rows = row_positions(&ctx, &mut anchors, &candidates);
+
+        // Distinct rows, so the viewport and code panel can show one
+        // candidate's origin at a time rather than a merged set.
+        assert_ne!(rows[0], rows[1]);
+        assert_eq!(
+            hover_at(&ctx, &mut anchors, rows[0]).as_ref(),
+            Some(&candidates[0])
+        );
+        assert_eq!(
+            hover_at(&ctx, &mut anchors, rows[1]).as_ref(),
+            Some(&candidates[1])
+        );
+        assert_eq!(
+            hover_at(&ctx, &mut anchors, egui::pos2(20.0, 590.0)),
+            None,
+            "the pointer away from every row must publish no candidate"
+        );
+    }
+
+    #[test]
+    fn choosing_a_candidate_sets_the_anchor_choice_and_choosing_it_again_clears_it() {
+        let ctx = egui::Context::default();
+        let (context, candidates) = ambiguous_anchor();
+        let mut anchors = vec![context];
+
+        let rows = row_positions(&ctx, &mut anchors, &candidates);
+        assert_eq!(anchors[0].chosen_candidate, None);
+
+        click_at(&ctx, &mut anchors, rows[1]);
+        assert_eq!(
+            anchors[0].chosen_candidate.as_ref(),
+            Some(&candidates[1]),
+            "clicking a row must record it as the line to send alone"
+        );
+
+        click_at(&ctx, &mut anchors, rows[0]);
+        assert_eq!(anchors[0].chosen_candidate.as_ref(), Some(&candidates[0]));
+
+        click_at(&ctx, &mut anchors, rows[0]);
+        assert_eq!(
+            anchors[0].chosen_candidate, None,
+            "clicking the chosen row again must return to sending every candidate"
+        );
+    }
 }
