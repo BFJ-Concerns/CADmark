@@ -56,6 +56,29 @@ pub enum SemanticOperation {
 }
 
 impl SemanticOperation {
+    /// Every operation the provenance instrumenter currently reports.
+    pub const ALL: [Self; 19] = [
+        Self::Box,
+        Self::Cylinder,
+        Self::Sphere,
+        Self::Cone,
+        Self::Torus,
+        Self::Wedge,
+        Self::Extrude,
+        Self::Revolve,
+        Self::Loft,
+        Self::Sweep,
+        Self::Thicken,
+        Self::Shell,
+        Self::Draft,
+        Self::Split,
+        Self::BooleanFuse,
+        Self::BooleanCut,
+        Self::BooleanCommon,
+        Self::Fillet,
+        Self::Chamfer,
+    ];
+
     /// Plain-language name for people reading the chat pane or overlay.
     pub fn display_name(self) -> &'static str {
         match self {
