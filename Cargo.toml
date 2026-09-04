@@ -48,7 +48,6 @@ pollster = "0.4"
 # UI
 egui = "0.31"
 eframe = { version = "0.31", features = ["wgpu"] }
-image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg"] }
 
 # Logging
 log = "0.4"

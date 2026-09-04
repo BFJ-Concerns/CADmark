@@ -18,8 +18,13 @@ All notable changes to this project will be documented in this file.
   that operation looks like as well as what the API does
 - Per-part solid-validity status after execution; exports now stop with a
   non-blocking warning before writing an open or invalid part
-- Project reference-image attachments with chat thumbnails; supported image models
-  receive them as image inputs on every turn
+- The AI can look at the model it just built: it renders the current
+  shape offscreen — shaded, with edges, framed to the model, at the
+  viewport's own resolution — from any standard view or your current
+  camera, without disturbing what you see, including the model it built
+  moments earlier in the same reply
+- A model that cannot read images is told plainly that the render
+  tool is unavailable, rather than left to infer its absence
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally

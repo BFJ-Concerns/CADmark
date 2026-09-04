@@ -125,9 +125,29 @@ pub fn tools_for(accepts_images: bool) -> Vec<ToolSpec> {
     tools
 }
 
+/// What a model is told about a tool it is not being offered. A model
+/// that cannot read images would otherwise have to infer the render
+/// tool's absence from a list it never sees in full, so the instructions
+/// say it plainly instead.
+pub fn unavailable_tools_note(accepts_images: bool) -> Option<&'static str> {
+    (!accepts_images).then_some(
+        "The `render_view` tool is unavailable in this session: the model in use cannot read \
+         images. Judge the result from the measurements and validity the run reports, and say \
+         so when you cannot check it by eye.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_model_that_cannot_see_is_told_the_render_tool_is_unavailable() {
+        let note = unavailable_tools_note(false).expect("a text-only model is told");
+        assert!(note.contains(RENDER_VIEW));
+        assert!(note.contains("unavailable"));
+        assert!(unavailable_tools_note(true).is_none());
+    }
 
     #[test]
     fn tool_arguments_parse_from_the_models_json() {

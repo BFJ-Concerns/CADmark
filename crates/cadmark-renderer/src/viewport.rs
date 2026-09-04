@@ -16,10 +16,30 @@ pub fn render_scene(
     mesh: Option<&GpuMesh>,
     clear_colour: wgpu::Color,
 ) {
+    render_scene_into(
+        encoder,
+        pipelines,
+        mesh,
+        clear_colour,
+        &pipelines.viewport_colour_view,
+    );
+}
+
+/// The same scene drawn into a caller-chosen colour target, so a target
+/// that is read back rather than blitted to the screen goes through this
+/// one pass description. `colour_target` must match the pipelines'
+/// surface format and the size their depth texture was built for.
+pub fn render_scene_into(
+    encoder: &mut wgpu::CommandEncoder,
+    pipelines: &RenderPipelines,
+    mesh: Option<&GpuMesh>,
+    clear_colour: wgpu::Color,
+    colour_target: &wgpu::TextureView,
+) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("viewport_main_pass"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: &pipelines.viewport_colour_view,
+            view: colour_target,
             resolve_target: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(clear_colour),

@@ -22,9 +22,6 @@ use cadmark_renderer::pipeline::Renderer;
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
-use cadmark_ui::reference_images::{
-    ReferenceImageView, ReferenceImagesAction, ReferenceImagesPanel,
-};
 use cadmark_ui::settings_dialog::{SettingsAction, SettingsDialog, SettingsForm};
 use cadmark_ui::status::{Status, StatusView};
 use cadmark_ui::toolbar::{self, ToolbarAction, ToolbarState};
@@ -33,7 +30,11 @@ use cadmark_ui::view_gizmo::GizmoAction;
 
 use crate::orchestrator::OrchestratorResult;
 use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
-use crate::turn::{TurnEvent, TurnInput, TurnOutcome, context_usage};
+use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
+use crate::turn::{
+    NoRender, RenderSource, TurnEvent, TurnInput, TurnOutcome, context_usage,
+    reference_image_count, reference_images,
+};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::validity::{describe_validity, export_decision, export_warning};
 use crate::viewport::{
@@ -147,7 +148,6 @@ pub struct CadmarkApp {
     settings: UserSettings,
     settings_store: Option<SettingsStore>,
     chat: ChatPane,
-    reference_images: ReferenceImagesPanel,
     overlay: OverlayState,
     renderer: Renderer,
     selection: SelectionState,
@@ -161,10 +161,6 @@ pub struct CadmarkApp {
     settings_dialog: SettingsDialog,
     /// A folder picker running on its own thread reports here.
     folder_pick_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// A reference-image picker running on its own thread reports here.
-    reference_image_pick_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
-    /// Avoid repeating the same availability notice for every turn.
-    reference_images_unavailable_noted: bool,
     /// Bounds to frame once the viewport aspect ratio is known.
     pending_camera_bounds: Option<Bounds3>,
     /// Local click coordinates (relative to viewport rect) for the
@@ -185,6 +181,9 @@ pub struct CadmarkApp {
     /// Whether a mesh has been uploaded to the GPU.
     has_mesh: bool,
     wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
+    /// What the worker thread renders for the AI: the mesh, camera and
+    /// viewport size this thread last showed.
+    scene: SceneHandle,
     /// Last outcome — shown on the viewport and in the status bar.
     status: Option<Status>,
     turn: Option<TurnRecord>,
@@ -214,10 +213,12 @@ impl CadmarkApp {
             rs.renderer.write().callback_resources.insert(resources);
         }
 
+        let scene = SceneHandle::new();
         let project = Project::open(
             project_dir,
             ai_services(&settings, settings_store.as_ref()),
             settings.limits,
+            render_source(&scene, wgpu_render_state.as_ref()),
         );
 
         let mut app = Self {
@@ -225,7 +226,6 @@ impl CadmarkApp {
             settings,
             settings_store,
             chat: ChatPane::new(),
-            reference_images: cadmark_ui::reference_images::ReferenceImagesPanel::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::new(),
             selection: SelectionState::None,
@@ -236,8 +236,6 @@ impl CadmarkApp {
             version_dialog: VersionDialog::default(),
             settings_dialog: SettingsDialog::default(),
             folder_pick_rx: None,
-            reference_image_pick_rx: None,
-            reference_images_unavailable_noted: false,
             pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
@@ -245,6 +243,7 @@ impl CadmarkApp {
             last_hover_probe: None,
             has_mesh: false,
             wgpu_render_state,
+            scene,
             status,
             turn: None,
         };
@@ -289,10 +288,10 @@ impl CadmarkApp {
             project_dir,
             ai_services(&self.settings, self.settings_store.as_ref()),
             self.settings.limits,
+            render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
         self.chat = ChatPane::new();
         self.chat.ai_available = self.project.ai_model.is_some();
-        self.reference_images_unavailable_noted = false;
         self.status = None;
         self.turn = None;
         self.clear_loaded_model();
@@ -328,79 +327,17 @@ impl CadmarkApp {
         self.folder_pick_rx = Some(rx);
     }
 
-    /// Show the system image picker without pausing the frame loop.
-    fn pick_reference_image(&mut self) {
-        if self.reference_image_pick_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("cadmark-reference-image-picker".into())
-            .spawn(move || {
-                let choice = rfd::FileDialog::new()
-                    .set_title("Attach a reference image")
-                    .add_filter("Images", &["png", "jpg", "jpeg"])
-                    .pick_file();
-                let _ = tx.send(choice);
-            })
-            .expect("failed to spawn the reference-image picker thread");
-        self.reference_image_pick_rx = Some(rx);
-    }
-
-    fn poll_reference_image_picker(&mut self) {
-        let Some(rx) = &self.reference_image_pick_rx else {
-            return;
-        };
-        match rx.try_recv() {
-            Ok(Some(path)) => {
-                self.reference_image_pick_rx = None;
-                match self.project.attach_reference_image(&path) {
-                    Ok(name) => {
-                        self.status = Some(Status::info(format!("Attached reference image {name}")))
-                    }
-                    Err(error) => self.status = Some(Status::error(error)),
-                }
-            }
-            Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
-                self.reference_image_pick_rx = None;
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
-        }
-    }
-
     // ── Turns ─────────────────────────────────────────────────────
-
-    /// Load reference images for a turn, making a text-only model's limit
-    /// explicit in the chat rather than quietly sending an unsupported input.
-    fn reference_images_for_turn(&mut self) -> Vec<cadmark_bridge::backend::ImageData> {
-        let images: Vec<_> = self
-            .project
-            .reference_images
-            .iter()
-            .map(|image| image.data.clone())
-            .collect();
-        if images.is_empty() || self.project.ai_accepts_images {
-            return images;
-        }
-        if !self.reference_images_unavailable_noted {
-            self.project.conversation.push(Message::notice(
-                "Reference images are attached but unavailable to the configured text-only model.",
-            ));
-            self.reference_images_unavailable_noted = true;
-        }
-        Vec::new()
-    }
 
     /// Send a chat message: one turn with this text and no anchors.
     fn send_chat_message(&mut self, text: String) {
         let history = self.project.conversation.clone();
         self.project.conversation.push(Message::user_chat(&text));
-        let images = self.reference_images_for_turn();
         self.start_turn(
             TurnInput {
                 chat: Some(text),
                 comments: Vec::new(),
-                images,
+                images: reference_images(&self.project.dir),
                 context_window_tokens: self.settings.context_window_tokens,
             },
             history,
@@ -415,12 +352,11 @@ impl CadmarkApp {
             .project
             .conversation
             .push(Message::spatial_comment(&text, anchors.clone()));
-        let images = self.reference_images_for_turn();
         self.start_turn(
             TurnInput {
                 chat: None,
                 comments: vec![GroundedComment { text, anchors }],
-                images,
+                images: reference_images(&self.project.dir),
                 context_window_tokens: self.settings.context_window_tokens,
             },
             history,
@@ -699,7 +635,10 @@ impl CadmarkApp {
         self.has_mesh = true;
         // A new mesh under a resting cursor must be picked afresh.
         self.last_hover_probe = None;
-        if let Some(bounds) = self.project.install_model(model, source) {
+        let mesh = std::sync::Arc::new(model.mesh.clone());
+        let bounds = self.project.install_model(model, source);
+        self.scene.set_mesh(Some((mesh, bounds)));
+        if let Some(bounds) = bounds {
             self.pending_camera_bounds = Some(bounds);
         }
     }
@@ -718,6 +657,7 @@ impl CadmarkApp {
     fn clear_loaded_model(&mut self) {
         self.pending_camera_bounds = None;
         self.project.clear_model();
+        self.scene.set_mesh(None);
         self.has_mesh = false;
         self.pending_pick = None;
         self.pick_in_flight = None;
@@ -1130,8 +1070,6 @@ impl CadmarkApp {
 
     fn show_chat(&mut self, ctx: &egui::Context) {
         let mut action = ChatAction::None;
-        let mut reference_action = ReferenceImagesAction::None;
-        let reference_images = reference_image_views(&self.project);
         egui::SidePanel::right("chat_panel")
             .resizable(true)
             .default_width(380.0)
@@ -1141,8 +1079,6 @@ impl CadmarkApp {
                     .inner_margin(egui::Margin::symmetric(10, 8)),
             )
             .show(ctx, |ui| {
-                reference_action = self.reference_images.show(ui, &reference_images);
-                ui.separator();
                 self.chat.activity = match &self.project.busy {
                     None => ChatActivity::Idle,
                     Some(Busy::Building) => ChatActivity::Building,
@@ -1159,7 +1095,7 @@ impl CadmarkApp {
                 };
                 let usage = context_usage(
                     &self.project.conversation,
-                    self.project.reference_images.len(),
+                    reference_image_count(&self.project.dir),
                     self.settings.context_window_tokens,
                 );
                 action = self.chat.show(ui, &self.project.conversation, usage);
@@ -1168,9 +1104,6 @@ impl CadmarkApp {
             ChatAction::Send(text) => self.send_chat_message(text),
             ChatAction::Cancel => self.project.cancel_turn(),
             ChatAction::None => {}
-        }
-        if reference_action == ReferenceImagesAction::Attach {
-            self.pick_reference_image();
         }
     }
 
@@ -1268,6 +1201,10 @@ impl CadmarkApp {
             if let Some(bounds) = self.pending_camera_bounds.take() {
                 self.renderer.camera.frame_bounds(bounds, aspect);
             }
+            // What the AI is shown when it asks for a render: this
+            // thread's camera and viewport size, never its GPU target.
+            self.scene
+                .set_view(self.renderer.camera.clone(), viewport_size);
 
             let to_pixels = |local: egui::Vec2| ((local.x * ppp) as u32, (local.y * ppp) as u32);
             let pick_request = self
@@ -1394,6 +1331,25 @@ fn standard_view(view: toolbar::StandardView) -> StandardView {
 }
 
 /// Construct the AI services from the user's settings, or say why not.
+/// What answers the AI's render tool for one project: the viewport's
+/// offscreen renderer where there is a GPU to render with, and the
+/// stand-in that says so honestly where there is not.
+fn render_source(
+    scene: &SceneHandle,
+    render_state: Option<&eframe::egui_wgpu::RenderState>,
+) -> Box<dyn RenderSource> {
+    match render_state {
+        Some(state) => Box::new(ViewportRender::new(
+            scene.clone(),
+            RenderGpu {
+                device: state.device.clone(),
+                queue: state.queue.clone(),
+            },
+        )),
+        None => Box::new(NoRender),
+    }
+}
+
 fn ai_services(
     settings: &UserSettings,
     store: Option<&SettingsStore>,
@@ -1406,23 +1362,9 @@ fn ai_services(
     cadmark_bridge::build_ai_services(ai, credential).map_err(|error| error.to_string())
 }
 
-/// Borrow project-cached images for the UI without touching the filesystem.
-fn reference_image_views(project: &Project) -> Vec<ReferenceImageView<'_>> {
-    project
-        .reference_images
-        .iter()
-        .map(|image| ReferenceImageView {
-            id: format!("{}:{}", project.dir.display(), image.name),
-            name: &image.name,
-            bytes: &image.data.bytes,
-        })
-        .collect()
-}
-
 impl eframe::App for CadmarkApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_results(ctx);
-        self.poll_reference_image_picker();
         self.project.watch_script();
         self.consume_pick_result();
 
@@ -1432,7 +1374,6 @@ impl eframe::App for CadmarkApp {
             || self.project.measurements_in_flight > 0
             || self.pick_in_flight.is_some()
             || self.folder_pick_rx.is_some()
-            || self.reference_image_pick_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -1486,9 +1427,9 @@ mod tests {
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        CadmarkApp, ChatPane, CodePanel, OverlayState, Project, Renderer, SettingsDialog,
-        SettingsStore, TurnOutcome, TurnRecord, UserSettings, VersionDialog, ai_services,
-        measurement_pair, measurement_readout, record_tool_start, turn_chat_message,
+        CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, Project, Renderer, SceneHandle,
+        SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings, VersionDialog,
+        ai_services, measurement_pair, measurement_readout, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -1622,6 +1563,7 @@ mod tests {
             project_dir,
             Err("test provider is injected directly".to_string()),
             ExecutionLimits::default(),
+            Box::new(NoRender),
         );
         let response = project.conversation.push(Message::ai_response(""));
         CadmarkApp {
@@ -1629,7 +1571,6 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
-            reference_images: cadmark_ui::reference_images::ReferenceImagesPanel::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::default(),
             selection: SelectionState::None,
@@ -1640,8 +1581,6 @@ mod tests {
             version_dialog: VersionDialog::default(),
             settings_dialog: SettingsDialog::default(),
             folder_pick_rx: None,
-            reference_image_pick_rx: None,
-            reference_images_unavailable_noted: false,
             pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
@@ -1649,6 +1588,7 @@ mod tests {
             last_hover_probe: None,
             has_mesh: false,
             wgpu_render_state: None,
+            scene: SceneHandle::new(),
             status: None,
             turn: Some(TurnRecord {
                 response,
