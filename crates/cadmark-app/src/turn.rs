@@ -20,6 +20,7 @@ use cadmark_bridge::SYSTEM_PROMPT;
 use cadmark_bridge::backend::{
     BackendError, ImageData, ModelItem, ModelRequest, StreamDelta, ToolCall, TurnModel,
 };
+use cadmark_bridge::examples;
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
 use cadmark_bridge::tools::{
     LOOKUP_DOCS, LookupDocsArgs, RENDER_VIEW, RUN_SCRIPT, RenderView, RenderViewArgs,
@@ -151,8 +152,16 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
     ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
         let mut items = history_items(conversation);
+        let request = render_input(input);
+        // The curated example library for the operations this request
+        // names, carried before the user's words so the request itself
+        // stays last.
         items.push(ModelItem::User {
-            text: render_input(input),
+            text: examples::context_block(&request),
+            images: Vec::new(),
+        });
+        items.push(ModelItem::User {
+            text: request,
             images: input.images.clone(),
         });
         let tools = tools_for(self.model.accepts_images());
@@ -790,6 +799,85 @@ mod tests {
         }
     }
 
+    /// The whole text the model was shown on its first request.
+    fn first_request_context(model: &ScriptedModel) -> String {
+        model.requests.lock().unwrap()[0]
+            .items
+            .iter()
+            .map(|item| match item {
+                ModelItem::User { text, .. } => text.clone(),
+                ModelItem::Assistant { text } => text.clone(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn the_request_carries_example_material_for_the_operation_it_names() {
+        let model = ScriptedModel::new([text("Revolved it.")]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        harness
+            .run(
+                &model,
+                chat("revolve this section about the axis"),
+                CancelFlag::new(),
+            )
+            .await;
+        let context = first_request_context(&model);
+        // The revolve example's own script, not merely a non-empty block.
+        assert!(
+            context.contains("revolve(axis=Axis.Z"),
+            "no revolve example reached the model"
+        );
+        // The discriminating half: an operation this request did not name
+        // brings no material of its own.
+        assert!(
+            !context.contains("chamfer("),
+            "an unrelated example reached the model"
+        );
+
+        let other = ScriptedModel::new([text("Rounded it.")]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        harness
+            .run(&other, chat("fillet these corners"), CancelFlag::new())
+            .await;
+        let context = first_request_context(&other);
+        assert!(
+            context.contains("chamfer("),
+            "no fillet example reached the model"
+        );
+        assert!(
+            !context.contains("revolve(axis=Axis.Z"),
+            "an unrelated example reached the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spatial_comment_selects_examples_from_the_words_it_carries() {
+        let model = ScriptedModel::new([text("Bored it.")]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        harness
+            .run(
+                &model,
+                TurnInput {
+                    chat: None,
+                    comments: vec![GroundedComment {
+                        text: "bore a hole through here".into(),
+                        anchors: Vec::new(),
+                    }],
+                    images: Vec::new(),
+                },
+                CancelFlag::new(),
+            )
+            .await;
+        let context = first_request_context(&model);
+        assert!(
+            context.contains("Hole(radius="),
+            "no cut example reached the model"
+        );
+    }
+
     fn chat(text: &str) -> TurnInput {
         TurnInput {
             chat: Some(text.to_string()),
@@ -1011,8 +1099,8 @@ mod tests {
         assert_eq!(harness.on_disk().as_deref(), Some("GOOD = 1"));
 
         let requests = model.requests.lock().unwrap();
-        let ModelItem::User { text, .. } = &requests[0].items[0] else {
-            panic!("first item is the user's turn");
+        let ModelItem::User { text, .. } = &requests[0].items[1] else {
+            panic!("the user's turn follows the example library");
         };
         for expected in [
             "- face 3",
@@ -1058,10 +1146,10 @@ mod tests {
         assert_eq!(requests[0].tools.len(), 3, "the render tool is offered");
         let second = &requests[1];
         assert!(
-            matches!(&second.items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
+            matches!(&second.items[3], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
         );
         assert!(matches!(
-            &second.items[3],
+            &second.items[4],
             ModelItem::User { text, images } if text.contains("top") && images.len() == 1
         ));
     }
