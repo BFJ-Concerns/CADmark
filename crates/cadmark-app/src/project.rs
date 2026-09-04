@@ -29,8 +29,16 @@ pub const SCRIPT_FILENAME: &str = "part.py";
 /// The project-local directory containing images shown to the model.
 pub const REFERENCE_IMAGES_DIR: &str = "references";
 
+/// One project-local reference image, retained for both model input and chat
+/// previews until the project is reopened or another image is attached.
+#[derive(Clone)]
+pub struct ReferenceImage {
+    pub name: String,
+    pub data: ImageData,
+}
+
 /// Reference images the model reads with every turn, ordered by filename.
-pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
+pub fn reference_images(project_dir: &Path) -> Vec<ReferenceImage> {
     let mut images = Vec::new();
     let Ok(entries) = std::fs::read_dir(project_dir.join(REFERENCE_IMAGES_DIR)) else {
         return images;
@@ -47,32 +55,20 @@ pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
             _ => continue,
         };
         if let Ok(bytes) = std::fs::read(&path) {
-            images.push(ImageData {
-                media_type: media_type.to_string(),
-                bytes,
+            images.push(ReferenceImage {
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("reference image")
+                    .to_string(),
+                data: ImageData {
+                    media_type: media_type.to_string(),
+                    bytes,
+                },
             });
         }
     }
     images
-}
-
-/// The image files the chat pane can preview, ordered consistently with turns.
-pub fn reference_image_files(project_dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(project_dir.join(REFERENCE_IMAGES_DIR)) else {
-        return Vec::new();
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some("png" | "jpg" | "jpeg")
-            )
-        })
-        .collect();
-    paths.sort();
-    paths
 }
 
 /// Persist `source` under a project's reference-image directory.
@@ -154,6 +150,8 @@ impl Busy {
 /// An open project folder.
 pub struct Project {
     pub dir: PathBuf,
+    /// Images loaded once from the project folder for turns and previews.
+    pub reference_images: Vec<ReferenceImage>,
     cmd_tx: mpsc::Sender<OrchestratorCommand>,
     result_rx: mpsc::Receiver<OrchestratorResult>,
     pub history: VersionHistory,
@@ -189,6 +187,7 @@ impl Project {
     /// conversation, start a worker, and ask for the script to be built.
     pub fn open(dir: PathBuf, ai: Result<AiServices, String>, limits: ExecutionLimits) -> Self {
         let dir = dir.canonicalize().unwrap_or(dir);
+        let reference_images = reference_images(&dir);
 
         if let Err(e) = crate::git_ops::ensure_repo(&dir) {
             log::error!("Failed to initialise git repo in {}: {e}", dir.display());
@@ -229,6 +228,7 @@ impl Project {
 
         let mut project = Self {
             dir,
+            reference_images,
             cmd_tx,
             result_rx,
             history,
@@ -255,8 +255,10 @@ impl Project {
     }
 
     /// Persist `source` under this project's reference-image directory.
-    pub fn attach_reference_image(&self, source: &Path) -> Result<String, String> {
-        attach_reference_image(&self.dir, source)
+    pub fn attach_reference_image(&mut self, source: &Path) -> Result<String, String> {
+        let name = attach_reference_image(&self.dir, source)?;
+        self.reference_images = reference_images(&self.dir);
+        Ok(name)
     }
 
     /// Hand a command to the worker.
@@ -469,8 +471,9 @@ mod tests {
 
         let images = reference_images(project_dir.path());
         assert_eq!(images.len(), 1);
-        assert_eq!(images[0].media_type, "image/png");
-        assert_eq!(images[0].bytes, [1, 2, 3, 4]);
-        assert_eq!(reference_image_files(project_dir.path()), vec![destination]);
+        assert_eq!(images[0].name, "bracket.png");
+        assert_eq!(images[0].data.media_type, "image/png");
+        assert_eq!(images[0].data.bytes, [1, 2, 3, 4]);
+        assert!(destination.exists());
     }
 }
