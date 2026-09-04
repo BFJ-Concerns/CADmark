@@ -176,7 +176,7 @@ pub struct DuplicateTopologyId {
 /// that generated or last modified it. When an element has been through
 /// multiple operations (e.g. a face created by a Box then modified by a
 /// Fillet), the most recent operation is stored.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceLedger {
     faces: HashMap<FaceId, LedgerValue>,
     edges: HashMap<EdgeId, LedgerValue>,

@@ -1,16 +1,21 @@
-// Script execution — runs build123d Python scripts and captures results.
+// Script execution — runs a build123d script in the embedded interpreter and
+// captures everything the application keeps: mesh, provenance, measurements,
+// validity, and the model itself as a file.
+//
+// This runs inside the confined kernel worker process (see `worker.rs`);
+// the application never calls it directly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once};
 
-use cadmark_core::geometry::{GeometryDescriptors, ModelSummary};
+use cadmark_core::geometry::SolidValidity;
 use cadmark_core::ledger::ProvenanceLedger;
+use cadmark_core::mesh::TessellatedMesh;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
 
-use crate::export::ModelHandle;
-use crate::tessellation::TessellatedMesh;
+use crate::protocol::{ExecutedModel, ModelFile};
 
 #[derive(Error, Debug)]
 pub enum ExecutionError {
@@ -22,8 +27,8 @@ pub enum ExecutionError {
     Script(String),
     #[error("Script not found: {0}")]
     ScriptNotFound(String),
-    #[error("No solid produced by script")]
-    NoSolid,
+    #[error("Could not keep the model for export: {0}")]
+    ModelFile(String),
     #[error("Provenance error: {0}")]
     Provenance(#[from] crate::provenance::ProvenanceError),
     #[error("Tessellation error: {0}")]
@@ -82,82 +87,73 @@ pub fn activate_venv(venv_path: &Path) -> Result<(), ExecutionError> {
     Ok(())
 }
 
-/// Discover and activate the project venv.
-///
-/// Search order:
-/// 1. `VIRTUAL_ENV` environment variable
+/// Locate the project virtual environment, in this order:
+/// 1. `VIRTUAL_ENV` in the environment
 /// 2. `.venv/` in the workspace root (baked in at compile time)
 /// 3. `.venv/` near the running executable (walk up 4 levels)
 /// 4. `.venv/` in the current working directory
-pub fn discover_and_activate_venv() -> Result<(), ExecutionError> {
-    crate::python_runtime::configure_python_home();
-
-    // VIRTUAL_ENV — set by shell activation or launch scripts.
+pub fn discover_venv() -> Option<PathBuf> {
     if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        let path = Path::new(&venv);
+        let path = PathBuf::from(venv);
         if path.is_dir() {
-            return activate_venv(path);
+            return Some(path);
         }
     }
 
     // Compile-time workspace root: CARGO_MANIFEST_DIR points at
     // crates/cadmark-kernel/, so the workspace root is two levels up.
-    // This survives installation — the path is baked into the binary.
-    {
-        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-        if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
-            let candidate = workspace_root.join(".venv");
-            if candidate.is_dir() {
-                return activate_venv(&candidate);
-            }
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
+        let candidate = workspace_root.join(".venv");
+        if candidate.is_dir() {
+            return Some(candidate);
         }
     }
 
-    // .venv near the executable — walk up from the binary's directory
-    // to handle target/debug/ during development.
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
     {
         for ancestor in exe_dir.ancestors().take(4) {
             let candidate = ancestor.join(".venv");
             if candidate.is_dir() {
-                return activate_venv(&candidate);
+                return Some(candidate);
             }
         }
     }
 
-    // .venv in cwd — fallback for `cargo run` from the workspace root.
     if let Ok(cwd) = std::env::current_dir() {
         let candidate = cwd.join(".venv");
         if candidate.is_dir() {
-            return activate_venv(&candidate);
+            return Some(candidate);
         }
     }
 
-    log::warn!("No Python venv found — build123d may not be importable");
-    Ok(())
+    None
 }
 
-/// Result of executing a build123d script.
-#[derive(Debug)]
-pub struct ExecutionResult {
-    /// Tessellated mesh for the renderer.
-    pub mesh: TessellatedMesh,
-    /// Complete kernel-neutral provenance ledger.
-    pub ledger: ProvenanceLedger,
-    /// Measured geometry of every element, in ledger order.
-    pub descriptors: GeometryDescriptors,
-    /// Whole-model measurements.
-    pub summary: ModelSummary,
-    /// The built model, retained for export.
-    pub model: ModelHandle,
+/// Discover and activate the project venv. Without one, build123d is not
+/// importable and every script fails at its first line.
+pub fn discover_and_activate_venv() -> Result<(), ExecutionError> {
+    crate::python_runtime::configure_python_home();
+    match discover_venv() {
+        Some(venv) => activate_venv(&venv),
+        None => {
+            log::warn!("No Python venv found — build123d may not be importable");
+            Ok(())
+        }
+    }
 }
 
-/// Execute a build123d script and return the tessellated result.
+/// Execute a build123d script and return everything the application keeps.
+/// The model is written as a BREP file into `scratch_dir`, which the caller
+/// owns.
 ///
 /// This function acquires the GIL and must not be called from the
 /// UI or rendering thread.
-pub fn execute_script(script_path: &Path) -> Result<ExecutionResult, ExecutionError> {
+pub fn execute_script(
+    script_path: &Path,
+    scratch_dir: &Path,
+) -> Result<ExecutedModel, ExecutionError> {
     if !script_path.exists() {
         return Err(ExecutionError::ScriptNotFound(
             script_path.display().to_string(),
@@ -167,18 +163,30 @@ pub fn execute_script(script_path: &Path) -> Result<ExecutionResult, ExecutionEr
     let script_content = std::fs::read_to_string(script_path)
         .map_err(|e| ExecutionError::ScriptNotFound(e.to_string()))?;
 
-    execute_script_source_named(&script_content, &script_path.display().to_string())
+    execute_script_source_named(
+        &script_content,
+        &script_path.display().to_string(),
+        scratch_dir,
+    )
 }
 
-/// Execute build123d source code directly (for testing and AI-generated code).
-pub fn execute_script_source(source: &str) -> Result<ExecutionResult, ExecutionError> {
-    execute_script_source_named(source, "<cadmark-source>")
+/// Execute build123d source code directly (for tests).
+pub fn execute_script_source(
+    source: &str,
+    scratch_dir: &Path,
+) -> Result<ExecutedModel, ExecutionError> {
+    execute_script_source_named(source, "<cadmark-source>", scratch_dir)
 }
+
+/// Every execution's model file gets a fresh name so an export of the
+/// previous model can never read a half-written successor.
+static MODEL_FILE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn execute_script_source_named(
     source: &str,
     filename: &str,
-) -> Result<ExecutionResult, ExecutionError> {
+    scratch_dir: &Path,
+) -> Result<ExecutedModel, ExecutionError> {
     crate::python_runtime::configure_python_home();
     let _execution_guard = PYTHON_EXECUTION_LOCK
         .lock()
@@ -241,12 +249,15 @@ fn execute_script_source_named(
             let (descriptors, summary) =
                 crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
             log::info!("Model measured: {}", summary.describe());
-            Ok(ExecutionResult {
+            let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
+            let model = keep_model(py, &shape, scratch_dir)?;
+            Ok(ExecutedModel {
                 mesh,
                 ledger,
                 descriptors,
                 summary,
-                model: ModelHandle::new(shape.unbind()),
+                validity,
+                model,
             })
         })();
 
@@ -256,6 +267,25 @@ fn execute_script_source_named(
         }
         execution
     })
+}
+
+/// Write the executed model to a fresh BREP file in `scratch_dir` so it can
+/// be exported later without re-running the script.
+fn keep_model(
+    py: Python<'_>,
+    shape: &Bound<'_, PyAny>,
+    scratch_dir: &Path,
+) -> Result<ModelFile, ExecutionError> {
+    let sequence = MODEL_FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = scratch_dir.join(format!("model-{sequence}.brep"));
+    let exporters = py.import("build123d.exporters3d")?;
+    let written: bool = exporters
+        .call_method1("export_brep", (shape, path.display().to_string()))?
+        .extract()?;
+    if !written {
+        return Err(ExecutionError::ModelFile(path.display().to_string()));
+    }
+    Ok(ModelFile(path))
 }
 
 /// Render a script failure as the traceback frames that belong to the user's
@@ -350,8 +380,17 @@ mod tests {
         discover_and_activate_venv().expect("test virtual environment should activate");
     }
 
+    /// Execute source with a scratch directory that lives as long as the
+    /// returned guard.
+    fn run(source: &str) -> (tempfile::TempDir, Result<ExecutedModel, ExecutionError>) {
+        activate_test_runtime();
+        let scratch = tempfile::tempdir().unwrap();
+        let result = execute_script_source(source, scratch.path());
+        (scratch, result)
+    }
+
     fn assert_every_element_resolves(
-        result: &ExecutionResult,
+        result: &ExecutedModel,
         operation: SemanticOperation,
         line: u32,
     ) {
@@ -391,7 +430,7 @@ mod tests {
         }
     }
 
-    fn resolved_contexts(result: &ExecutionResult) -> Vec<GeometryContext> {
+    fn resolved_contexts(result: &ExecutedModel) -> Vec<GeometryContext> {
         let strategy = NullIdentification;
         let mut contexts = Vec::new();
         for index in 0..result.ledger.face_count() {
@@ -427,7 +466,7 @@ mod tests {
         contexts
     }
 
-    fn assert_bridge_consumers(result: &ExecutionResult) {
+    fn assert_bridge_consumers(result: &ExecutedModel) {
         let strategy = NullIdentification;
         let representative = [
             TopologyElement::Face(FaceId(0)),
@@ -447,7 +486,7 @@ mod tests {
         }
     }
 
-    fn assert_contains_operation(result: &ExecutionResult, operation: SemanticOperation) {
+    fn assert_contains_operation(result: &ExecutedModel, operation: SemanticOperation) {
         assert!(
             resolved_contexts(result).iter().any(|context| {
                 context
@@ -466,15 +505,14 @@ mod tests {
 
     #[test]
     fn real_box_resolves_all_final_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
 
         assert_eq!(result.ledger.face_count(), 6);
         assert_eq!(result.ledger.edge_count(), 12);
@@ -489,23 +527,21 @@ with BuildPart() as part:
 
     #[test]
     fn real_cylinder_resolves_all_final_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(5, 10)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_every_element_resolves(&result, SemanticOperation::Cylinder, 4);
         assert_bridge_consumers(&result);
     }
 
     #[test]
     fn real_boolean_fuse_resolves_changed_and_unchanged_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -513,8 +549,8 @@ with BuildPart() as part:
     with Locations((5, 5, 5)):
         Box(10, 10, 10)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::BooleanFuse);
         assert_contains_operation(&result, SemanticOperation::Box);
         assert_bridge_consumers(&result);
@@ -522,8 +558,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_boolean_cut_resolves_all_surviving_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -531,16 +566,15 @@ with BuildPart() as part:
     with Locations((2, 1, 0)):
         Box(4, 4, 14, mode=Mode.SUBTRACT)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::BooleanCut);
         assert_bridge_consumers(&result);
     }
 
     #[test]
     fn real_boolean_common_resolves_all_surviving_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -548,24 +582,23 @@ with BuildPart() as part:
     with Locations((5, 5, 5)):
         Box(10, 10, 10, mode=Mode.INTERSECT)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::BooleanCommon);
         assert_bridge_consumers(&result);
     }
 
     #[test]
     fn real_fillet_resolves_direct_and_descendant_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
     fillet(part.edges().filter_by(Axis.Z), radius=1)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::Fillet);
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
@@ -600,16 +633,15 @@ with BuildPart() as part:
 
     #[test]
     fn real_chamfer_resolves_direct_and_descendant_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
     chamfer(part.edges().filter_by(Axis.Z), length=1)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::Chamfer);
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
@@ -644,16 +676,15 @@ with BuildPart() as part:
 
     #[test]
     fn real_locations_transport_primitive_provenance() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     with Locations((0, 0, 0), (10, 0, 0)):
         Box(2, 2, 2)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 12);
         assert_eq!(result.ledger.edge_count(), 24);
         assert_eq!(result.ledger.vertex_count(), 16);
@@ -663,16 +694,15 @@ with BuildPart() as part:
 
     #[test]
     fn real_grid_locations_transport_primitive_provenance() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     with GridLocations(20, 20, 2, 2):
         Box(2, 2, 2)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 24);
         assert_eq!(result.ledger.edge_count(), 48);
         assert_eq!(result.ledger.vertex_count(), 32);
@@ -682,16 +712,15 @@ with BuildPart() as part:
 
     #[test]
     fn real_polar_locations_transport_rotated_primitive_provenance() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     with PolarLocations(10, 3):
         Box(2, 2, 2)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 18);
         assert_eq!(result.ledger.edge_count(), 36);
         assert_eq!(result.ledger.vertex_count(), 24);
@@ -701,8 +730,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_sketch_extrude_resolves_all_final_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -710,8 +738,8 @@ with BuildPart() as part:
         Rectangle(20, 10)
     extrude(amount=5)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 6);
         assert_every_element_resolves(&result, SemanticOperation::Extrude, 6);
         assert_bridge_consumers(&result);
@@ -719,8 +747,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_sketch_cut_extrude_through_box_resolves_all_surviving_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 hole_diameter_mm = 3.4
@@ -734,8 +761,8 @@ with BuildPart() as part:
             Circle(hole_diameter_mm / 2)
     extrude(amount=-12, mode=Mode.SUBTRACT)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 10);
         assert_contains_operation(&result, SemanticOperation::BooleanCut);
         assert_contains_operation(&result, SemanticOperation::Box);
@@ -750,8 +777,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_revolve_resolves_all_final_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -760,16 +786,15 @@ with BuildPart() as part:
             Rectangle(4, 4)
     revolve(axis=Axis.Z)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_every_element_resolves(&result, SemanticOperation::Revolve, 7);
         assert_bridge_consumers(&result);
     }
 
     #[test]
     fn real_sphere_cone_torus_and_wedge_resolve_all_final_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -781,8 +806,8 @@ with BuildPart() as part:
     with Locations((0, -20, 0)):
         Wedge(4, 4, 4, 1, 1, 3, 3)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.untraced_count(), 0);
         for operation in [
             SemanticOperation::Sphere,
@@ -797,8 +822,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_loft_and_sweep_resolve_all_final_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -814,8 +838,8 @@ with BuildPart() as part:
             Circle(1)
     sweep(path=path.line)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.untraced_count(), 0);
         assert_contains_operation(&result, SemanticOperation::Loft);
         assert_contains_operation(&result, SemanticOperation::Sweep);
@@ -824,8 +848,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_shell_mirror_split_and_taper_resolve_all_final_topology() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
@@ -837,8 +860,8 @@ with BuildPart() as part:
         Circle(3)
     extrude(amount=4, taper=10)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.ledger.untraced_count(), 0);
         assert_contains_operation(&result, SemanticOperation::Split);
         assert_bridge_consumers(&result);
@@ -846,16 +869,15 @@ with BuildPart() as part:
 
     #[test]
     fn untraced_geometry_still_renders_and_reports_untraced_on_selection() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
 
 with BuildPart() as part:
     add(Solid(BRepPrimAPI_MakeSphere(5).Shape()))
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert!(!result.mesh.indices.is_empty());
         assert_eq!(result.ledger.face_count(), 1);
         assert_eq!(result.ledger.untraced_count(), result.ledger.len());
@@ -870,15 +892,14 @@ with BuildPart() as part:
 
     #[test]
     fn execution_measures_every_final_element_and_the_whole_model() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Box(20, 10, 5)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         assert_eq!(result.descriptors.faces.len(), result.ledger.face_count());
         assert_eq!(result.descriptors.edges.len(), result.ledger.edge_count());
         assert_eq!(
@@ -910,15 +931,14 @@ with BuildPart() as part:
 
     #[test]
     fn model_bounds_are_exact_for_curved_geometry() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(10, 5)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         let size = result.summary.size();
         assert!((size[0] - 20.0).abs() < 1e-6, "{size:?}");
         assert!((size[1] - 20.0).abs() < 1e-6, "{size:?}");
@@ -931,15 +951,14 @@ with BuildPart() as part:
     /// reversed relative to their planes.
     #[test]
     fn tessellation_faces_outward_on_reversed_faces() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 20, 30)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         let mesh = &result.mesh;
         for vertex in &mesh.vertices {
             let dot: f32 = (0..3)
@@ -970,15 +989,14 @@ with BuildPart() as part:
 
     #[test]
     fn tessellation_carries_outward_surface_normals() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(5, 10)
 "#,
-        )
-        .unwrap();
+        );
+        let result = result.unwrap();
         let outward = result
             .mesh
             .vertices
@@ -1002,45 +1020,67 @@ with BuildPart() as part:
 
     #[test]
     fn exports_step_stl_and_3mf_from_the_executed_model() {
-        activate_test_runtime();
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Box(20, 10, 5)
 "#,
-        )
-        .unwrap();
-        let directory = std::env::temp_dir().join(format!(
-            "cadmark-export-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        std::fs::create_dir_all(&directory).unwrap();
-        for format in [
-            cadmark_core::export::ExportFormat::Step,
-            cadmark_core::export::ExportFormat::Stl,
-            cadmark_core::export::ExportFormat::ThreeMf,
-        ] {
-            let path = directory.join(format!("part.{}", format.extension()));
+        );
+        let result = result.unwrap();
+        assert!(result.model.0.is_file(), "model kept at {:?}", result.model);
+        let directory = tempfile::tempdir().unwrap();
+        for format in cadmark_core::export::ExportFormat::ALL {
+            let path = directory.path().join(format!("part.{}", format.extension()));
             crate::export::export_model(&result.model, format, &path).unwrap();
             assert!(std::fs::metadata(&path).unwrap().len() > 0, "{path:?}");
         }
-        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_closed_solid_is_printable_and_an_open_shell_is_flagged() {
+        let (_scratch, closed) = run(
+            r#"from build123d import *
+
+with BuildPart() as part:
+    Box(10, 10, 10)
+"#,
+        );
+        let closed = closed.unwrap();
+        assert_eq!(closed.validity.len(), 1);
+        assert!(closed.is_printable());
+
+        // A box with one face removed, closed into a "solid" with a hole in
+        // it: the shape the slicer would reject.
+        let (_scratch, open) = run(
+            r#"from build123d import *
+from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid
+from OCP.TopoDS import TopoDS
+
+box = Solid.make_box(10, 10, 10)
+shell = Shell(box.faces()[:-1])
+leaky = Solid(BRepBuilderAPI_MakeSolid(TopoDS.Shell_s(shell.wrapped)).Solid())
+with BuildPart() as part:
+    add(leaky)
+"#,
+        );
+        let open = open.unwrap();
+        assert_eq!(open.validity.len(), 1);
+        assert!(!open.validity[0].closed);
+        assert!(!open.is_printable());
     }
 
     #[test]
     fn execution_error_restores_bindings_for_the_next_run() {
-        activate_test_runtime();
-        let error = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Box(1, 1, 1)
 raise RuntimeError("deliberate execution failure")
 "#,
-        )
-        .unwrap_err();
+        );
+        let error = result.unwrap_err();
         let ExecutionError::Script(message) = error else {
             panic!("expected a script failure, got {error:?}");
         };
@@ -1048,25 +1088,21 @@ raise RuntimeError("deliberate execution failure")
         assert!(message.contains("deliberate execution failure"));
         assert!(message.contains("RuntimeError"));
 
-        let result = execute_script_source(
+        let (_scratch, result) = run(
             r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(2, 4)
 "#,
-        )
-        .unwrap();
-        assert_every_element_resolves(&result, SemanticOperation::Cylinder, 4);
+        );
+        assert_every_element_resolves(&result.unwrap(), SemanticOperation::Cylinder, 4);
     }
 
     #[test]
     fn file_execution_preserves_the_real_filename_and_source_line() {
         activate_test_runtime();
-        let path = std::env::temp_dir().join(format!(
-            "cadmark-provenance-{}-{}.py",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
+        let project = tempfile::tempdir().unwrap();
+        let path = project.path().join("part.py");
         std::fs::write(
             &path,
             r#"from build123d import *
@@ -1076,8 +1112,8 @@ with BuildPart() as part:
 "#,
         )
         .unwrap();
-        let result = execute_script(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let result = execute_script(&path, scratch.path()).unwrap();
         assert_every_element_resolves(&result, SemanticOperation::Box, 4);
     }
 

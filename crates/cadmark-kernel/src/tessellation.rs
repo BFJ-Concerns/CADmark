@@ -1,6 +1,7 @@
-// Tessellation extraction — converts OCP shapes to triangle meshes
-// for the wgpu renderer.
+// Tessellation extraction — converts OCP shapes to the kernel-neutral
+// triangle mesh the renderer consumes.
 
+use cadmark_core::mesh::{MeshEdge, MeshVertex, TessellatedMesh};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
@@ -21,36 +22,6 @@ pub enum TessellationError {
         index: u32,
         bound: usize,
     },
-}
-
-/// A vertex in the tessellated mesh.
-#[derive(Debug, Clone, Copy)]
-pub struct MeshVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-}
-
-/// A tessellated edge for wireframe overlay rendering.
-#[derive(Debug, Clone)]
-pub struct MeshEdge {
-    /// Polyline vertices approximating the edge curve.
-    pub points: Vec<[f32; 3]>,
-    /// Global zero-based final-topology edge identifier.
-    pub edge_id: u32,
-}
-
-/// The complete tessellated output from a build123d script.
-#[derive(Debug, Default)]
-pub struct TessellatedMesh {
-    /// Triangle vertices — every 3 consecutive form a triangle.
-    pub vertices: Vec<MeshVertex>,
-    /// Triangle indices.
-    pub indices: Vec<u32>,
-    /// Per-triangle face identifier for GPU picking.
-    /// Index i corresponds to triangle i (indices[i*3..i*3+3]).
-    pub face_ids: Vec<u32>,
-    /// Edges for wireframe overlay.
-    pub edges: Vec<MeshEdge>,
 }
 
 /// Python source for tessellation extraction.

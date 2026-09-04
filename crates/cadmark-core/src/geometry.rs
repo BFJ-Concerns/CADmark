@@ -96,6 +96,22 @@ pub struct VertexDescriptor {
     pub position: [f64; 3],
 }
 
+/// Whether one solid of the executed model is printable geometry: every
+/// shell closed, and the kernel's own validity check passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolidValidity {
+    /// Every shell of the solid is closed (no open boundary).
+    pub closed: bool,
+    /// OCCT's shape analyser found no defect.
+    pub valid: bool,
+}
+
+impl SolidValidity {
+    pub fn is_printable(self) -> bool {
+        self.closed && self.valid
+    }
+}
+
 /// Whole-model measurements used for status display and edit regression checks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelSummary {

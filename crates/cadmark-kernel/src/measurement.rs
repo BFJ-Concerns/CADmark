@@ -3,7 +3,8 @@
 // and the edit regression check.
 
 use cadmark_core::geometry::{
-    EdgeDescriptor, FaceDescriptor, GeometryDescriptors, ModelSummary, VertexDescriptor,
+    EdgeDescriptor, FaceDescriptor, GeometryDescriptors, ModelSummary, SolidValidity,
+    VertexDescriptor,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -15,11 +16,14 @@ from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
+from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepGProp import BRepGProp, BRepGProp_Face
 from OCP.BRepTools import BRepTools
 from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
 from OCP.gp import gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
+from OCP.TopAbs import TopAbs_SHELL, TopAbs_SOLID
+from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
 
 _surface_names = {
@@ -111,6 +115,28 @@ def measure_model(shape, face_count, edge_count, vertex_count):
     }
 
 
+def _explore(shape, kind):
+    explorer = TopExp_Explorer(shape, kind)
+    while explorer.More():
+        yield explorer.Current()
+        explorer.Next()
+
+
+def solid_validity(shape):
+    """One entry per solid: whether every shell is closed and OCCT's
+    analyser finds no defect. A model with no solid yields nothing."""
+    results = []
+    for solid in _explore(shape, TopAbs_SOLID):
+        closed = all(
+            BRep_Tool.IsClosed_s(TopoDS.Shell_s(shell))
+            for shell in _explore(solid, TopAbs_SHELL)
+        )
+        analyzer = BRepCheck_Analyzer(solid)
+        analyzer.SetParallel(True)
+        results.append({'closed': closed, 'valid': analyzer.IsValid()})
+    return results
+
+
 def measure(shape, session):
     faces = session.map_values(session.final_maps['face'])
     edges = session.map_values(session.final_maps['edge'])
@@ -181,4 +207,25 @@ pub(crate) fn measure(
         },
         summary,
     ))
+}
+
+/// Whether each solid of the model is closed and valid, in traversal order.
+pub(crate) fn solid_validity(
+    py: Python<'_>,
+    shape: &Bound<'_, PyAny>,
+) -> PyResult<Vec<SolidValidity>> {
+    let namespace = PyDict::new(py);
+    py.run(MEASUREMENT_SOURCE, Some(&namespace), None)?;
+    let check = namespace
+        .get_item("solid_validity")?
+        .expect("measurement source defines solid_validity()");
+    let mut validity = Vec::new();
+    for solid in check.call1((shape,))?.try_iter()? {
+        let solid = solid?;
+        validity.push(SolidValidity {
+            closed: solid.get_item("closed")?.extract()?,
+            valid: solid.get_item("valid")?.extract()?,
+        });
+    }
+    Ok(validity)
 }
