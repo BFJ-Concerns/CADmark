@@ -13,7 +13,7 @@ use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{GeometryContext, ScreenPosition, SelectionState, TopologyElement};
-use cadmark_core::message::{Conversation, Message, MessageId, ToolActivity};
+use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
 use cadmark_renderer::pipeline::Renderer;
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
@@ -34,27 +34,41 @@ use crate::viewport::{
     viewport_clear_colour,
 };
 
-/// Open the turn's tool group beneath whatever the AI said before it, and
-/// return the group and the reply that will carry what it says afterwards.
+/// Record a tool call starting, and return the group it joined and the
+/// reply that carries what the AI says next.
 ///
-/// Anything spoken before the first tool call is the turn's preamble — it
-/// is where the announced sketch-or-solid route lands, said while the
-/// script can still be held to it — so it stays in the conversation above
-/// the group. A turn that went straight to a tool said nothing, and its
-/// empty reply is dropped rather than shown as a blank card.
-fn begin_tool_group(
+/// Consecutive calls the AI made without speaking in between share one
+/// group, so a long turn reads as one collapsed entry. Speaking closes the
+/// group: whatever was said goes above a new one. That ordering is what
+/// makes the announced sketch-or-solid route readable as a commitment —
+/// every call in a group began after the text directly above it, so a
+/// route stated before the run that changes the script sits above that
+/// run, whatever the turn did earlier. A reply that said nothing is
+/// dropped rather than shown as a blank card.
+fn record_tool_start(
     conversation: &mut Conversation,
+    tools: Option<MessageId>,
     response: MessageId,
     activity: ToolActivity,
 ) -> (MessageId, MessageId) {
     let spoke = conversation
         .message_mut(response)
         .is_some_and(|message| !message.text.trim().is_empty());
+    if let Some(group) = tools
+        && !spoke
+        && let Some(Message {
+            kind: MessageKind::ToolCalls(activities),
+            ..
+        }) = conversation.message_mut(group)
+    {
+        activities.push(activity);
+        return (group, response);
+    }
     if !spoke {
         conversation.remove(response);
     }
-    let tools = conversation.push(Message::tool_calls(vec![activity]));
-    (tools, conversation.push(Message::ai_response("")))
+    let group = conversation.push(Message::tool_calls(vec![activity]));
+    (group, conversation.push(Message::ai_response("")))
 }
 
 /// The chat line for a completed turn: the AI's summary, then what
@@ -347,23 +361,10 @@ impl CadmarkApp {
                     started: chrono::Utc::now(),
                     finished: None,
                 };
-                match turn.tools {
-                    Some(id) => {
-                        if let Some(Message {
-                            kind: cadmark_core::message::MessageKind::ToolCalls(activities),
-                            ..
-                        }) = conversation.message_mut(id)
-                        {
-                            activities.push(activity);
-                        }
-                    }
-                    None => {
-                        let (tools, response) =
-                            begin_tool_group(conversation, turn.response, activity);
-                        turn.tools = Some(tools);
-                        turn.response = response;
-                    }
-                }
+                let (tools, response) =
+                    record_tool_start(conversation, turn.tools, turn.response, activity);
+                turn.tools = Some(tools);
+                turn.response = response;
                 self.project.note_turn_event(None);
             }
             TurnEvent::ToolFinished {
@@ -373,7 +374,7 @@ impl CadmarkApp {
             } => {
                 if let Some(id) = turn.tools
                     && let Some(Message {
-                        kind: cadmark_core::message::MessageKind::ToolCalls(activities),
+                        kind: MessageKind::ToolCalls(activities),
                         ..
                     }) = conversation.message_mut(id)
                     && let Some(activity) = activities.iter_mut().find(|a| a.call_id == call_id)
@@ -1270,12 +1271,12 @@ mod tests {
     use cadmark_core::geometry::ModelSummary;
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
-    use super::{begin_tool_group, turn_chat_message};
+    use super::{record_tool_start, turn_chat_message};
 
-    fn activity() -> ToolActivity {
+    fn activity(call_id: &str, tool: &str) -> ToolActivity {
         ToolActivity {
-            call_id: "call-1".into(),
-            tool: "run_script".into(),
+            call_id: call_id.into(),
+            tool: tool.into(),
             arguments: serde_json::Value::Null,
             output: None,
             failed: false,
@@ -1298,7 +1299,12 @@ mod tests {
         let response = conversation.push(Message::ai_response(""));
         conversation.append_text(response, "Route: sketch — the profile corner");
 
-        let (tools, reply) = begin_tool_group(&mut conversation, response, activity());
+        let (tools, reply) = record_tool_start(
+            &mut conversation,
+            None,
+            response,
+            activity("c1", "run_script"),
+        );
 
         let messages = kinds_and_text(&conversation);
         assert_eq!(messages.len(), 3, "{messages:?}");
@@ -1317,11 +1323,86 @@ mod tests {
     }
 
     #[test]
+    fn a_route_stated_mid_turn_sits_above_the_run_it_committed_to() {
+        // The model looks something up, then commits to a route, then
+        // runs: the commitment must read as made before the run, not
+        // folded in beside it.
+        let mut conversation = Conversation::new();
+        let response = conversation.push(Message::ai_response(""));
+        let (tools, response) = record_tool_start(
+            &mut conversation,
+            None,
+            response,
+            activity("c1", "lookup_docs"),
+        );
+        conversation.append_text(response, "Route: solid — the vertical edge of the boss");
+        let (later, _) = record_tool_start(
+            &mut conversation,
+            Some(tools),
+            response,
+            activity("c2", "run_script"),
+        );
+
+        assert_ne!(later, tools, "speaking closes the group it followed");
+        let messages = kinds_and_text(&conversation);
+        let shape: Vec<_> = messages
+            .iter()
+            .map(|(kind, text)| match kind {
+                MessageKind::ToolCalls(activities) => {
+                    format!("tools:{}", activities[0].tool)
+                }
+                _ => format!("said:{text}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                "tools:lookup_docs".to_string(),
+                "said:Route: solid — the vertical edge of the boss".to_string(),
+                "tools:run_script".to_string(),
+                "said:".to_string(),
+            ],
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn calls_made_without_speaking_in_between_stay_one_group() {
+        let mut conversation = Conversation::new();
+        let response = conversation.push(Message::ai_response(""));
+        let (tools, response) = record_tool_start(
+            &mut conversation,
+            None,
+            response,
+            activity("c1", "lookup_docs"),
+        );
+        let (again, _) = record_tool_start(
+            &mut conversation,
+            Some(tools),
+            response,
+            activity("c2", "run_script"),
+        );
+
+        assert_eq!(again, tools);
+        let messages = kinds_and_text(&conversation);
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        let MessageKind::ToolCalls(activities) = &messages[0].0 else {
+            panic!("the group is first: {messages:?}");
+        };
+        assert_eq!(activities.len(), 2);
+    }
+
+    #[test]
     fn a_turn_that_said_nothing_first_leaves_no_blank_reply() {
         let mut conversation = Conversation::new();
         let response = conversation.push(Message::ai_response(""));
 
-        begin_tool_group(&mut conversation, response, activity());
+        record_tool_start(
+            &mut conversation,
+            None,
+            response,
+            activity("c1", "run_script"),
+        );
 
         let messages = kinds_and_text(&conversation);
         assert_eq!(messages.len(), 2, "{messages:?}");
