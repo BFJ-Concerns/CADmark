@@ -2439,6 +2439,55 @@ mod tests {
     }
 
     #[test]
+    fn a_completed_turn_records_its_design_step_against_the_open_part() {
+        let (dir, mut app) = two_part_project();
+        let response = app
+            .project_mut()
+            .unwrap()
+            .conversation
+            .push(Message::ai_response("Widened the bracket"));
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            comment_ids: vec![],
+            summary_before: None,
+            history_len: 1,
+        });
+        std::fs::write(dir.path().join("bracket.py"), "width = 120\ndepth = 40\n").unwrap();
+
+        app.finish_turn(TurnOutcome::Completed {
+            summary: "Widen the bracket".to_string(),
+            model: Box::new(solid_model()),
+            source: "width = 120\ndepth = 40\n".to_string(),
+        });
+
+        let message = newest_commit_message(dir.path());
+        assert!(message.contains("Widen the bracket"), "{message}");
+        assert!(message.contains("part: bracket.py"), "{message}");
+        // The step is in the history the undo lane reads, not only in
+        // git: recording reloads it.
+        assert_eq!(app.project().unwrap().history.len(), 1);
+    }
+
+    /// The plainest successful execution: a solid with nothing to draw.
+    fn solid_model() -> cadmark_kernel::protocol::ExecutedModel {
+        cadmark_kernel::protocol::ExecutedModel {
+            mesh: cadmark_core::mesh::TessellatedMesh::default(),
+            ledger: cadmark_core::ledger::ProvenanceLedger::new(),
+            descriptors: GeometryDescriptors::default(),
+            form: cadmark_kernel::protocol::ModelForm::Solid(
+                cadmark_kernel::protocol::SolidResult {
+                    summary: summary(1000.0, 6),
+                    validity: vec![],
+                    file: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(
+                        "/scratch/model-1.brep",
+                    )),
+                },
+            ),
+        }
+    }
+
+    #[test]
     fn a_parameter_edit_with_no_project_open_changes_nothing() {
         let (dir, mut app) = two_part_project();
         app.project = None;
