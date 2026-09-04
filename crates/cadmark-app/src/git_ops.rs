@@ -128,13 +128,18 @@ pub fn checkout_branch_tip(project_dir: &Path, branch: &str) -> Result<(), GitEr
     Ok(())
 }
 
-/// List recent microversions from git log, most recent first.
+/// List recent microversions from every reachable design-history ref, most recent first.
 pub fn list_microversions(project_dir: &Path, count: usize) -> Result<Vec<Microversion>, GitError> {
     // Use null byte as record separator — it cannot appear in commit text,
     // unlike the old "---END---" delimiter which could collide with user input.
     let log_output = run_git(
         project_dir,
-        &["log", &format!("-{count}"), "--format=%H%n%s%n%aI%n%b%x00"],
+        &[
+            "log",
+            "--all",
+            &format!("-{count}"),
+            "--format=%H%n%s%n%aI%n%b%x00",
+        ],
     )?;
 
     let mut versions = Vec::new();
@@ -448,7 +453,9 @@ mod tests {
         let script = "part.py";
         fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
         let base = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+        let base_hash = run_git(dir.path(), &["rev-parse", &base.commit_hash]).unwrap();
 
+        let mut alternatives = Vec::new();
         for (summary, script_source) in [
             ("First alternative", "box = Box(20, 20, 20)"),
             ("Second alternative", "box = Box(30, 30, 30)"),
@@ -456,23 +463,34 @@ mod tests {
         ] {
             checkout_commit(dir.path(), &base.commit_hash).unwrap();
             fs::write(dir.path().join(script), script_source).unwrap();
-            create_microversion(dir.path(), summary, "try another edit", script).unwrap();
+            let alternative =
+                create_microversion(dir.path(), summary, "try another edit", script).unwrap();
+            let parent = run_git(
+                dir.path(),
+                &["rev-parse", &format!("{}^", alternative.commit_hash)],
+            )
+            .unwrap();
+            assert_eq!(
+                parent.trim(),
+                base_hash.trim(),
+                "{summary} must be a direct child of the undone base"
+            );
+            alternatives.push(alternative);
         }
 
-        let summaries: Vec<_> = list_microversions(dir.path(), 10)
-            .unwrap()
-            .into_iter()
-            .map(|version| version.summary)
-            .collect();
-        assert!(summaries.contains(&"Create box".to_string()));
-        for alternative in [
-            "First alternative",
-            "Second alternative",
-            "Third alternative",
-        ] {
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        assert!(
+            versions
+                .iter()
+                .any(|version| version.commit_hash == base.commit_hash)
+        );
+        for alternative in alternatives {
             assert!(
-                summaries.contains(&alternative.to_string()),
-                "history omitted {alternative}"
+                versions
+                    .iter()
+                    .any(|version| version.commit_hash == alternative.commit_hash),
+                "history omitted {}",
+                alternative.summary
             );
         }
     }
