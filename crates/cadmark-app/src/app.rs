@@ -152,7 +152,7 @@ impl CadmarkApp {
             settings,
             settings_store,
             chat: ChatPane::new(),
-            reference_images: ReferenceImagesPanel,
+            reference_images: ReferenceImagesPanel::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::new(),
             selection: SelectionState::None,
@@ -1283,7 +1283,11 @@ fn reference_image_views(project_dir: &Path) -> Vec<ReferenceImageView> {
         .filter_map(|path| {
             let name = path.file_name()?.to_str()?.to_string();
             let bytes = std::fs::read(path).ok()?;
-            Some(ReferenceImageView { name, bytes })
+            Some(ReferenceImageView {
+                id: format!("{}:{name}", project_dir.display()),
+                name,
+                bytes,
+            })
         })
         .collect()
 }
