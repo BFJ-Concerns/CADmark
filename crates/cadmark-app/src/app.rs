@@ -13,7 +13,8 @@ use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryContext, MinimumDistance, ScreenPosition, SelectionState, TopologyElement,
+    GeometryContext, GeometryDescriptors, MinimumDistance, ScreenPosition, SelectionState,
+    TopologyElement,
 };
 use cadmark_core::message::{Conversation, Message, MessageId, ToolActivity};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
@@ -58,6 +59,22 @@ fn turn_chat_message(
 /// comment the user is composing. Additional anchors remain comments only.
 fn measurement_pair(anchors: &[GeometryContext]) -> Option<(TopologyElement, TopologyElement)> {
     (anchors.len() == 2).then(|| (anchors[0].element.clone(), anchors[1].element.clone()))
+}
+
+/// The readout tracks the element currently highlighted by the application;
+/// comment anchors only provide the special two-element distance pair.
+fn measurement_readout(
+    selection: &SelectionState,
+    minimum_distance: Option<MinimumDistance>,
+    descriptors: Option<&GeometryDescriptors>,
+) -> Option<String> {
+    minimum_distance.map(MinimumDistance::describe).or_else(|| {
+        let SelectionState::Selected(element) = selection else {
+            return None;
+        };
+        descriptors
+            .and_then(|descriptors| cadmark_ui::status::selection_measurement(element, descriptors))
+    })
 }
 
 /// The running turn's chat bookkeeping: which message its text streams
@@ -954,19 +971,11 @@ impl CadmarkApp {
                     SelectionState::None => None,
                 };
                 let activity = self.project.busy.as_ref().map(Busy::label);
-                let measurement = self
-                    .minimum_distance
-                    .map(MinimumDistance::describe)
-                    .or_else(|| {
-                        self.overlay.anchors().first().and_then(|anchor| {
-                            self.project.model.as_ref().and_then(|model| {
-                                cadmark_ui::status::selection_measurement(
-                                    &anchor.element,
-                                    &model.descriptors,
-                                )
-                            })
-                        })
-                    });
+                let measurement = measurement_readout(
+                    &self.selection,
+                    self.minimum_distance,
+                    self.project.model.as_ref().map(|model| &model.descriptors),
+                );
                 cadmark_ui::status::show_status_bar(
                     ui,
                     StatusView {
@@ -1296,10 +1305,13 @@ impl eframe::App for CadmarkApp {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::{FaceId, GeometryContext, ModelSummary, TopologyElement};
+    use cadmark_core::geometry::{
+        EdgeDescriptor, EdgeId, FaceId, GeometryContext, GeometryDescriptors, ModelSummary,
+        SelectionState, TopologyElement,
+    };
     use cadmark_core::ledger::LedgerValue;
 
-    use super::{measurement_pair, turn_chat_message};
+    use super::{measurement_pair, measurement_readout, turn_chat_message};
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -1350,5 +1362,31 @@ mod tests {
             Some((first.element.clone(), second.element.clone()))
         );
         assert_eq!(measurement_pair(&[first, second, anchor(7)]), None);
+    }
+
+    #[test]
+    fn single_readout_tracks_the_latest_selection_not_an_earlier_anchor() {
+        let descriptors = GeometryDescriptors {
+            faces: vec![],
+            edges: vec![EdgeDescriptor {
+                curve_type: "line".into(),
+                length: 12.0,
+                radius: None,
+                centre: [0.0; 3],
+            }],
+            vertices: vec![],
+        };
+        assert_eq!(
+            measurement_readout(
+                &SelectionState::Selected(TopologyElement::Edge(EdgeId(0))),
+                None,
+                Some(&descriptors),
+            ),
+            Some("Length 12 mm".into())
+        );
+        assert_eq!(
+            measurement_readout(&SelectionState::None, None, Some(&descriptors)),
+            None
+        );
     }
 }

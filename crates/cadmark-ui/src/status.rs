@@ -1,7 +1,7 @@
 // Status bar — what the worker is doing, else the last result, plus the
 // model's measurements and the navigation hint.
 
-use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, TopologyElement};
+use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, TopologyElement, compact};
 
 use crate::theme;
 
@@ -52,24 +52,13 @@ pub fn selection_measurement(
             .face(*id)
             .map(|face| format!("Area {} mm²", compact(face.area))),
         TopologyElement::Edge(id) => descriptors.edge(*id).map(|edge| {
-            if edge.curve_type == "circle" {
-                format!(
-                    "Diameter {} mm",
-                    compact(edge.length / std::f64::consts::PI)
-                )
+            if let Some(radius) = edge.radius {
+                format!("Diameter {} mm", compact(radius * 2.0))
             } else {
                 format!("Length {} mm", compact(edge.length))
             }
         }),
         TopologyElement::Vertex(_) => None,
-    }
-}
-
-fn compact(value: f64) -> String {
-    if (value - value.round()).abs() < 5e-3 {
-        format!("{}", value.round() as i64)
-    } else {
-        format!("{value:.2}")
     }
 }
 
@@ -149,6 +138,7 @@ mod tests {
             edges: vec![EdgeDescriptor {
                 curve_type: "circle".into(),
                 length: std::f64::consts::PI * 12.0,
+                radius: Some(6.0),
                 centre: [0.0; 3],
             }],
             vertices: vec![],
@@ -160,6 +150,24 @@ mod tests {
         assert_eq!(
             selection_measurement(&TopologyElement::Edge(EdgeId(0)), &descriptors),
             Some("Diameter 12 mm".into())
+        );
+    }
+
+    #[test]
+    fn reads_a_circular_arc_diameter_from_its_radius_not_its_arc_length() {
+        let descriptors = GeometryDescriptors {
+            faces: vec![],
+            edges: vec![EdgeDescriptor {
+                curve_type: "circle".into(),
+                length: std::f64::consts::PI * 1.5,
+                radius: Some(3.0),
+                centre: [0.0; 3],
+            }],
+            vertices: vec![],
+        };
+        assert_eq!(
+            selection_measurement(&TopologyElement::Edge(EdgeId(0)), &descriptors),
+            Some("Diameter 6 mm".into())
         );
     }
 }

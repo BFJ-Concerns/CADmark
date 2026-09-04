@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::export::ExportFormat;
-use cadmark_core::geometry::{FaceId, TopologyElement};
+use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 
@@ -82,14 +82,62 @@ fn measures_the_known_gap_between_faces_through_the_worker() {
         .minimum_distance(
             &model.model,
             TopologyElement::Face(FaceId(0)),
-            TopologyElement::Face(FaceId(6)),
+            TopologyElement::Face(FaceId(7)),
             roomy(),
         )
         .unwrap();
 
     assert!(
-        (measurement.millimetres - 20.0).abs() < 1e-6,
+        (measurement.millimetres - 10.0).abs() < 1e-6,
         "{measurement:?}"
+    );
+}
+
+#[test]
+fn measures_picked_edge_and_vertex_ids_in_the_topology_map_order() {
+    let (_project, script, mut worker) = project_with_script(BOX);
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let edge_distance = worker
+        .minimum_distance(
+            &model.model,
+            TopologyElement::Edge(EdgeId(0)),
+            TopologyElement::Edge(EdgeId(11)),
+            roomy(),
+        )
+        .unwrap();
+    assert!(
+        (edge_distance.millimetres - 10.0).abs() < 1e-6,
+        "{edge_distance:?}"
+    );
+
+    let vertex_distance = worker
+        .minimum_distance(
+            &model.model,
+            TopologyElement::Vertex(VertexId(0)),
+            TopologyElement::Vertex(VertexId(1)),
+            roomy(),
+        )
+        .unwrap();
+    assert!(
+        (vertex_distance.millimetres - 10.0).abs() < 1e-6,
+        "{vertex_distance:?}"
+    );
+
+    let error = worker
+        .minimum_distance(
+            &model.model,
+            TopologyElement::Edge(EdgeId(20)),
+            TopologyElement::Edge(EdgeId(0)),
+            roomy(),
+        )
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("edge 20 is not in the retained model")
     );
 }
 
