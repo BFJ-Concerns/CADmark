@@ -8,6 +8,7 @@ use crate::ledger::LedgerValue;
 /// A topological element the user can select in the viewport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TopologyElement {
+    Part(PartId),
     Face(FaceId),
     Edge(EdgeId),
     Vertex(VertexId),
@@ -17,12 +18,17 @@ impl TopologyElement {
     /// Plain-language label such as "face 3" for people reading the UI.
     pub fn display_label(&self) -> String {
         match self {
+            Self::Part(PartId(id)) => format!("part {id}"),
             Self::Face(FaceId(id)) => format!("face {id}"),
             Self::Edge(EdgeId(id)) => format!("edge {id}"),
             Self::Vertex(VertexId(id)) => format!("vertex {id}"),
         }
     }
 }
+
+/// Stable ordinal of a completed top-level part within one script execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct PartId(pub u32);
 
 /// Unique identifier for a face in the rendered mesh.
 /// Assigned during tessellation and used for GPU picking.
@@ -265,6 +271,9 @@ impl GeometryDescriptors {
 
     pub fn neighbours(&self, element: &TopologyElement) -> Vec<TopologyElement> {
         match element {
+            // A part is the whole solid, not an element within the
+            // descriptor tables, so it has no neighbours of its own.
+            TopologyElement::Part(_) => None,
             TopologyElement::Face(id) => self
                 .face(*id)
                 .map(|descriptor| descriptor.neighbours.clone()),
@@ -345,6 +354,7 @@ mod tests {
     #[test]
     fn element_labels_are_plain() {
         assert_eq!(TopologyElement::Face(FaceId(3)).display_label(), "face 3");
+        assert_eq!(TopologyElement::Part(PartId(1)).display_label(), "part 1");
         assert_eq!(TopologyElement::Edge(EdgeId(0)).display_label(), "edge 0");
     }
 }

@@ -562,7 +562,10 @@ with BuildPart() as part:
             builtins
                 .call_method1("exec", (&code, &namespace, &namespace))
                 .unwrap();
-            let shape = crate::tessellation::find_result_shape(&namespace).unwrap();
+            let (_, shape) = crate::tessellation::find_result_shapes(&namespace)
+                .unwrap()
+                .pop()
+                .unwrap();
             let (raw, ledger) = finalise(py, &session, &shape, source).unwrap();
             restore(py, &session).unwrap();
 

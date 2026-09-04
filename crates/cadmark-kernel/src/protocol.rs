@@ -55,14 +55,43 @@ pub struct ExecutedModel {
     pub validity: Vec<SolidValidity>,
     /// The model, retained for export.
     pub model: ModelFile,
+    /// Every independently completed part the script produced, in source
+    /// binding order. `id` is stable for one execution and `name` preserves
+    /// the binding the script author can recognise.
+    pub parts: Vec<ExecutedPart>,
+}
+
+/// One independently selectable and exportable solid from an execution.
+/// All fields are plain data because this crosses the worker boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutedPart {
+    pub id: u32,
+    pub name: String,
+    pub mesh: TessellatedMesh,
+    pub ledger: ProvenanceLedger,
+    pub descriptors: GeometryDescriptors,
+    pub summary: ModelSummary,
+    pub validity: Vec<SolidValidity>,
+    /// The part's own BREP retained in worker scratch for export.
+    pub model: ModelFile,
+}
+
+impl ExecutedPart {
+    pub fn is_printable(&self) -> bool {
+        solids_are_printable(&self.validity)
+    }
 }
 
 impl ExecutedModel {
     /// Whether every solid is closed and valid — what "print-ready" means
     /// for the export gate.
     pub fn is_printable(&self) -> bool {
-        !self.validity.is_empty() && self.validity.iter().all(|solid| solid.is_printable())
+        solids_are_printable(&self.validity)
     }
+}
+
+fn solids_are_printable(validity: &[SolidValidity]) -> bool {
+    !validity.is_empty() && validity.iter().all(|solid| solid.is_printable())
 }
 
 /// Why the worker could not complete a request.
@@ -134,6 +163,7 @@ mod tests {
                 valid: true,
             }],
             model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+            parts: Vec::new(),
         }));
         let line = serde_json::to_string(&reply).unwrap();
         assert!(!line.contains('\n'));
@@ -170,6 +200,7 @@ mod tests {
             },
             validity,
             model: ModelFile(PathBuf::new()),
+            parts: Vec::new(),
         };
         let good = SolidValidity {
             closed: true,
