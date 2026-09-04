@@ -5,12 +5,14 @@
 // cancel stops the script, and a killed worker is replaced.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
+use serde::Deserialize;
 
 /// The worker binary Cargo built for this test run.
 fn worker_binary() -> PathBuf {
@@ -49,6 +51,148 @@ fn roomy() -> ExecutionLimits {
 }
 
 const BOX: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n";
+
+// Curvature makes mesh faceting observable: unlike a box, a cylinder's mesh
+// round trip loses a small, measurable amount of volume.
+const CURVED_PART: &str =
+    "from build123d import *\n\nwith BuildPart() as part:\n    Cylinder(10, 10)\n";
+
+const STEP_RELATIVE_TOLERANCE: f64 = 0.000_1;
+const MESH_RELATIVE_TOLERANCE: f64 = 0.01;
+
+#[derive(Debug, Deserialize)]
+struct ImportedModel {
+    volume: f64,
+    size: [f64; 3],
+    closed: bool,
+    valid: bool,
+}
+
+/// Re-import one written file in a fresh Python process, outside the worker.
+/// STEP uses build123d's B-rep importer; STL and 3MF use its mesh reader.
+fn import_export(path: &Path, format: ExportFormat) -> ImportedModel {
+    let reader = r#"
+import json
+import sys
+
+from build123d import Mesher, import_step
+
+path, format_name = sys.argv[1:]
+if format_name == "step":
+    shapes = [import_step(path)]
+else:
+    shapes = Mesher().read(path)
+
+assert len(shapes) == 1, f"expected one imported shape, got {len(shapes)}"
+shape = shapes[0]
+box = shape.bounding_box()
+print(json.dumps({
+    "volume": shape.volume,
+    "size": list(box.size),
+    "closed": shape.is_manifold,
+    "valid": shape.is_valid,
+}))
+"#;
+    let output = Command::new(venv().join("bin/python"))
+        .arg("-c")
+        .arg(reader)
+        .arg(path)
+        .arg(format.extension())
+        .output()
+        .expect("the project Python runtime should launch an import reader");
+    assert!(
+        output.status.success(),
+        "the {} reader failed: {}",
+        format.label(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "the {} reader did not return measurements: {error}; stdout: {}",
+            format.label(),
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn relative_difference(actual: f64, expected: f64) -> f64 {
+    (actual - expected).abs() / expected.abs()
+}
+
+fn assert_round_trip(
+    format: ExportFormat,
+    source_volume: f64,
+    source_size: [f64; 3],
+    imported: ImportedModel,
+) {
+    let tolerance = match format {
+        ExportFormat::Step => STEP_RELATIVE_TOLERANCE,
+        ExportFormat::Stl | ExportFormat::ThreeMf => MESH_RELATIVE_TOLERANCE,
+    };
+    assert!(
+        imported.closed,
+        "{} import was not a closed solid",
+        format.label()
+    );
+    assert!(imported.valid, "{} import was invalid", format.label());
+    assert!(
+        relative_difference(imported.volume, source_volume) <= tolerance,
+        "{} volume {} differed from source {} by more than {:.2}%",
+        format.label(),
+        imported.volume,
+        source_volume,
+        tolerance * 100.0,
+    );
+    for (axis, (actual, expected)) in imported.size.iter().zip(source_size).enumerate() {
+        assert!(
+            relative_difference(*actual, expected) <= tolerance,
+            "{} size on axis {axis} was {actual}, expected {expected} within {:.2}%",
+            format.label(),
+            tolerance * 100.0,
+        );
+    }
+
+    // A millimetre-versus-centimetre error multiplies every measurement by ten.
+    // Keep this bound beside the round-trip assertions so a future relaxation
+    // cannot silently make the scale error this rung exists to catch acceptable.
+    assert!(
+        relative_difference(source_volume * 1_000.0, source_volume) > tolerance,
+        "{} tolerance admits a tenfold scale error in volume",
+        format.label(),
+    );
+    for dimension in source_size {
+        assert!(
+            relative_difference(dimension * 10.0, dimension) > tolerance,
+            "{} tolerance admits a tenfold scale error in size",
+            format.label(),
+        );
+    }
+}
+
+#[test]
+fn exports_round_trip_as_closed_solids_at_their_original_scale() {
+    let (project, script, mut worker) = project_with_script(CURVED_PART);
+    let source = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    assert!(source.is_printable(), "source model must be a closed solid");
+
+    for format in ExportFormat::ALL {
+        let path = project
+            .path()
+            .join(format!("round-trip.{}", format.extension()));
+        worker
+            .export(&source.model, format, &path, roomy())
+            .unwrap_or_else(|error| panic!("{} export failed: {error}", format.label()));
+        let imported = import_export(&path, format);
+        assert_round_trip(
+            format,
+            source.summary.volume,
+            source.summary.size(),
+            imported,
+        );
+    }
+}
 
 #[test]
 fn executes_a_script_and_exports_its_kept_model() {
