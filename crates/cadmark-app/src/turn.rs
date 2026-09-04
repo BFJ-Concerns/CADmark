@@ -22,8 +22,8 @@ use cadmark_bridge::backend::{
 };
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
 use cadmark_bridge::tools::{
-    LOOKUP_DOCS, LookupDocsArgs, RENDER_VIEW, RUN_SCRIPT, RenderView, RenderViewArgs,
-    RunScriptArgs, tools_for,
+    INSPECT_ELEMENTS, InspectElementsArgs, LOOKUP_DOCS, LookupDocsArgs, RENDER_VIEW, RUN_SCRIPT,
+    RenderView, RenderViewArgs, RunScriptArgs, tools_for,
 };
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::geometry::TopologyElement;
@@ -227,36 +227,42 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     arguments: call.arguments.clone(),
                 });
                 let mut rendered = None;
-                let (output, failed) = match self.run_tool(&call, &mut attempt, &mut emit).await {
-                    ToolRun::Output { output, failed } => (output, failed),
-                    ToolRun::Rendered { image } => {
-                        rendered = Some(image);
-                        ("rendered; the image follows".to_string(), false)
-                    }
-                    ToolRun::Built {
-                        code,
-                        model,
-                        summary,
-                    } => {
-                        emit(TurnEvent::ModelBuilt {
-                            model: model.clone(),
-                            source: code.clone(),
-                        });
-                        // The inventory names every ID with this
-                        // execution's own tag — the fingerprint of the
-                        // model it just built — so an ID quoted from any
-                        // other execution, including an earlier run of
-                        // this same turn, resolves to nothing.
-                        let tag = geometry_reference::execution_tag(&model);
-                        let output = describe_model(&model, &tag);
-                        last_good = Some((code, model, summary));
-                        last_failure = None;
-                        (output, false)
-                    }
-                    ToolRun::Abort(outcome) => {
-                        return self.abort(original.as_deref(), outcome);
-                    }
-                };
+                // What the model may be asked about: the execution this
+                // turn has in hand, if any. Nothing is remembered from an
+                // earlier turn, so a question about one is answered as
+                // having no such geometry.
+                let built = last_good.as_ref().map(|(_, model, _)| &**model);
+                let (output, failed) =
+                    match self.run_tool(&call, built, &mut attempt, &mut emit).await {
+                        ToolRun::Output { output, failed } => (output, failed),
+                        ToolRun::Rendered { image } => {
+                            rendered = Some(image);
+                            ("rendered; the image follows".to_string(), false)
+                        }
+                        ToolRun::Built {
+                            code,
+                            model,
+                            summary,
+                        } => {
+                            emit(TurnEvent::ModelBuilt {
+                                model: model.clone(),
+                                source: code.clone(),
+                            });
+                            // The inventory names every ID with this
+                            // execution's own tag — the fingerprint of the
+                            // model it just built — so an ID quoted from any
+                            // other execution, including an earlier run of
+                            // this same turn, resolves to nothing.
+                            let tag = geometry_reference::execution_tag(&model);
+                            let output = describe_model(&model, &tag);
+                            last_good = Some((code, model, summary));
+                            last_failure = None;
+                            (output, false)
+                        }
+                        ToolRun::Abort(outcome) => {
+                            return self.abort(original.as_deref(), outcome);
+                        }
+                    };
                 if failed && call.name == RUN_SCRIPT {
                     last_failure = Some(output.clone());
                 }
@@ -322,9 +328,12 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         }
     }
 
+    /// Run one tool call. `built` is the model this turn's last successful
+    /// execution produced, which the geometry tools answer from.
     async fn run_tool(
         &mut self,
         call: &ToolCall,
+        built: Option<&ExecutedModel>,
         attempt: &mut u32,
         emit: &mut (impl FnMut(TurnEvent) + Send),
     ) -> ToolRun {
@@ -372,6 +381,38 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 ToolRun::Output {
                     output: answer,
                     failed: false,
+                }
+            }
+            INSPECT_ELEMENTS => {
+                let args: InspectElementsArgs = match serde_json::from_value(call.arguments.clone())
+                {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                emit(TurnEvent::Phase(
+                    "looking at the geometry in detail".to_string(),
+                ));
+                match built {
+                    // The tag is recomputed from the model in hand, so
+                    // the names this answer offers are only ever the
+                    // current execution's own.
+                    Some(model) => ToolRun::Output {
+                        output: geometry_reference::describe_run(
+                            model,
+                            &geometry_reference::execution_tag(model),
+                            args.kind,
+                            args.first,
+                            args.last,
+                        ),
+                        failed: false,
+                    },
+                    None => ToolRun::Output {
+                        output: "Nothing has been executed this turn, so there are no elements \
+                                 to detail. Run the script first; its result lists what you can \
+                                 ask about."
+                            .to_string(),
+                        failed: true,
+                    },
                 }
             }
             RENDER_VIEW => {
@@ -546,6 +587,7 @@ fn describe_tool(name: &str) -> &str {
     match name {
         RUN_SCRIPT => "run the script",
         LOOKUP_DOCS => "look up the docs",
+        INSPECT_ELEMENTS => "look at the geometry in detail",
         RENDER_VIEW => "look at the render",
         other => other,
     }
@@ -607,8 +649,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cadmark_bridge::backend::{DeltaSink, ModelResponse};
+    use cadmark_core::geometry::{
+        EdgeDescriptor, GeometryDescriptors, ModelSummary, SolidValidity,
+    };
     use cadmark_core::geometry::{EdgeId, FaceId, VertexId};
-    use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation,
         SourceRef,
@@ -715,6 +759,17 @@ mod tests {
         })
     }
 
+    fn inspect(id: &str, kind: &str, first: u32, last: u32) -> Result<ModelResponse, BackendError> {
+        Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                name: INSPECT_ELEMENTS.to_string(),
+                arguments: serde_json::json!({"kind": kind, "first": first, "last": last}),
+            }],
+        })
+    }
+
     fn lookup(id: &str, query: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
             text: String::new(),
@@ -732,6 +787,7 @@ mod tests {
     struct FakeExecutor {
         outcomes: Arc<Mutex<VecDeque<Result<(), WorkerError>>>>,
         executed: Arc<Mutex<Vec<String>>>,
+        built: fn() -> ExecutedModel,
     }
 
     impl FakeExecutor {
@@ -739,7 +795,15 @@ mod tests {
             Self {
                 outcomes: Arc::new(Mutex::new(outcomes.into_iter().collect())),
                 executed: Arc::new(Mutex::new(Vec::new())),
+                built: sample_model,
             }
+        }
+
+        /// The same executor, producing a model of the caller's choosing
+        /// rather than the sample one.
+        fn building(mut self, built: fn() -> ExecutedModel) -> Self {
+            self.built = built;
+            self
         }
 
         fn executed(&self) -> Vec<String> {
@@ -787,6 +851,35 @@ mod tests {
         }
     }
 
+    /// A model with more elements than one tool result lists singly: a box
+    /// on line 2 that made forty edges and a fillet on line 3 that made
+    /// forty more, each edge a different length. The run result groups
+    /// these into ID ranges, so naming one of the fillet's edges takes an
+    /// ask before it can be a reference.
+    fn large_model() -> ExecutedModel {
+        let mut model = sample_model();
+        model.ledger = ProvenanceLedger::new();
+        for id in 0..80 {
+            let (line, operation) = if id < 40 {
+                (2, SemanticOperation::Box)
+            } else {
+                (3, SemanticOperation::Fillet)
+            };
+            model
+                .ledger
+                .record_edge(EdgeId(id), sample_source(line, operation))
+                .unwrap();
+        }
+        model.descriptors.edges = (0..80)
+            .map(|id| EdgeDescriptor {
+                curve_type: "line".to_string(),
+                length: 10.0 + f64::from(id),
+                centre: [f64::from(id), 0.0, 0.0],
+            })
+            .collect();
+        model
+    }
+
     fn sample_source(line: u32, operation: SemanticOperation) -> LedgerValue {
         LedgerValue::Resolved(ProvenanceEntry {
             source: SourceRef {
@@ -812,7 +905,7 @@ mod tests {
                 .unwrap()
                 .pop_front()
                 .unwrap_or(Ok(()))
-                .map(|()| sample_model())
+                .map(|()| (self.built)())
         }
     }
 
@@ -899,16 +992,20 @@ mod tests {
                 .expect("every finished turn reports what its reply referred to")
         }
 
-        /// The output of the last tool call, as the model read it.
-        fn last_tool_output(&self) -> String {
+        /// Every tool call's output, in order, as the model read them.
+        fn tool_outputs(&self) -> Vec<String> {
             self.events
                 .iter()
-                .rev()
-                .find_map(|event| match event {
+                .filter_map(|event| match event {
                     TurnEvent::ToolFinished { output, .. } => Some(output.clone()),
                     _ => None,
                 })
-                .expect("a tool ran")
+                .collect()
+        }
+
+        /// The output of the last tool call, as the model read it.
+        fn last_tool_output(&self) -> String {
+            self.tool_outputs().pop().expect("a tool ran")
         }
 
         fn phases(&self) -> Vec<&str> {
@@ -993,7 +1090,10 @@ mod tests {
             item,
             ModelItem::ToolResult { call_id, output } if call_id == "c3" && output.contains("closed and valid")
         )));
-        assert_eq!(last.tools.len(), 2, "no render tool for a text-only model");
+        assert!(
+            !last.tools.iter().any(|tool| tool.name == RENDER_VIEW),
+            "no render tool for a text-only model"
+        );
     }
 
     #[tokio::test]
@@ -1187,7 +1287,13 @@ mod tests {
             .await;
         assert_eq!(outcome, TurnOutcome::Answered);
         let requests = model.requests.lock().unwrap();
-        assert_eq!(requests[0].tools.len(), 3, "the render tool is offered");
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == RENDER_VIEW),
+            "the render tool is offered"
+        );
         let second = &requests[1];
         assert!(
             matches!(&second.items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
@@ -1236,6 +1342,61 @@ mod tests {
         assert!(matches!(outcome, TurnOutcome::Completed { .. }));
         // Line 2 made edges 0 to 3; naming one of them highlights one.
         assert_eq!(harness.references(), vec![TopologyElement::Edge(EdgeId(1))]);
+    }
+
+    #[tokio::test]
+    async fn on_a_model_too_large_to_list_singly_the_detail_is_asked_for_and_one_element_named() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1).fillet()", "Fillet"),
+            // The run result grouped line 3's edges into a range, so the
+            // model asks for that range before it can say which it means.
+            inspect("c2", "edge", 40, 79),
+            text("Rounded [edge 71 @{tag}], the 81 mm one."),
+        ]);
+        let mut harness =
+            Harness::with_script(None, FakeExecutor::new([Ok(())]).building(large_model));
+
+        let outcome = harness
+            .run(&model, chat("round the deepest edge"), CancelFlag::new())
+            .await;
+
+        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+        let outputs = harness.tool_outputs();
+        // The run result named the range and where to get its detail,
+        // not the elements themselves.
+        assert!(outputs[0].contains("created by fillet at line 3: edges 40–79"));
+        assert!(!outputs[0].contains("- [edge 71 "), "{}", outputs[0]);
+        // The ask returned it, measurement and all.
+        assert!(
+            outputs[1].contains("- [edge 71 @") && outputs[1].contains("length 81 mm"),
+            "{}",
+            outputs[1]
+        );
+        // And exactly the one element named is highlighted — not the
+        // forty its source line produced.
+        assert_eq!(
+            harness.references(),
+            vec![TopologyElement::Edge(EdgeId(71))]
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_for_detail_before_anything_is_built_answers_that_there_is_none() {
+        let model = ScriptedModel::new([inspect("c1", "edge", 0, 9), text("Nothing to point at.")]);
+        let mut harness = Harness::with_script(Some("OLD = 1"), FakeExecutor::new([]));
+
+        harness
+            .run(&model, chat("which edge is which?"), CancelFlag::new())
+            .await;
+
+        // Nothing is remembered across turns, so the tool has no ledger
+        // to answer from and says so rather than naming an element.
+        let answer = harness.last_tool_output();
+        assert!(
+            answer.contains("Nothing has been executed this turn"),
+            "{answer}"
+        );
+        assert!(!answer.contains("- ["), "{answer}");
     }
 
     #[tokio::test]

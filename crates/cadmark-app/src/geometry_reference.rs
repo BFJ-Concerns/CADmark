@@ -34,20 +34,27 @@
 //
 // The other end of the convention is the inventory: the model can only
 // name an element whose ID it has seen, so `describe_elements` renders
-// the current model's elements into the `run_script` result. It is
-// grouped by source line and compressed into ID ranges so its size
-// follows the number of operations rather than the number of elements;
-// a small model additionally gets a measurement per element, which is
-// what lets the model tell one edge of a fillet from another.
+// the current model's elements into the `run_script` result. A small
+// model is listed element by element, each with the measurement that
+// tells it from its siblings. A large one is grouped by source line and
+// compressed into ID ranges, so the result's size follows the number of
+// operations rather than the number of elements, and the same
+// per-element detail is fetched a run at a time by `describe_run` when
+// the model asks for it. Detail is therefore deferred on a large model,
+// never withdrawn: every element of every model can be told from its
+// siblings and named individually, at the cost of one tool call.
 
+use cadmark_bridge::tools::ElementKind;
 use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
 use cadmark_core::ledger::{LedgerValue, ProvenanceEntry, ProvenanceLedger};
 use cadmark_kernel::protocol::ExecutedModel;
 
-/// Beyond this many elements the inventory drops per-element measurements
-/// and lists ID ranges only. A tool result rides in the model's context
-/// window every subsequent request of the turn, so the detailed form is
-/// affordable only while the model is small.
+/// The most elements detailed in one tool result: the size above which
+/// the run inventory groups instead of listing, and the size of one page
+/// of `describe_run`. A tool result rides in the model's context window
+/// every subsequent request of the turn, so an unbounded listing would
+/// swamp it; a bounded one the model can ask for repeatedly costs a
+/// round trip instead and has no ceiling.
 const DETAIL_LIMIT: usize = 60;
 
 /// The most references one reply can highlight. A reply naming more than
@@ -334,12 +341,7 @@ pub fn describe_elements(model: &ExecutedModel, tag: &ExecutionTag) -> String {
     if total <= DETAIL_LIMIT {
         text.push_str(", with the measurement that tells them apart:\n");
         for element in elements {
-            text.push_str(&format!(
-                "- [{} @{tag}]: {}{}\n",
-                element.display_label(),
-                source_of(ledger, &element),
-                measurement_of(model, &element)
-            ));
+            text.push_str(&detail_line(model, &element, tag));
         }
     } else {
         text.push_str(" (too many to list singly, so by source):\n");
@@ -347,12 +349,80 @@ pub fn describe_elements(model: &ExecutedModel, tag: &ExecutionTag) -> String {
             text.push_str(&format!("- {source}: {}\n", ranges_of(&elements)));
         }
         text.push_str(&format!(
-            "Write any of them as [edge 12 @{tag}]. Ask for a render, or work from the \
-             user's own selections, when you need to tell two elements of one operation \
-             apart.\n"
+            "Write any of them as [edge 12 @{tag}]. Call inspect_elements for any run of \
+             these IDs to get each element's source line and measurements, as listed \
+             above for a smaller model — that is how you tell two elements of one \
+             operation apart before you name one.\n"
         ));
     }
     text
+}
+
+/// The elements of `model` between `first` and `last` of one kind, in the
+/// detail the grouped inventory leaves out: what the model reads when it
+/// asks about a run of IDs it has been given.
+///
+/// A run longer than one page is answered a page at a time, ending with
+/// the ID to ask from next, so the answer's size is bounded however large
+/// the model or the run. IDs the model does not contain are simply
+/// absent, and a run with none of them says so rather than inventing one.
+pub fn describe_run(
+    model: &ExecutedModel,
+    tag: &ExecutionTag,
+    kind: ElementKind,
+    first: u32,
+    last: Option<u32>,
+) -> String {
+    let wanted = kind_label(kind);
+    let last = last.unwrap_or(first).max(first);
+    let run: Vec<TopologyElement> = elements_in_order(&model.ledger)
+        .into_iter()
+        .filter(|element| {
+            let (kind, id) = kind_and_id(element);
+            kind == wanted && (first..=last).contains(&id)
+        })
+        .collect();
+    if run.is_empty() {
+        return format!(
+            "This model has no {wanted} between {first} and {last}. Only the IDs the last \
+             run listed exist; nothing else can be named.\n"
+        );
+    }
+
+    let page = &run[..run.len().min(DETAIL_LIMIT)];
+    let mut text = format!(
+        "The {} of this model, named with this run's tag @{tag}, with the measurement \
+         that tells them apart:\n",
+        // The heading names the page that follows, not the range asked
+        // for, which may be wider than the IDs that exist.
+        run_label(
+            wanted,
+            kind_and_id(&page[0]).1,
+            kind_and_id(&page[page.len() - 1]).1
+        )
+    );
+    for element in page {
+        text.push_str(&detail_line(model, element, tag));
+    }
+    if let Some(next) = run.get(DETAIL_LIMIT) {
+        text.push_str(&format!(
+            "{} more in this run; ask again from {} for the rest.\n",
+            run.len() - DETAIL_LIMIT,
+            kind_and_id(next).1
+        ));
+    }
+    text
+}
+
+/// One element as the model reads it: the name to quote back, the line
+/// that made it, and the measurement that tells it from its siblings.
+fn detail_line(model: &ExecutedModel, element: &TopologyElement, tag: &ExecutionTag) -> String {
+    format!(
+        "- [{} @{tag}]: {}{}\n",
+        element.display_label(),
+        source_of(&model.ledger, element),
+        measurement_of(model, element)
+    )
 }
 
 /// Faces, then edges, then vertices, each in ID order.
@@ -463,6 +533,14 @@ fn run_label(kind: &str, first: u32, last: u32) -> String {
     }
 }
 
+fn kind_label(kind: ElementKind) -> &'static str {
+    match kind {
+        ElementKind::Face => "face",
+        ElementKind::Edge => "edge",
+        ElementKind::Vertex => "vertex",
+    }
+}
+
 fn kind_and_id(element: &TopologyElement) -> (&'static str, u32) {
     match element {
         TopologyElement::Face(FaceId(id)) => ("face", *id),
@@ -527,6 +605,34 @@ mod tests {
             validity: Vec::new(),
             model: ModelFile(std::path::PathBuf::from("/scratch/model.brep")),
         }
+    }
+
+    /// Eighty edges: forty from a box on line 6 and forty from a fillet on
+    /// line 8. More than the inventory lists singly, so the shape where
+    /// asking for a run's detail is the only way to tell one of an
+    /// operation's edges from another.
+    fn large_model() -> ExecutedModel {
+        let mut model = empty_model();
+        let total = DETAIL_LIMIT as u32 + 20;
+        for id in 0..total {
+            let (line, operation) = if id < 40 {
+                (6, SemanticOperation::Box)
+            } else {
+                (8, SemanticOperation::Fillet)
+            };
+            model
+                .ledger
+                .record_edge(EdgeId(id), made_at(line, operation))
+                .unwrap();
+        }
+        model.descriptors.edges = (0..total)
+            .map(|id| EdgeDescriptor {
+                curve_type: "line".to_string(),
+                length: 10.0 + f64::from(id),
+                centre: [f64::from(id), 0.0, 0.0],
+            })
+            .collect();
+        model
     }
 
     /// A box whose line 6 made four edges, and a fillet on line 8 that made
@@ -788,19 +894,7 @@ mod tests {
 
     #[test]
     fn a_large_model_is_summarised_by_source_as_id_ranges() {
-        let mut model = empty_model();
-        for id in 0..(DETAIL_LIMIT as u32 + 20) {
-            let line = if id < 40 { 6 } else { 8 };
-            let operation = if id < 40 {
-                SemanticOperation::Box
-            } else {
-                SemanticOperation::Fillet
-            };
-            model
-                .ledger
-                .record_edge(EdgeId(id), made_at(line, operation))
-                .unwrap();
-        }
+        let model = large_model();
         let tag = execution_tag(&model);
         let text = describe_elements(&model, &tag);
         assert!(text.contains(&format!("[edge 12 @{tag}]")));
@@ -809,5 +903,75 @@ mod tests {
         assert!(!text.contains("- [edge 0]"));
         // The summary's length follows the operations, not the elements.
         assert!(text.lines().count() < 8, "{text}");
+        // Detail is deferred, not withdrawn: the summary says where to
+        // get the per-element measurements it leaves out.
+        assert!(text.contains("inspect_elements"), "{text}");
+    }
+
+    #[test]
+    fn a_run_of_a_large_models_ids_is_detailed_element_by_element_when_asked_for() {
+        let model = large_model();
+        let tag = execution_tag(&model);
+        let text = describe_run(&model, &tag, ElementKind::Edge, 40, Some(43));
+        // Every element of the run is named singly, with the measurement
+        // that separates it from the rest of its operation.
+        assert!(text.contains(&format!(
+            "- [edge 40 @{tag}]: created by fillet at line 8, line edge, length 50 mm"
+        )));
+        assert!(text.contains(&format!("- [edge 43 @{tag}]")));
+        assert_eq!(text.matches("- [edge ").count(), 4, "{text}");
+        // And nothing outside the run.
+        assert!(!text.contains("[edge 39 "), "{text}");
+        assert!(!text.contains("[edge 44 "), "{text}");
+    }
+
+    #[test]
+    fn one_element_is_a_run_with_no_end() {
+        let model = large_model();
+        let tag = execution_tag(&model);
+        let text = describe_run(&model, &tag, ElementKind::Edge, 71, None);
+        assert!(text.contains(&format!("- [edge 71 @{tag}]")), "{text}");
+        assert_eq!(text.matches("- [edge ").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_run_longer_than_one_page_is_answered_a_page_at_a_time() {
+        let model = large_model();
+        let tag = execution_tag(&model);
+        let text = describe_run(&model, &tag, ElementKind::Edge, 0, Some(1000));
+        // The answer is bounded however wide the run asked for, and says
+        // where the next page starts, so no model is too large to detail.
+        assert_eq!(text.matches("- [edge ").count(), DETAIL_LIMIT, "{text}");
+        assert!(
+            text.contains(&format!(
+                "{} more in this run; ask again from 60",
+                80 - DETAIL_LIMIT
+            )),
+            "{text}"
+        );
+        let rest = describe_run(&model, &tag, ElementKind::Edge, 60, Some(1000));
+        assert_eq!(
+            rest.matches("- [edge ").count(),
+            80 - DETAIL_LIMIT,
+            "{rest}"
+        );
+        assert!(!rest.contains("ask again"), "{rest}");
+    }
+
+    #[test]
+    fn a_run_of_ids_the_model_does_not_have_details_nothing() {
+        let model = large_model();
+        let tag = execution_tag(&model);
+        // Past the end of the model, and a kind it has none of.
+        for text in [
+            describe_run(&model, &tag, ElementKind::Edge, 200, Some(300)),
+            describe_run(&model, &tag, ElementKind::Vertex, 0, Some(300)),
+        ] {
+            assert!(!text.contains("- ["), "{text}");
+            assert!(
+                text.contains("Only the IDs the last run listed exist"),
+                "{text}"
+            );
+        }
     }
 }

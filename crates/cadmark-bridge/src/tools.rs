@@ -19,6 +19,8 @@ pub const RUN_SCRIPT: &str = "run_script";
 pub const LOOKUP_DOCS: &str = "lookup_docs";
 /// The tool that shows the model the current viewport.
 pub const RENDER_VIEW: &str = "render_view";
+/// The tool that details a run of the current model's elements.
+pub const INSPECT_ELEMENTS: &str = "inspect_elements";
 
 /// Arguments of `run_script`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +57,27 @@ pub enum RenderView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderViewArgs {
     pub view: RenderView,
+}
+
+/// Which kind of element `inspect_elements` is being asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElementKind {
+    Face,
+    Edge,
+    Vertex,
+}
+
+/// Arguments of `inspect_elements`: one run of IDs of one kind, written
+/// the way a run result lists them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InspectElementsArgs {
+    pub kind: ElementKind,
+    /// The first ID wanted.
+    pub first: u32,
+    /// The last ID wanted; one element when absent.
+    #[serde(default)]
+    pub last: Option<u32>,
 }
 
 pub fn run_script_spec() -> ToolSpec {
@@ -114,11 +137,36 @@ pub fn render_view_spec() -> ToolSpec {
     }
 }
 
+pub fn inspect_elements_spec() -> ToolSpec {
+    ToolSpec {
+        name: INSPECT_ELEMENTS.to_string(),
+        description: "Get the source line and measurements of a run of the current model's \
+                      elements, by ID. Use when a run result listed elements as ID ranges \
+                      rather than singly and you need to tell one element of an operation \
+                      from another before naming it in your reply."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["face", "edge", "vertex"]},
+                "first": {"type": "integer", "minimum": 0, "description": "The first ID wanted."},
+                "last": {"type": "integer", "minimum": 0, "description": "The last ID wanted; omit for one element."}
+            },
+            "required": ["kind", "first"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 /// The tools offered for one turn. The render tool is offered only to a
 /// model that reads images; a text-only model is told so in the
 /// instructions rather than handed a tool it cannot use.
 pub fn tools_for(accepts_images: bool) -> Vec<ToolSpec> {
-    let mut tools = vec![run_script_spec(), lookup_docs_spec()];
+    let mut tools = vec![
+        run_script_spec(),
+        lookup_docs_spec(),
+        inspect_elements_spec(),
+    ];
     if accepts_images {
         tools.push(render_view_spec());
     }
@@ -137,6 +185,21 @@ mod tests {
         let render: RenderViewArgs = serde_json::from_value(json!({"view": "top"})).unwrap();
         assert_eq!(render.view, RenderView::Top);
         assert!(serde_json::from_value::<RenderViewArgs>(json!({"view": "sideways"})).is_err());
+        let run: InspectElementsArgs =
+            serde_json::from_value(json!({"kind": "edge", "first": 40, "last": 79})).unwrap();
+        assert_eq!(run.kind, ElementKind::Edge);
+        assert_eq!((run.first, run.last), (40, Some(79)));
+        // One element is a run with no end.
+        let one: InspectElementsArgs =
+            serde_json::from_value(json!({"kind": "face", "first": 3})).unwrap();
+        assert_eq!(
+            (one.kind, one.first, one.last),
+            (ElementKind::Face, 3, None)
+        );
+        assert!(
+            serde_json::from_value::<InspectElementsArgs>(json!({"kind": "loop", "first": 1}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -147,7 +210,10 @@ mod tests {
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(true), [RUN_SCRIPT, LOOKUP_DOCS, RENDER_VIEW]);
-        assert_eq!(names(false), [RUN_SCRIPT, LOOKUP_DOCS]);
+        assert_eq!(
+            names(true),
+            [RUN_SCRIPT, LOOKUP_DOCS, INSPECT_ELEMENTS, RENDER_VIEW]
+        );
+        assert_eq!(names(false), [RUN_SCRIPT, LOOKUP_DOCS, INSPECT_ELEMENTS]);
     }
 }
