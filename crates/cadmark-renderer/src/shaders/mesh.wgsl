@@ -16,8 +16,10 @@ struct Uniforms {
     _pad1: f32,
     selected_id: u32,
     hover_id: u32,
+    marker_count: u32,
     _pad2: u32,
     _pad3: u32,
+    _pad4: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }
@@ -103,7 +105,7 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     // Application-provided markers come before transient selection and hover.
     // They contain only topology IDs and colours, never conversation state.
     let fid = u32(in.face_id + 0.5);
-    for (var index = 0u; index < arrayLength(&markers); index++) {
+    for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if fid == markers[index].element_id && fid != 0u {
             let marker = markers[index].colour;
             colour = mix(colour, marker.rgb, marker.a);

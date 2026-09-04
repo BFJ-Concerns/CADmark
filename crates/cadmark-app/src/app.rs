@@ -264,7 +264,7 @@ impl CadmarkApp {
 
     /// Leave a spatial comment pending so several comments can form one turn.
     fn stage_spatial_comment(&mut self, text: String, anchors: Vec<GeometryContext>) {
-        self.pending_comments.add(text, anchors);
+        stage_pending_comment(&mut self.pending_comments, text, anchors);
         self.chat.focus_input();
     }
 
@@ -1266,6 +1266,16 @@ fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
         .collect()
 }
 
+/// Stage a spatial comment without touching persisted conversation history.
+/// The batch enters history only when it is dispatched as a turn.
+fn stage_pending_comment(
+    pending: &mut PendingComments,
+    text: String,
+    anchors: Vec<GeometryContext>,
+) {
+    pending.add(text, anchors);
+}
+
 fn standard_view(view: toolbar::StandardView) -> StandardView {
     match view {
         toolbar::StandardView::Front => StandardView::Front,
@@ -1342,9 +1352,10 @@ impl eframe::App for CadmarkApp {
 mod tests {
     use cadmark_core::geometry::{FaceId, GeometryContext, ModelSummary, TopologyElement};
     use cadmark_core::ledger::LedgerValue;
+    use cadmark_core::message::Conversation;
     use cadmark_core::pending_comment::PendingComments;
 
-    use super::{grounded_comments, pending_markers, turn_chat_message};
+    use super::{grounded_comments, pending_markers, stage_pending_comment, turn_chat_message};
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -1410,6 +1421,23 @@ mod tests {
             ]
         );
         assert_eq!(markers.len(), 2);
-        assert_ne!(markers[0].colour, markers[1].colour);
+        assert_eq!(markers[0].colour, pending.comments()[0].marker_colour());
+        assert_eq!(markers[1].colour, pending.comments()[1].marker_colour());
+    }
+
+    #[test]
+    fn staging_a_second_comment_keeps_the_first_unsent_and_intact() {
+        let mut pending = PendingComments::default();
+        let conversation = Conversation::new();
+        stage_pending_comment(&mut pending, "round this".into(), vec![anchor(1)]);
+        stage_pending_comment(&mut pending, "chamfer this".into(), vec![anchor(2)]);
+
+        assert!(conversation.is_empty(), "staging must not start a turn");
+        assert_eq!(pending.comments().len(), 2);
+        assert_eq!(pending.comments()[0].text, "round this");
+        assert_eq!(
+            pending.comments()[0].anchors[0].element(),
+            &TopologyElement::Face(FaceId(1))
+        );
     }
 }

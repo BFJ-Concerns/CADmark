@@ -21,6 +21,8 @@ All notable changes to this project will be documented in this file.
   the navigation controls
 
 ### Changed
+- Spatial comments stay as editable, removable pending cards and send together
+  with chat text as one turn; their viewport highlights share each card's colour
 - Coherent dark theme shared by every panel: one accent colour for
   selection in the viewport and spatial comments in chat, three text
   levels, card-based messages

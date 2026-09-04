@@ -56,8 +56,11 @@ pub struct MeshUniforms {
     pub _pad1: f32,
     pub selected_id: u32,
     pub hover_id: u32,
+    /// Number of live entries at the front of the marker storage buffer.
+    pub marker_count: u32,
     pub _pad2: u32,
     pub _pad3: u32,
+    pub _pad4: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
 }
@@ -687,8 +690,10 @@ impl Renderer {
             _pad1: 0.0,
             selected_id: self.selected_id,
             hover_id: self.hover_id,
+            marker_count: self.markers.len().try_into().unwrap_or(u32::MAX),
             _pad2: 0,
             _pad3: 0,
+            _pad4: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
         }
@@ -826,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn marker_list_keeps_each_topology_id_with_its_own_colour() {
+    fn marker_uniforms_name_only_live_entries() {
         let mut renderer = Renderer::new();
         renderer.markers = vec![
             ViewportMarker {
@@ -839,9 +844,13 @@ mod tests {
             },
         ];
 
-        assert_eq!(renderer.markers[0].element_id, 4);
-        assert_eq!(renderer.markers[0].colour, [0.8, 0.2, 0.1, 0.7]);
-        assert_eq!(renderer.markers[1].element_id, 9);
-        assert_eq!(renderer.markers[1].colour, [0.1, 0.5, 0.9, 0.7]);
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(uniforms.marker_count, 2);
+
+        renderer.markers.pop();
+        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 1);
+
+        renderer.markers.clear();
+        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 0);
     }
 }
