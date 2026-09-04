@@ -196,7 +196,7 @@ mod tests {
                     identification,
                     source_context: "lines 3-7:\n3 | with BuildPart():\n5 | Box(10, 10, 2)".into(),
                     neighbours: vec![TopologyElement::Edge(EdgeId(1))],
-                chosen_candidate: None,
+                    chosen_candidate: None,
                 },
                 GeometryContext {
                     element: TopologyElement::Edge(EdgeId(4)),
@@ -210,7 +210,7 @@ mod tests {
                         TopologyElement::Face(FaceId(0)),
                         TopologyElement::Vertex(VertexId(2)),
                     ],
-                chosen_candidate: None,
+                    chosen_candidate: None,
                 },
                 GeometryContext {
                     element: TopologyElement::Edge(EdgeId(9)),
@@ -219,7 +219,7 @@ mod tests {
                     source_context:
                         "lines 1-3:\n1 | from build123d import *\n2 | part = imported_shape".into(),
                     neighbours: vec![TopologyElement::Edge(EdgeId(8))],
-                chosen_candidate: None,
+                    chosen_candidate: None,
                 },
             ],
         };
@@ -249,7 +249,7 @@ mod tests {
                 identification: Default::default(),
                 source_context: String::new(),
                 neighbours: Vec::new(),
-            chosen_candidate: None,
+                chosen_candidate: None,
             }],
         });
 
