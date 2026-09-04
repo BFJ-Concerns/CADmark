@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use cadmark_bridge::backend::ImageData;
 use cadmark_bridge::tools::RenderView;
 use cadmark_core::mesh::TessellatedMesh;
+use cadmark_core::sketch::SketchProfile;
+use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
 use cadmark_renderer::camera::{Bounds3, Camera, StandardView};
 use cadmark_renderer::offscreen::{OffscreenRenderer, RenderedImage};
 use cadmark_renderer::pipeline::Renderer;
@@ -40,6 +42,10 @@ struct Scene {
     /// The mesh on screen. Shared rather than copied: a turn's render
     /// must not depend on the mesh still being current when it runs.
     mesh: Option<Arc<TessellatedMesh>>,
+    /// The sketch profile on screen, when the design has reached only a
+    /// sketch. Published alongside the mesh so a render of a sketch-only
+    /// design shows the profile rather than an empty frame.
+    sketch: Option<Arc<SketchProfile>>,
     bounds: Option<Bounds3>,
     camera: Camera,
     /// The viewport's size in physical pixels.
@@ -69,6 +75,23 @@ impl SceneHandle {
             None => {
                 scene.mesh = None;
                 scene.bounds = None;
+            }
+        }
+    }
+
+    /// Publish the sketch profile now on screen, or its absence.
+    pub fn set_sketch(&self, sketch: Option<(Arc<SketchProfile>, Option<Bounds3>)>) {
+        let mut scene = self.lock();
+        match sketch {
+            Some((sketch, bounds)) => {
+                scene.bounds = bounds.or_else(|| Bounds3::from_positions(sketch.points()));
+                scene.sketch = Some(sketch);
+            }
+            None => {
+                scene.sketch = None;
+                if scene.mesh.is_none() {
+                    scene.bounds = None;
+                }
             }
         }
     }
@@ -124,15 +147,29 @@ impl ViewportRender {
 }
 
 impl RenderSource for ViewportRender {
-    fn model_built(&mut self, mesh: &TessellatedMesh) {
-        // Bounds are left to the scene to derive from the vertices, so
+    fn model_built(&mut self, model: &ExecutedModel) {
+        // Bounds are left to the scene to derive from the geometry, so
         // this is the same published shape the UI thread produces.
-        self.scene.set_mesh(Some((Arc::new(mesh.clone()), None)));
+        match &model.form {
+            ModelForm::Solid(_) => {
+                self.scene.set_sketch(None);
+                self.scene
+                    .set_mesh(Some((Arc::new(model.mesh.clone()), None)));
+            }
+            ModelForm::Sketch(sketch) => {
+                // The solid already on screen stays published: a sketch
+                // draws in front of it, ghosted, rather than replacing it.
+                self.scene
+                    .set_sketch(Some((Arc::new(sketch.clone()), None)));
+            }
+        }
     }
 
     fn render(&mut self, view: RenderView) -> Result<ImageData, String> {
         let scene = self.scene.snapshot();
-        let (Some(mesh), Some(bounds)) = (scene.mesh.clone(), scene.bounds) else {
+        let sketch = scene.sketch.clone();
+        let mesh = scene.mesh.clone();
+        let (Some(bounds), true) = (scene.bounds, mesh.is_some() || sketch.is_some()) else {
             return Err("there is no model on screen to render; run the script first".to_string());
         };
 
@@ -153,6 +190,9 @@ impl RenderSource for ViewportRender {
 
         let mut state = Renderer::new();
         state.camera = camera;
+        // A profile in front of a ghosted solid is what the viewport
+        // shows, so it is what the model is shown too.
+        state.ghost_solid = sketch.is_some();
         // The offscreen target is not an sRGB format, so the shader
         // display-encodes its own output.
         state.target_is_srgb = false;
@@ -161,7 +201,8 @@ impl RenderSource for ViewportRender {
             .render(
                 &self.gpu.device,
                 &self.gpu.queue,
-                Some(mesh.as_ref()),
+                mesh.as_deref(),
+                sketch.as_deref(),
                 &state.mesh_uniforms(aspect),
                 RENDER_CLEAR,
             )

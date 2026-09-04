@@ -19,7 +19,9 @@ struct Uniforms {
     highlight_count: u32,
     _pad3: u32,
     marker_count: u32,
-    _pad4: u32,
+    // Fades the solid towards the background so a sketch drawn in
+    // front of it reads as the live thing.
+    ghost: f32,
     selected_part_id: u32,
     hover_part_id: u32,
     selected_colour: vec4<f32>,
@@ -92,6 +94,9 @@ const SKY_COLOUR: vec3<f32> = vec3<f32>(0.30, 0.33, 0.38);
 const GROUND_COLOUR: vec3<f32> = vec3<f32>(0.12, 0.11, 0.10);
 const KEY_COLOUR: vec3<f32> = vec3<f32>(1.00, 0.97, 0.92);
 const FILL_COLOUR: vec3<f32> = vec3<f32>(0.45, 0.50, 0.60);
+// What a ghosted solid fades towards — the viewport background, linear,
+// so a faded solid settles into it rather than onto a grey of its own.
+const GHOST_COLOUR: vec3<f32> = vec3<f32>(0.021, 0.023, 0.030);
 
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let lo = c * 12.92;
@@ -150,6 +155,7 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a * 0.7);
     }
 
+    colour = mix(colour, GHOST_COLOUR, clamp(uniforms.ghost, 0.0, 1.0));
     colour = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));
     if uniforms.encode_srgb != 0u {
         colour = linear_to_srgb(colour);

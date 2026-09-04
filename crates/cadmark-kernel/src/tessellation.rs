@@ -209,18 +209,33 @@ pub(crate) fn unwrap_shape<'py>(
     }
 }
 
-/// Discover every completed top-level solid in source binding order. A shape
-/// can arrive through a completed `BuildPart`, algebra mode, or the direct API.
-/// Repeated bindings of the same shape are aliases, not extra parts; the last
-/// alias supplies the user-facing binding name. Python has already resolved
-/// repeated bindings of one name before this point, so staged construction
-/// should rebind that name rather than leave intermediate shapes bound.
-pub(crate) fn find_result_shapes<'py>(
+/// What a script left at the top level of its namespace.
+#[derive(Debug)]
+pub(crate) enum ScriptResult<'py> {
+    /// Every completed 3D result, in source binding order, each with the
+    /// binding name that names it: a completed `BuildPart`'s part, or a
+    /// `Part`, `Solid`, or `Compound` bound at the top level. Never empty.
+    Solids(Vec<(String, Bound<'py, PyAny>)>),
+    /// A sketch or a line and no solid: the script has drawn a profile and
+    /// not yet made anything of it. Its own kind of result, not a failure.
+    Sketch(Bound<'py, PyAny>),
+}
+
+/// The result of a script, whichever build123d idiom wrote it. Every
+/// distinct completed solid is a part of its own, so a script may leave
+/// several; repeated bindings of the same shape are aliases rather than
+/// extra parts, and the last alias supplies the user-facing name. Python
+/// has already resolved repeated bindings of one name before this point,
+/// so staged construction should rebind that name rather than leave
+/// intermediate shapes bound. Solids win over sketches however they are
+/// ordered — a script that sketches a profile and extrudes it has reached
+/// a solid — and only a script with no solid at all is a sketch result.
+pub(crate) fn find_result_shape<'py>(
     namespace: &Bound<'py, PyDict>,
-) -> Result<Vec<(String, Bound<'py, PyAny>)>, TessellationError> {
+) -> Result<ScriptResult<'py>, TessellationError> {
     let mut namespace_debug = Vec::new();
     let mut solids: Vec<(String, Bound<'py, PyAny>)> = Vec::new();
-    let mut flat_outputs = Vec::new();
+    let mut sketches: Vec<(String, Bound<'py, PyAny>)> = Vec::new();
 
     for (name, value) in namespace.iter() {
         let Ok(name) = name.extract::<String>() else {
@@ -254,7 +269,7 @@ pub(crate) fn find_result_shapes<'py>(
                     has_non_none_attr(&value, "wrapped")?
                 };
                 if held {
-                    flat_outputs.push(format!("{name}: {type_name}"));
+                    sketches.push((name, value));
                 }
             }
             "Part" | "Solid" | "Compound" if has_non_none_attr(&value, "wrapped")? => {
@@ -271,17 +286,23 @@ pub(crate) fn find_result_shapes<'py>(
     };
     log::debug!("Script namespace contents: {namespace_debug}");
 
+    // Dict iteration is insertion order, so the parts come out in the order
+    // the script bound them.
     if !solids.is_empty() {
-        return Ok(solids);
+        log::debug!(
+            "Result parts: {}",
+            solids
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        return Ok(ScriptResult::Solids(solids));
     }
 
-    if !flat_outputs.is_empty() {
-        let details = flat_outputs.join(", ");
-        return Err(TessellationError::UnsupportedScriptOutput(format!(
-            "The script produced a sketch or curve but no solid yet ({details}). \
-             Extrude, revolve, loft or sweep it into a Part, or leave a Part, Solid, \
-             Compound, or completed BuildPart at the top level."
-        )));
+    if let Some((name, sketch)) = sketches.pop() {
+        log::debug!("Result is the sketch `{name}`");
+        return Ok(ScriptResult::Sketch(sketch));
     }
 
     log::error!("No 3D result found. Contents: {namespace_debug}");
@@ -440,10 +461,26 @@ class BuildSketch:
         namespace
     }
 
+    /// Every part a script was expected to leave, failing the test when it
+    /// left a sketch instead.
     fn discover<'py>(
         namespace: &Bound<'py, PyDict>,
     ) -> Result<Vec<(String, Bound<'py, PyAny>)>, TessellationError> {
-        find_result_shapes(namespace)
+        match find_result_shape(namespace)? {
+            ScriptResult::Solids(shapes) => Ok(shapes),
+            ScriptResult::Sketch(_) => panic!("expected a solid result, got a sketch"),
+        }
+    }
+
+    /// The single solid a script was expected to leave.
+    fn solid<'py>(result: ScriptResult<'py>) -> Bound<'py, PyAny> {
+        match result {
+            ScriptResult::Solids(mut shapes) => {
+                assert_eq!(shapes.len(), 1, "expected exactly one part");
+                shapes.pop().expect("one part").1
+            }
+            ScriptResult::Sketch(_) => panic!("expected a solid result, got a sketch"),
+        }
     }
 
     #[test]
@@ -514,21 +551,45 @@ class BuildSketch:
     }
 
     #[test]
-    fn a_sketch_only_script_is_reported_as_not_yet_a_solid() {
+    fn a_sketch_only_script_is_a_sketch_result_not_a_failure() {
         Python::with_gil(|py| {
-            for script in [
-                c"sketch = BuildSketch(Sketch())",
-                c"profile = Sketch()",
-                c"f = Face()",
+            for (script, expected) in [
+                (c"sketch = BuildSketch(Sketch())", "BuildSketch"),
+                (c"profile = Sketch()", "Sketch"),
+                (c"f = Face()", "Face"),
             ] {
                 let namespace = namespace_from(py, script);
-                let err = discover(&namespace).unwrap_err();
-                assert!(
-                    matches!(err, TessellationError::UnsupportedScriptOutput(_)),
-                    "{script:?}"
-                );
-                assert!(err.to_string().contains("no solid yet"), "{err}");
+                match find_result_shape(&namespace).unwrap() {
+                    ScriptResult::Sketch(sketch) => {
+                        assert_eq!(sketch.get_type().name().unwrap(), expected)
+                    }
+                    ScriptResult::Solids(_) => panic!("{script:?} produced no solid"),
+                }
             }
+        });
+    }
+
+    #[test]
+    fn a_sketch_extruded_into_a_solid_is_a_solid_result() {
+        Python::with_gil(|py| {
+            // Both bindings survive to the end of a builder script; the
+            // solid is the result whichever order they were bound in.
+            let namespace = namespace_from(py, c"s = BuildSketch(Sketch())\np = Part()");
+            assert_eq!(
+                solid(find_result_shape(&namespace).unwrap())
+                    .get_type()
+                    .name()
+                    .unwrap(),
+                "Part"
+            );
+            let namespace = namespace_from(py, c"p = Part()\ns = BuildSketch(Sketch())");
+            assert_eq!(
+                solid(find_result_shape(&namespace).unwrap())
+                    .get_type()
+                    .name()
+                    .unwrap(),
+                "Part"
+            );
         });
     }
 
@@ -547,8 +608,8 @@ class BuildSketch:
     fn tessellation_injects_result_shape_before_running_helper_code() {
         Python::with_gil(|py| {
             let namespace = namespace_from(py, c"part = BuildPart(Part())");
-            let (_, shape) = discover(&namespace).unwrap().pop().unwrap();
-            namespace.set_item("_cadmark_result_shape", shape).unwrap();
+            let shape = solid(find_result_shape(&namespace).unwrap());
+            namespace.set_item("_cadmark_result_shape", &shape).unwrap();
             let err = py.run(TESSELLATE_CODE, Some(&namespace), None).unwrap_err();
             assert!(!err.to_string().contains("_cadmark_result_shape"));
 
