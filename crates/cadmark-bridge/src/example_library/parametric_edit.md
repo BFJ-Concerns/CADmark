@@ -12,7 +12,8 @@ from build123d import *
 
 # Parameters
 plate_width = 60.0
-plate_depth = 40.0
+plate_aspect = 2 / 3
+plate_depth = plate_width * plate_aspect
 plate_thickness = 5.0
 
 with BuildPart() as plate:
@@ -34,9 +35,10 @@ from build123d import *
 
 # Parameters
 plate_width = 60.0
-plate_depth = 40.0
+plate_aspect = 2 / 3
+plate_depth = plate_width * plate_aspect
 plate_thickness = 5.0
-corner_radius = 6.0  # added for this edit
+corner_radius = plate_depth / 8  # added for this edit, derived like the rest
 
 with BuildPart() as plate:
     with BuildSketch(Plane.XY):

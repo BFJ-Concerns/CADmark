@@ -120,10 +120,6 @@ pub const LIBRARY: &[Example] = &[
 /// route into a part.
 const FALLBACK: &str = "sketched_profile_extrude";
 
-/// How many examples one request carries, so a long request cannot push
-/// the whole library into the context.
-const MOST_PER_REQUEST: usize = 3;
-
 /// The examples a request selects, in library order.
 pub fn select(request: &str) -> Vec<&'static Example> {
     let words: Vec<String> = request
@@ -132,6 +128,10 @@ pub fn select(request: &str) -> Vec<&'static Example> {
         .map(|word| word.to_lowercase())
         .collect();
 
+    // Every operation the request names gets its material: C34 is a
+    // per-operation obligation, so a request naming four covered
+    // operations carries four examples. The library's own size is the
+    // only bound.
     let mut selected: Vec<&'static Example> = LIBRARY
         .iter()
         .filter(|example| {
@@ -142,7 +142,6 @@ pub fn select(request: &str) -> Vec<&'static Example> {
             })
         })
         .collect();
-    selected.truncate(MOST_PER_REQUEST);
 
     if selected.is_empty() {
         selected.extend(LIBRARY.iter().filter(|example| example.name == FALLBACK));
@@ -201,9 +200,19 @@ mod tests {
     }
 
     #[test]
-    fn no_request_carries_more_than_the_per_request_limit() {
-        let everything = "sketch extrude revolve cut hole fillet chamfer algebra parameter edit";
-        assert_eq!(select(everything).len(), MOST_PER_REQUEST);
+    fn every_operation_a_request_names_carries_its_own_example() {
+        let names = select("extrude the profile, revolve the boss, cut a hole, fillet the corners")
+            .into_iter()
+            .map(|example| example.name)
+            .collect::<Vec<_>>();
+        for expected in [
+            "sketched_profile_extrude",
+            "revolve_profile",
+            "cut_and_holes",
+            "fillet_and_chamfer",
+        ] {
+            assert!(names.contains(&expected), "{expected} was dropped");
+        }
     }
 
     #[test]
@@ -231,7 +240,43 @@ mod tests {
                 "{} must show a named parameter block",
                 example.name
             );
+            assert!(
+                has_a_derived_parameter(example.body),
+                "{} must derive at least one parameter from another (C33)",
+                example.name
+            );
         }
+    }
+
+    /// Whether any parameter assignment's right-hand side names a
+    /// parameter assigned above it — a derived value rather than a
+    /// literal.
+    fn has_a_derived_parameter(body: &str) -> bool {
+        let mut assigned: Vec<&str> = Vec::new();
+        for line in body.lines() {
+            let line = line.trim();
+            let Some((left, right)) = line.split_once('=') else {
+                continue;
+            };
+            if right.starts_with('=') || left.ends_with(['!', '<', '>', '=']) {
+                continue;
+            }
+            let name = left.trim();
+            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            let right = right.split('#').next().unwrap_or(right);
+            let referenced = assigned.iter().any(|earlier| {
+                right
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .any(|word| word == *earlier)
+            });
+            if referenced {
+                return true;
+            }
+            assigned.push(name);
+        }
+        false
     }
 
     #[test]
