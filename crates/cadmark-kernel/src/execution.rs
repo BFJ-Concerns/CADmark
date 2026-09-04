@@ -1666,12 +1666,9 @@ with BuildPart() as part:
     thicken(amount=3)
 "#);
         let result = result.unwrap();
-        assert_operation_relation(
+        assert_every_element_resolves_to(
             &result,
-            SemanticOperation::Thicken,
-            ProvenanceRelation::Generated,
-            6,
-            |element| matches!(element, TopologyElement::Face(_)),
+            (SemanticOperation::Thicken, ProvenanceRelation::Generated, 6),
         );
         assert_bridge_consumers(&result);
     }
