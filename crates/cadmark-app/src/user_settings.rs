@@ -218,10 +218,16 @@ fn invalid_settings_error(path: &Path, field: Option<&str>, error: &serde_json::
                 path.display(),
             ),
         },
-        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => format!(
-            "{} contains invalid settings near {location}; correct the JSON syntax and try again",
-            path.display(),
-        ),
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => match field {
+            Some(field) => format!(
+                "{} has invalid JSON for {field} near {location}; correct the JSON syntax and try again",
+                path.display(),
+            ),
+            None => format!(
+                "{} contains invalid settings near {location}; correct the JSON syntax and try again",
+                path.display(),
+            ),
+        },
         serde_json::error::Category::Io => format!(
             "{} contains invalid settings near {location}; correct the JSON syntax and try again",
             path.display(),
