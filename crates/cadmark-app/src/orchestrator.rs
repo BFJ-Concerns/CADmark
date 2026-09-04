@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use cadmark_bridge::AiServices;
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::export::ExportFormat;
+use cadmark_core::geometry::{MinimumDistance, TopologyElement};
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::Conversation;
 use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
@@ -36,6 +37,12 @@ pub enum OrchestratorCommand {
         format: ExportFormat,
         path: PathBuf,
     },
+    /// Measure two elements from the model currently on screen.
+    MinimumDistance {
+        model: ModelFile,
+        first: TopologyElement,
+        second: TopologyElement,
+    },
     /// The user changed the execution ceilings in settings.
     SetLimits(ExecutionLimits),
 }
@@ -59,6 +66,12 @@ pub enum OrchestratorResult {
     Exported {
         format: ExportFormat,
         result: Result<PathBuf, String>,
+    },
+    /// The requested minimum distance completed.
+    MinimumDistanceMeasured {
+        first: TopologyElement,
+        second: TopologyElement,
+        result: Result<MinimumDistance, String>,
     },
 }
 
@@ -174,6 +187,24 @@ impl Orchestrator {
             .map_err(|error| error.to_string());
         OrchestratorResult::Exported { format, result }
     }
+
+    fn handle_minimum_distance(
+        &mut self,
+        model: &ModelFile,
+        first: TopologyElement,
+        second: TopologyElement,
+    ) -> OrchestratorResult {
+        let result = self
+            .executor
+            .worker
+            .minimum_distance(model, first.clone(), second.clone(), self.executor.limits)
+            .map_err(|error| error.to_string());
+        OrchestratorResult::MinimumDistanceMeasured {
+            first,
+            second,
+            result,
+        }
+    }
 }
 
 /// Spawn the worker on its own thread with channel communication.
@@ -234,6 +265,11 @@ pub fn spawn_orchestrator(
                             format,
                             path,
                         } => orchestrator.handle_export(&model, format, &path),
+                        OrchestratorCommand::MinimumDistance {
+                            model,
+                            first,
+                            second,
+                        } => orchestrator.handle_minimum_distance(&model, first, second),
                         OrchestratorCommand::SetLimits(limits) => {
                             orchestrator.executor.limits = limits;
                             continue;

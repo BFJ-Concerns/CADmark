@@ -97,6 +97,8 @@ pub struct EdgeDescriptor {
     /// OCCT curve classification, e.g. "line", "circle", "bspline".
     pub curve_type: String,
     pub length: f64,
+    /// Circle radius when this is a circular edge; absent for other curves.
+    pub radius: Option<f64>,
     pub centre: [f64; 3],
     pub neighbours: Vec<TopologyElement>,
 }
@@ -106,6 +108,20 @@ pub struct EdgeDescriptor {
 pub struct VertexDescriptor {
     pub position: [f64; 3],
     pub neighbours: Vec<TopologyElement>,
+}
+
+/// The closest separation between two selected topological elements, in mm.
+/// This remains plain data because it crosses the kernel worker boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MinimumDistance {
+    pub millimetres: f64,
+}
+
+impl MinimumDistance {
+    /// A compact label suitable for the in-app measurement readout.
+    pub fn describe(self) -> String {
+        format!("Minimum distance {} mm", compact(self.millimetres))
+    }
 }
 
 /// Whether one solid of the executed model is printable geometry: every
@@ -210,7 +226,7 @@ fn close(a: f64, b: f64) -> bool {
 }
 
 /// Format a measurement with as few decimals as convey it.
-fn compact(value: f64) -> String {
+pub fn compact(value: f64) -> String {
     if (value - value.round()).abs() < 5e-3 {
         format!("{}", value.round() as i64)
     } else {
@@ -280,6 +296,17 @@ mod tests {
         assert_eq!(
             summary(12.3456, [1.5, 1.0, 1.0], 6).describe(),
             "6 faces, volume 12.35 mm³, 1.50 × 1 × 1 mm"
+        );
+    }
+
+    #[test]
+    fn minimum_distance_describes_itself_compactly() {
+        assert_eq!(
+            MinimumDistance {
+                millimetres: 12.3456
+            }
+            .describe(),
+            "Minimum distance 12.35 mm"
         );
     }
 

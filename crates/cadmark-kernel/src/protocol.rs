@@ -6,7 +6,9 @@
 use std::path::PathBuf;
 
 use cadmark_core::export::ExportFormat;
-use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
+use cadmark_core::geometry::{
+    GeometryDescriptors, MinimumDistance, ModelSummary, SolidValidity, TopologyElement,
+};
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::mesh::TessellatedMesh;
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,12 @@ pub enum WorkerRequest {
         model: ModelFile,
         format: ExportFormat,
         path: PathBuf,
+    },
+    /// Measure the closest separation between two elements of a retained model.
+    MinimumDistance {
+        model: ModelFile,
+        first: TopologyElement,
+        second: TopologyElement,
     },
 }
 
@@ -83,13 +91,14 @@ impl WorkerFailure {
 pub enum WorkerReply {
     Executed(Box<ExecutedModel>),
     Exported,
+    MinimumDistance(MinimumDistance),
     Failed(WorkerFailure),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cadmark_core::geometry::{FaceId, ModelSummary};
+    use cadmark_core::geometry::{FaceId, MinimumDistance, ModelSummary, TopologyElement};
     use cadmark_core::ledger::LedgerValue;
 
     #[test]
@@ -128,6 +137,20 @@ mod tests {
         }));
         let line = serde_json::to_string(&reply).unwrap();
         assert!(!line.contains('\n'));
+        assert_eq!(serde_json::from_str::<WorkerReply>(&line).unwrap(), reply);
+
+        let request = WorkerRequest::MinimumDistance {
+            model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+            first: TopologyElement::Face(FaceId(0)),
+            second: TopologyElement::Face(FaceId(6)),
+        };
+        let line = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WorkerRequest>(&line).unwrap(),
+            request
+        );
+        let reply = WorkerReply::MinimumDistance(MinimumDistance { millimetres: 20.0 });
+        let line = serde_json::to_string(&reply).unwrap();
         assert_eq!(serde_json::from_str::<WorkerReply>(&line).unwrap(), reply);
     }
 
