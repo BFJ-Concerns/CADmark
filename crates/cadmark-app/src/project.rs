@@ -40,7 +40,6 @@ pub struct LoadedModel {
     pub model: ModelFile,
     /// Per-solid kernel validity retained for status and the export gate.
     pub validity: Vec<SolidValidity>,
-    pub printable: bool,
 }
 
 /// What the worker thread is doing, for the status bar and chat.
@@ -264,7 +263,6 @@ impl Project {
             model.mesh.vertices.len(),
             model.ledger.len(),
         );
-        let printable = model.is_printable();
         let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
         self.ledger = model.ledger;
         self.identification = Box::new(MeasuredIdentification {
@@ -275,7 +273,6 @@ impl Project {
             bounds,
             model: model.model,
             validity: model.validity,
-            printable,
         });
         self.script_source = Some(source);
         self.has_script = true;

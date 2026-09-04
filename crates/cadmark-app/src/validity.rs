@@ -82,7 +82,6 @@ fn parts_label(parts: &[usize]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     const VALID: SolidValidity = SolidValidity {
         closed: true,
         valid: true,
