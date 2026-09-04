@@ -48,6 +48,40 @@ impl StandardView {
 
 use crate::theme;
 
+/// The axis a section plane cuts along, mirrored from the renderer so the
+/// toolbar names no renderer type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl SectionAxis {
+    pub const ALL: [SectionAxis; 3] = [Self::X, Self::Y, Self::Z];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::X => "X",
+            Self::Y => "Y",
+            Self::Z => "Z",
+        }
+    }
+}
+
+/// The section plane's state, as the toolbar needs to draw it.
+#[derive(Debug, Clone, Copy)]
+pub struct SectionState {
+    pub enabled: bool,
+    pub axis: SectionAxis,
+    pub offset: f32,
+    pub flipped: bool,
+    /// The model's extent along the current axis, which bounds the slider.
+    /// A plane the user cannot drag past the part is a plane that always
+    /// shows something.
+    pub range: (f32, f32),
+}
+
 /// Action taken by the toolbar controls.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolbarAction {
@@ -86,6 +120,16 @@ pub enum ToolbarAction {
     ToggleProjection,
     /// Snap the camera to a standard view.
     StandardView(StandardView),
+    /// Turn the section plane on or off.
+    ToggleSection,
+    /// Cut the section along a different axis.
+    SetSectionAxis(SectionAxis),
+    /// Move the section plane to a position along its axis.
+    SetSectionOffset(f32),
+    /// Reverse which half of the model the section keeps.
+    FlipSection,
+    /// Switch the model between solid and see-through.
+    ToggleTransparency,
 }
 
 /// One part the user can switch to, as the toolbar shows it.
@@ -127,6 +171,10 @@ pub struct ToolbarState<'a> {
     pub export_warning: Option<&'a str>,
     /// The AI model in use, or `None` when AI is unavailable.
     pub ai_model: Option<&'a str>,
+    /// The section plane's current state.
+    pub section: SectionState,
+    /// Whether the model is drawn see-through.
+    pub transparent: bool,
 }
 
 /// The name a project folder is shown under: its final path component.
@@ -419,6 +467,66 @@ pub fn show_toolbar(
                     action = ToolbarAction::StandardView(view);
                     ui.close_menu();
                 }
+            }
+        });
+
+        // ── Seeing inside the part ─────────────────────────────────
+        // Both controls sit in the row itself rather than behind a menu or
+        // a dialog: they are adjustments the user makes while looking at
+        // the model, and neither takes the viewport or the chat away.
+        ui.add_enabled_ui(state.has_model, |ui| {
+            if ui
+                .add(egui::Button::new("\u{2702} Section").selected(state.section.enabled))
+                .on_hover_text("Cut away half the model to see inside it")
+                .clicked()
+            {
+                action = ToolbarAction::ToggleSection;
+            }
+
+            if state.section.enabled {
+                for axis in SectionAxis::ALL {
+                    if ui
+                        .add(
+                            egui::Button::new(axis.label())
+                                .selected(axis == state.section.axis)
+                                .min_size(egui::vec2(20.0, 0.0)),
+                        )
+                        .on_hover_text(format!("Cut along {}", axis.label()))
+                        .clicked()
+                    {
+                        action = ToolbarAction::SetSectionAxis(axis);
+                    }
+                }
+
+                let (low, high) = state.section.range;
+                let mut offset = state.section.offset;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut offset, low..=high)
+                            .show_value(false)
+                            .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.4 }),
+                    )
+                    .on_hover_text("Move the section plane along its axis")
+                    .changed()
+                {
+                    action = ToolbarAction::SetSectionOffset(offset);
+                }
+
+                if ui
+                    .add(egui::Button::new("\u{21C4}").selected(state.section.flipped))
+                    .on_hover_text("Keep the other half instead")
+                    .clicked()
+                {
+                    action = ToolbarAction::FlipSection;
+                }
+            }
+
+            if ui
+                .add(egui::Button::new("\u{25CE} Ghost").selected(state.transparent))
+                .on_hover_text("Make the model see-through")
+                .clicked()
+            {
+                action = ToolbarAction::ToggleTransparency;
             }
         });
 

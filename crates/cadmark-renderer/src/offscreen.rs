@@ -131,6 +131,11 @@ impl OffscreenRenderer {
             gpu_mesh.as_ref(),
             gpu_sketch.as_ref(),
             clear_colour,
+            // The offscreen render is what the AI is shown, so it draws
+            // the model the way the user has it: the same uniforms carry
+            // the section plane, and the alpha they carry chooses the
+            // pass, exactly as the viewport's own selector does.
+            uniforms.mesh_alpha < 1.0,
             &self.colour_view,
         );
         encoder.copy_texture_to_buffer(

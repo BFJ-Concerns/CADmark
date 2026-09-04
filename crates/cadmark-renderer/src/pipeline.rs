@@ -9,6 +9,12 @@ use crate::camera::Camera;
 use crate::mesh::{
     CORNER_TINT, EdgeVertex, GpuMesh, GpuSketch, GpuVertex, REGION_TINT, SketchVertex,
 };
+use crate::section::SectionPlane;
+
+/// Opacity of the shaded surface while the model is see-through. Low enough
+/// that an internal pocket reads through the near wall, high enough that the
+/// near wall is still visibly there.
+pub const TRANSPARENT_ALPHA: f32 = 0.35;
 
 /// One application-owned viewport marker. The renderer receives topology IDs
 /// and colours only; it does not know why an element is marked.
@@ -71,6 +77,16 @@ pub struct MeshUniforms {
     pub _pad5: [u32; 2],
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
+    /// Section plane as `[nx, ny, nz, d]`; a fragment is discarded when
+    /// `dot(n, world_pos) + d < 0`. All zeroes when no section is active,
+    /// which keeps every fragment without a second flag.
+    pub section_plane: [f32; 4],
+    /// Opacity of the shaded surface: 1.0 solid, less when the user has
+    /// switched the model to see-through.
+    pub mesh_alpha: f32,
+    pub _pad6: f32,
+    pub _pad7: f32,
+    pub _pad8: f32,
 }
 
 /// Initial length of the highlight storage buffer. It grows to whatever a
@@ -83,11 +99,18 @@ const HIGHLIGHT_INITIAL_CAPACITY: u64 = 64;
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimpleUniforms {
     pub view_proj: [[f32; 4]; 4],
+    /// The same section plane the visible passes use, in the same form.
+    /// Picking must clip identically: a face the section has cut away must
+    /// not still answer a click.
+    pub section_plane: [f32; 4],
 }
 
 /// GPU pipelines and resources for rendering.
 pub struct RenderPipelines {
     pub mesh_pipeline: wgpu::RenderPipeline,
+    /// The shaded pass again, alpha-blended with depth writes off, for when
+    /// the user has made the model see-through.
+    pub mesh_transparent_pipeline: wgpu::RenderPipeline,
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
     pub mesh_uniform_buffer: wgpu::Buffer,
     pub mesh_bind_group: wgpu::BindGroup,
@@ -252,6 +275,59 @@ impl RenderPipelines {
             cache: None,
         });
 
+        // The see-through variant of the same pass. Depth writes are off so
+        // a near surface cannot hide the interior behind it; the depth test
+        // stays on so the wireframe overlay still resolves against the
+        // surface it was drawn over.
+        let mesh_transparent_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mesh_transparent_pipeline"),
+                layout: Some(&mesh_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &mesh_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3, // position
+                            1 => Float32x3, // normal
+                            2 => Float32,   // face_id
+                            3 => Float32,   // _padding
+                        ],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &mesh_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    // As the opaque pass: CAD models may have non-manifold
+                    // faces, and culling would drop an open shell's far side
+                    // altogether — the one thing this mode exists to show.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
         // Picking layout — a single uniform buffer at binding 0 with
         // vertex-stage visibility.
         let simple_bind_group_layout =
@@ -259,7 +335,9 @@ impl RenderPipelines {
                 label: Some("simple_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // The fragment stage reads the section plane to discard
+                    // clipped geometry, so it binds this too.
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -630,6 +708,7 @@ impl RenderPipelines {
 
         Self {
             mesh_pipeline,
+            mesh_transparent_pipeline,
             mesh_bind_group_layout,
             mesh_uniform_buffer,
             mesh_bind_group,
@@ -740,6 +819,10 @@ pub struct Renderer {
     pub target_is_srgb: bool,
     /// Whether the solid is faded back behind a sketch profile.
     pub ghost_solid: bool,
+    /// The half-space the viewport keeps. Disabled by default.
+    pub section: SectionPlane,
+    /// Whether the shaded surface is drawn see-through.
+    pub transparent: bool,
 }
 
 /// How far a ghosted solid fades towards the background. Enough that the
@@ -758,6 +841,25 @@ impl Renderer {
             markers: Vec::new(),
             target_is_srgb: false,
             ghost_solid: false,
+            section: SectionPlane::default(),
+            transparent: false,
+        }
+    }
+
+    /// Opacity the shaded pass draws at this frame.
+    ///
+    /// Ghosting wins over see-through. A ghosted solid is already faded
+    /// towards the background so the sketch in front of it reads as the
+    /// live geometry; blending that same near-background colour again at
+    /// a third of its opacity would erase it, and the sketch would then
+    /// have nothing to read as being in front of. The see-through
+    /// setting is kept, not cleared, and takes effect again the moment
+    /// there is no sketch to ghost behind.
+    pub fn mesh_alpha(&self) -> f32 {
+        if self.transparent && !self.ghost_solid {
+            TRANSPARENT_ALPHA
+        } else {
+            1.0
         }
     }
 
@@ -790,6 +892,11 @@ impl Renderer {
             _pad5: [0; 2],
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
+            section_plane: self.section.equation(),
+            mesh_alpha: self.mesh_alpha(),
+            _pad6: 0.0,
+            _pad7: 0.0,
+            _pad8: 0.0,
         }
     }
 
@@ -799,6 +906,7 @@ impl Renderer {
         let proj = self.camera.projection_matrix(aspect_ratio);
         SimpleUniforms {
             view_proj: mat4_mul(proj, view),
+            section_plane: self.section.equation(),
         }
     }
 }
@@ -1208,6 +1316,14 @@ mod tests {
                 "hover_colour",
                 std::mem::offset_of!(MeshUniforms, hover_colour),
             ),
+            (
+                "section_plane",
+                std::mem::offset_of!(MeshUniforms, section_plane),
+            ),
+            ("mesh_alpha", std::mem::offset_of!(MeshUniforms, mesh_alpha)),
+            ("_pad6", std::mem::offset_of!(MeshUniforms, _pad6)),
+            ("_pad7", std::mem::offset_of!(MeshUniforms, _pad7)),
+            ("_pad8", std::mem::offset_of!(MeshUniforms, _pad8)),
         ]
         .into_iter()
         .map(|(name, offset)| (name.to_string(), offset as u32))
@@ -1300,6 +1416,197 @@ mod tests {
             assert!(vertex.position[1].abs() - half_width < 1e-6);
         }
         assert!(half_width > 0.0, "a marker with no size draws nothing");
+    }
+
+    /// Fields of the `Uniforms` struct in a WGSL source, as `(name, type)`.
+    fn wgsl_uniform_fields(source: &str) -> Vec<(String, String)> {
+        let body = source
+            .split_once("struct Uniforms {")
+            .expect("no Uniforms struct")
+            .1
+            .split_once('}')
+            .expect("unterminated Uniforms struct")
+            .0;
+
+        body.lines()
+            .map(|line| line.split("//").next().unwrap_or("").trim())
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let line = line.trim_end_matches(',');
+                let (name, ty) = line.split_once(':').expect("field without a type");
+                (name.trim().to_owned(), ty.trim().to_owned())
+            })
+            .collect()
+    }
+
+    /// Size of a WGSL uniform-address-space struct with these fields, under
+    /// WGSL's alignment rules. Compared against the Rust struct, this is what
+    /// catches a field added on one side and not the other.
+    fn wgsl_struct_size(fields: &[(String, String)]) -> usize {
+        let mut offset = 0usize;
+        let mut struct_align = 1usize;
+        for (_, ty) in fields {
+            let (align, size) = match ty.as_str() {
+                "f32" | "u32" | "i32" => (4, 4),
+                "vec2<f32>" | "vec2<u32>" => (8, 8),
+                "vec3<f32>" | "vec3<u32>" => (16, 12),
+                "vec4<f32>" | "vec4<u32>" => (16, 16),
+                "mat4x4<f32>" => (16, 64),
+                other => panic!("unhandled WGSL type in Uniforms: {other}"),
+            };
+            struct_align = struct_align.max(align);
+            offset = offset.div_ceil(align) * align + size;
+        }
+        offset.div_ceil(struct_align) * struct_align
+    }
+
+    const MESH_SHADER: &str = include_str!("shaders/mesh.wgsl");
+    const WIREFRAME_SHADER: &str = include_str!("shaders/wireframe.wgsl");
+    const PICKING_SHADER: &str = include_str!("shaders/picking.wgsl");
+
+    #[test]
+    fn every_shader_binding_mesh_uniforms_mirrors_the_whole_struct() {
+        // A field on the Rust struct with no counterpart in a shader that
+        // binds it does not fail to compile: the frame renders garbage
+        // silently, and every field past the mismatch is misread.
+        for (name, source) in [("mesh", MESH_SHADER), ("wireframe", WIREFRAME_SHADER)] {
+            let fields = wgsl_uniform_fields(source);
+            assert_eq!(
+                wgsl_struct_size(&fields),
+                std::mem::size_of::<MeshUniforms>(),
+                "{name}.wgsl's Uniforms is not the same size as MeshUniforms"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_shaders_sharing_mesh_uniforms_declare_it_identically() {
+        // The two bind one buffer through one bind group. Mirroring a change
+        // into one and not the other is the failure this catches.
+        assert_eq!(
+            wgsl_uniform_fields(MESH_SHADER),
+            wgsl_uniform_fields(WIREFRAME_SHADER),
+            "mesh.wgsl and wireframe.wgsl disagree about Uniforms"
+        );
+    }
+
+    #[test]
+    fn the_picking_shader_mirrors_the_whole_of_simple_uniforms() {
+        assert_eq!(
+            wgsl_struct_size(&wgsl_uniform_fields(PICKING_SHADER)),
+            std::mem::size_of::<SimpleUniforms>(),
+            "picking.wgsl's Uniforms is not the same size as SimpleUniforms"
+        );
+    }
+
+    #[test]
+    fn the_uniforms_carry_the_section_plane_to_the_visible_and_picking_passes() {
+        // Both must clip identically, or the user clicks a face the section
+        // cut away and selects something they cannot see.
+        let mut renderer = Renderer::new();
+        renderer.section = crate::section::SectionPlane {
+            enabled: true,
+            axis: crate::section::Axis::Y,
+            offset: 3.0,
+            flipped: true,
+        };
+
+        let expected = renderer.section.equation();
+        assert_ne!(expected, [0.0; 4]);
+        assert_eq!(renderer.mesh_uniforms(1.0).section_plane, expected);
+        assert_eq!(renderer.simple_uniforms(1.0).section_plane, expected);
+    }
+
+    #[test]
+    fn a_see_through_model_reaches_the_shader_as_alpha_below_one() {
+        let mut renderer = Renderer::new();
+        assert_eq!(renderer.mesh_uniforms(1.0).mesh_alpha, 1.0);
+
+        renderer.transparent = true;
+        let alpha = renderer.mesh_uniforms(1.0).mesh_alpha;
+        assert!(
+            (0.0..1.0).contains(&alpha),
+            "see-through alpha {alpha} would draw solid or invisible"
+        );
+    }
+
+    /// Ghosting and see-through both fade the solid, and stacking them
+    /// erases it: the ghost already mixes the surface most of the way to
+    /// the background colour, and blending *that* at a third of its
+    /// opacity leaves the near-background result indistinguishable from
+    /// the background. The sketch drawn in front would then have nothing
+    /// behind it to read as being in front of. Ghosting wins.
+    #[test]
+    fn a_ghosted_solid_stays_opaque_even_when_see_through_is_on() {
+        let mut renderer = Renderer::new();
+        renderer.transparent = true;
+        renderer.ghost_solid = true;
+
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(
+            uniforms.mesh_alpha, 1.0,
+            "a ghosted solid must not also be alpha-blended away"
+        );
+        assert!(
+            uniforms.ghost > 0.0,
+            "the ghost fade is what the user sees instead"
+        );
+
+        // The setting is kept, not cleared: dropping the sketch brings
+        // the see-through view straight back.
+        renderer.ghost_solid = false;
+        assert!(renderer.mesh_uniforms(1.0).mesh_alpha < 1.0);
+    }
+
+    /// A device for the tests that must actually run a pass. The software
+    /// adapter is asked for first, because a host that has one gives every
+    /// seat the same instrument; where none is installed the host's own
+    /// adapter is taken instead, which is what the marker-layout test beside
+    /// this one has always done. An adapter is required either way — a test
+    /// that quietly skips reads green while proving nothing, which is the
+    /// failure this whole readback exists to stop.
+    fn verification_device() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: true,
+            compatible_surface: None,
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options))
+            .or_else(|| {
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: false,
+                    ..options
+                }))
+            })
+            .expect("a wgpu adapter is required for renderer verification");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            .expect("the verification adapter must yield a device")
+    }
+
+    #[test]
+    fn every_pass_builds_against_a_real_device() {
+        // WGSL is compiled when a pipeline is created, not when the crate
+        // is: a shader that does not parse, a uniform struct the shader
+        // declares differently, or a binding whose visibility does not cover
+        // the stage that reads it all surface here and nowhere earlier.
+        let (device, _queue) = verification_device();
+
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = errors.clone();
+        device.on_uncaptured_error(Box::new(move |error| {
+            sink.lock().expect("error sink").push(error.to_string());
+        }));
+
+        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
+        let _ = pipelines.surface_format;
+        let _ = device.poll(wgpu::Maintain::Wait);
+
+        let errors = errors.lock().expect("error sink").clone();
+        assert!(
+            errors.is_empty(),
+            "building the passes reported: {errors:#?}"
+        );
     }
 
     #[test]
@@ -1413,20 +1720,182 @@ mod tests {
             0,
             bytemuck::bytes_of(&renderer.mesh_uniforms(1.0)),
         );
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
-        crate::viewport::render_scene(
-            &mut encoder,
-            &pipelines,
-            Some(&mesh),
-            None,
-            wgpu::Color::BLACK,
+        // Both shaded passes are exercised: the opaque one and the
+        // alpha-blended one the see-through view selects.
+        for transparent in [false, true] {
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            device.push_error_scope(wgpu::ErrorFilter::Validation);
+            crate::viewport::render_scene(
+                &mut encoder,
+                &pipelines,
+                Some(&mesh),
+                None,
+                wgpu::Color::BLACK,
+                transparent,
+            );
+            queue.submit(Some(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
+            assert!(
+                pollster::block_on(device.pop_error_scope()).is_none(),
+                "marker bindings and every draw pipeline must validate (transparent: {transparent})"
+            );
+        }
+    }
+
+    /// One quad, one plane, and the picking texture read back on both sides
+    /// of the cut.
+    ///
+    /// Building the pipeline only proves the shader compiles. What the user
+    /// meets is the readback: click a face the section has cut away and the
+    /// pick must come back empty, not with the face they cannot see. That is
+    /// what this renders and reads.
+    #[test]
+    fn the_section_plane_makes_a_clipped_face_unpickable_in_the_readback() {
+        let (device, queue) = verification_device();
+
+        const SIZE: u32 = 64;
+        let pipelines =
+            RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, SIZE, SIZE);
+        let picking = crate::picking::PickingPass::new(&device, SIZE, SIZE);
+
+        // A quad across the whole viewport at z = 0, drawn under an identity
+        // view-projection so a vertex position is also its NDC position and a
+        // pixel maps to a world x by hand.
+        let face = cadmark_core::geometry::TopologyElement::Face(cadmark_core::geometry::FaceId(3));
+        let face_id = crate::picking::encode_picking_id(&face) as f32;
+        let corner = |x: f32, y: f32| crate::mesh::GpuVertex {
+            position: [x, y, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            face_id,
+            _padding: 0.0,
+        };
+        let vertices = [
+            corner(-0.9, -0.9),
+            corner(0.9, -0.9),
+            corner(0.9, 0.9),
+            corner(-0.9, 0.9),
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let mesh = crate::mesh::GpuMesh {
+            vertex_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            index_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            index_count: indices.len() as u32,
+            edge_vertex_buffer: buffer_of(&device, &queue, &[0u8; 16], wgpu::BufferUsages::VERTEX),
+            edge_vertex_count: 0,
+        };
+
+        // Cut at x = 0, keeping the low side.
+        let section = crate::section::SectionPlane {
+            enabled: true,
+            axis: crate::section::Axis::X,
+            offset: 0.0,
+            flipped: false,
+        };
+        let uniforms = SimpleUniforms {
+            view_proj: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            section_plane: section.equation(),
+        };
+        queue.write_buffer(
+            &pipelines.picking_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&uniforms),
         );
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+
+        // A pixel's centre in NDC, so the sides are named by the same
+        // arithmetic the shader clips by rather than by eye.
+        let ndc_x = |px: u32| (px as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+        let (kept_px, clipped_px) = (SIZE / 4, SIZE * 3 / 4);
         assert!(
-            pollster::block_on(device.pop_error_scope()).is_none(),
-            "marker bindings and both draw pipelines must validate"
+            section.keeps([ndc_x(kept_px), 0.0, 0.0])
+                && !section.keeps([ndc_x(clipped_px), 0.0, 0.0]),
+            "the sampled pixels do not straddle the plane"
         );
+
+        let kept = read_pick(
+            &device,
+            &queue,
+            &pipelines,
+            &picking,
+            &mesh,
+            kept_px,
+            SIZE / 2,
+        );
+        let clipped = read_pick(
+            &device,
+            &queue,
+            &pipelines,
+            &picking,
+            &mesh,
+            clipped_px,
+            SIZE / 2,
+        );
+
+        assert_eq!(
+            kept,
+            Some(face),
+            "the half the section keeps stopped answering a click"
+        );
+        assert_eq!(
+            clipped, None,
+            "a face the section cut away is still pickable: the user selects what they cannot see"
+        );
+    }
+
+    fn buffer_of(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: data.len() as u64,
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, data);
+        buffer
+    }
+
+    /// Render the picking pass and read one pixel back, the way the
+    /// application does when the user clicks.
+    fn read_pick(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &RenderPipelines,
+        picking: &crate::picking::PickingPass,
+        mesh: &crate::mesh::GpuMesh,
+        x: u32,
+        y: u32,
+    ) -> Option<cadmark_core::geometry::TopologyElement> {
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        crate::viewport::render_picking(&mut encoder, pipelines, picking, mesh);
+        crate::viewport::copy_pick_pixel(&mut encoder, picking, &picking.staging_buffer, x, y);
+        queue.submit([encoder.finish()]);
+
+        let slice = picking.staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let element = crate::viewport::decode_pick_result(&slice.get_mapped_range());
+        picking.staging_buffer.unmap();
+        element
     }
 }
