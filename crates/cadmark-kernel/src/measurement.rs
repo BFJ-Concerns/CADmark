@@ -22,7 +22,7 @@ from OCP.BRepTools import BRepTools
 from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
 from OCP.gp import gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
-from OCP.TopAbs import TopAbs_SHELL, TopAbs_SOLID
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_SHELL, TopAbs_SOLID, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
 
@@ -97,6 +97,40 @@ def measure_vertices(shapes):
     return [{'position': _point(BRep_Tool.Pnt_s(TopoDS.Vertex_s(v)))} for v in shapes]
 
 
+def _children(shape, kind):
+    return list(_explore(shape, kind))
+
+
+def _append_once(neighbours, neighbour):
+    if neighbour not in neighbours:
+        neighbours.append(neighbour)
+
+
+def measure_neighbours(session, faces, edges, vertices):
+    # Adjacency is read from final OCCT topology.  IDs come from the same
+    # final maps as picking and provenance, so this never relies on geometry
+    # matching or a kernel type crossing the worker boundary.
+    face_neighbours = [[] for _ in faces]
+    edge_faces = [[] for _ in edges]
+    edge_vertices = [[] for _ in edges]
+    vertex_edges = [[] for _ in vertices]
+
+    for face_index, face in enumerate(faces):
+        for edge in _children(face, TopAbs_EDGE):
+            edge_index = session.topology_index(edge, 'edge')
+            _append_once(face_neighbours[face_index], {'kind': 'edge', 'id': edge_index})
+            _append_once(edge_faces[edge_index], {'kind': 'face', 'id': face_index})
+
+    for edge_index, edge in enumerate(edges):
+        for vertex in _children(edge, TopAbs_VERTEX):
+            vertex_index = session.topology_index(vertex, 'vertex')
+            _append_once(edge_vertices[edge_index], {'kind': 'vertex', 'id': vertex_index})
+            _append_once(vertex_edges[vertex_index], {'kind': 'edge', 'id': edge_index})
+
+    edge_neighbours = [edge_faces[index] + edge_vertices[index] for index in range(len(edges))]
+    return face_neighbours, edge_neighbours, vertex_edges
+
+
 def measure_model(shape, face_count, edge_count, vertex_count):
     props = GProp_GProps()
     BRepGProp.VolumeProperties_s(shape, props)
@@ -141,10 +175,20 @@ def measure(shape, session):
     faces = session.map_values(session.final_maps['face'])
     edges = session.map_values(session.final_maps['edge'])
     vertices = session.map_values(session.final_maps['vertex'])
+    face_neighbours, edge_neighbours, vertex_neighbours = measure_neighbours(session, faces, edges, vertices)
+    measured_faces = measure_faces(faces)
+    measured_edges = measure_edges(edges)
+    measured_vertices = measure_vertices(vertices)
+    for measured, neighbours in zip(measured_faces, face_neighbours):
+        measured['neighbours'] = neighbours
+    for measured, neighbours in zip(measured_edges, edge_neighbours):
+        measured['neighbours'] = neighbours
+    for measured, neighbours in zip(measured_vertices, vertex_neighbours):
+        measured['neighbours'] = neighbours
     return {
-        'faces': measure_faces(faces),
-        'edges': measure_edges(edges),
-        'vertices': measure_vertices(vertices),
+        'faces': measured_faces,
+        'edges': measured_edges,
+        'vertices': measured_vertices,
         'summary': measure_model(shape, len(faces), len(edges), len(vertices)),
     }
 ";
@@ -171,6 +215,7 @@ pub(crate) fn measure(
             area: face.get_item("area")?.extract()?,
             centre: face.get_item("centre")?.extract()?,
             normal: face.get_item("normal")?.extract()?,
+            neighbours: extract_neighbours(&face.get_item("neighbours")?)?,
         });
     }
     let mut edges = Vec::new();
@@ -180,6 +225,7 @@ pub(crate) fn measure(
             curve_type: edge.get_item("curve_type")?.extract()?,
             length: edge.get_item("length")?.extract()?,
             centre: edge.get_item("centre")?.extract()?,
+            neighbours: extract_neighbours(&edge.get_item("neighbours")?)?,
         });
     }
     let mut vertices = Vec::new();
@@ -187,6 +233,7 @@ pub(crate) fn measure(
         let vertex = vertex?;
         vertices.push(VertexDescriptor {
             position: vertex.get_item("position")?.extract()?,
+            neighbours: extract_neighbours(&vertex.get_item("neighbours")?)?,
         });
     }
     let summary = result.get_item("summary")?;
@@ -207,6 +254,28 @@ pub(crate) fn measure(
         },
         summary,
     ))
+}
+
+fn extract_neighbours(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Vec<cadmark_core::geometry::TopologyElement>> {
+    use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
+
+    value
+        .try_iter()?
+        .map(|neighbour| {
+            let neighbour = neighbour?;
+            let id = neighbour.get_item("id")?.extract()?;
+            match neighbour.get_item("kind")?.extract::<&str>()? {
+                "face" => Ok(TopologyElement::Face(FaceId(id))),
+                "edge" => Ok(TopologyElement::Edge(EdgeId(id))),
+                "vertex" => Ok(TopologyElement::Vertex(VertexId(id))),
+                kind => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unknown topology neighbour kind: {kind}"
+                ))),
+            }
+        })
+        .collect()
 }
 
 /// Whether each solid of the model is closed and valid, in traversal order.

@@ -319,6 +319,8 @@ mod tests {
                 relation: ProvenanceRelation::Generated,
             }),
             identification,
+            source_context: String::new(),
+            neighbours: Vec::new(),
         };
 
         assert_eq!(
@@ -334,6 +336,8 @@ mod tests {
             element,
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
         };
         let mut overlay = OverlayState::default();
         assert!(!overlay.toggle_anchor(anchor(TopologyElement::Face(FaceId(1)))));
@@ -356,6 +360,8 @@ mod tests {
             element: TopologyElement::Face(FaceId(0)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
         };
         assert!(context_summary(&context).starts_with("face 0: no source line"));
     }

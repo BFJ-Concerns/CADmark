@@ -901,6 +901,139 @@ with BuildPart() as part:
     }
 
     #[test]
+    fn execution_measures_final_topology_neighbours() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    Box(20, 10, 5)
+"#);
+        let result = result.unwrap();
+
+        assert!(result.descriptors.faces.iter().all(|face| {
+            face.neighbours.len() == 4
+                && face
+                    .neighbours
+                    .iter()
+                    .all(|neighbour| matches!(neighbour, TopologyElement::Edge(_)))
+        }));
+        assert!(result.descriptors.edges.iter().all(|edge| {
+            edge.neighbours.len() == 4
+                && edge
+                    .neighbours
+                    .iter()
+                    .filter(|neighbour| matches!(neighbour, TopologyElement::Face(_)))
+                    .count()
+                    == 2
+                && edge
+                    .neighbours
+                    .iter()
+                    .filter(|neighbour| matches!(neighbour, TopologyElement::Vertex(_)))
+                    .count()
+                    == 2
+        }));
+        assert!(result.descriptors.vertices.iter().all(|vertex| {
+            vertex.neighbours.len() == 3
+                && vertex
+                    .neighbours
+                    .iter()
+                    .all(|neighbour| matches!(neighbour, TopologyElement::Edge(_)))
+        }));
+        for (face_index, face) in result.descriptors.faces.iter().enumerate() {
+            for neighbour in &face.neighbours {
+                let TopologyElement::Edge(edge_id) = neighbour else {
+                    unreachable!("faces only report boundary edges")
+                };
+                assert!(
+                    result
+                        .descriptors
+                        .edge(*edge_id)
+                        .unwrap()
+                        .neighbours
+                        .contains(&TopologyElement::Face(FaceId(face_index as u32))),
+                    "face {face_index} and edge {} must agree on their shared topology",
+                    edge_id.0
+                );
+                let edge = result.descriptors.edge(*edge_id).unwrap();
+                let offset: [f64; 3] =
+                    std::array::from_fn(|axis| edge.centre[axis] - face.centre[axis]);
+                let distance_from_face_plane = (0..3)
+                    .map(|axis| offset[axis] * face.normal[axis])
+                    .sum::<f64>();
+                assert!(
+                    distance_from_face_plane.abs() < 1e-6,
+                    "edge {} is not on face {face_index}'s measured plane",
+                    edge_id.0
+                );
+            }
+        }
+        for (edge_index, edge) in result.descriptors.edges.iter().enumerate() {
+            for neighbour in &edge.neighbours {
+                if let TopologyElement::Vertex(vertex_id) = neighbour {
+                    assert!(
+                        result
+                            .descriptors
+                            .vertex(*vertex_id)
+                            .unwrap()
+                            .neighbours
+                            .contains(&TopologyElement::Edge(EdgeId(edge_index as u32))),
+                        "edge {edge_index} and vertex {} must agree on their shared topology",
+                        vertex_id.0
+                    );
+                    let vertex = result.descriptors.vertex(*vertex_id).unwrap();
+                    let half_length = (0..3)
+                        .map(|axis| (vertex.position[axis] - edge.centre[axis]).powi(2))
+                        .sum::<f64>()
+                        .sqrt();
+                    assert!(
+                        (half_length - edge.length / 2.0).abs() < 1e-6,
+                        "vertex {} is not an endpoint of edge {edge_index}",
+                        vertex_id.0
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn execution_deduplicates_neighbours_at_closed_topology_seams() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    Cylinder(10, 5)
+"#);
+        let result = result.unwrap();
+        let labels = |neighbours: &[TopologyElement]| {
+            neighbours
+                .iter()
+                .map(TopologyElement::display_label)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        };
+
+        assert!(
+            result
+                .descriptors
+                .faces
+                .iter()
+                .all(|face| labels(&face.neighbours) == face.neighbours.len())
+        );
+        assert!(
+            result
+                .descriptors
+                .edges
+                .iter()
+                .all(|edge| labels(&edge.neighbours) == edge.neighbours.len())
+        );
+        assert!(
+            result
+                .descriptors
+                .vertices
+                .iter()
+                .all(|vertex| labels(&vertex.neighbours) == vertex.neighbours.len())
+        );
+    }
+
+    #[test]
     fn model_bounds_are_exact_for_curved_geometry() {
         let (_scratch, result) = run(r#"from build123d import *
 
