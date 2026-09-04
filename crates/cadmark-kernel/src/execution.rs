@@ -505,22 +505,34 @@ mod tests {
         );
     }
 
-    fn assert_contains_relation(
+    fn assert_every_element_has_candidates(
         result: &ExecutedModel,
-        operation: SemanticOperation,
-        relation: ProvenanceRelation,
-        line: u32,
+        expected: &[(SemanticOperation, ProvenanceRelation, u32)],
     ) {
-        assert!(
-            resolved_contexts(result).iter().any(|context| {
-                context.provenance.resolved().is_some_and(|entry| {
-                    entry.operation == operation
-                        && entry.relation == relation
-                        && entry.source.line == line
-                })
-            }),
-            "no final topology resolved to {operation:?} as {relation:?}"
-        );
+        for context in resolved_contexts(result) {
+            let actual = context
+                .provenance
+                .candidates()
+                .iter()
+                .map(|entry| (entry.operation, entry.relation.clone(), entry.source.line))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{}", context.element.display_label());
+        }
+    }
+
+    fn assert_every_element_has_candidate(
+        result: &ExecutedModel,
+        expected: (SemanticOperation, ProvenanceRelation, u32),
+    ) {
+        for context in resolved_contexts(result) {
+            assert!(
+                context.provenance.candidates().iter().any(|entry| {
+                    (entry.operation, entry.relation.clone(), entry.source.line) == expected
+                }),
+                "{} has no {expected:?}",
+                context.element.display_label()
+            );
+        }
     }
 
     /// The resolved entry of a context, for assertions on single-source elements.
@@ -686,7 +698,7 @@ with BuildPart() as part:
     }
 
     #[test]
-    fn real_locations_resolve_to_the_location_pattern() {
+    fn real_locations_preserve_primitive_and_pattern_lineage() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -697,12 +709,22 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 12);
         assert_eq!(result.ledger.edge_count(), 24);
         assert_eq!(result.ledger.vertex_count(), 16);
-        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
+        assert_every_element_has_candidates(
+            &result,
+            &[
+                (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
+                (
+                    SemanticOperation::LocationPattern,
+                    ProvenanceRelation::Modified,
+                    4,
+                ),
+            ],
+        );
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn real_grid_locations_resolve_to_the_location_pattern() {
+    fn real_grid_locations_preserve_primitive_and_pattern_lineage() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -713,12 +735,22 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 24);
         assert_eq!(result.ledger.edge_count(), 48);
         assert_eq!(result.ledger.vertex_count(), 32);
-        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
+        assert_every_element_has_candidates(
+            &result,
+            &[
+                (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
+                (
+                    SemanticOperation::LocationPattern,
+                    ProvenanceRelation::Modified,
+                    4,
+                ),
+            ],
+        );
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn real_polar_locations_resolve_to_the_location_pattern() {
+    fn real_polar_locations_preserve_primitive_and_pattern_lineage() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -729,12 +761,22 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 18);
         assert_eq!(result.ledger.edge_count(), 36);
         assert_eq!(result.ledger.vertex_count(), 24);
-        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
+        assert_every_element_has_candidates(
+            &result,
+            &[
+                (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
+                (
+                    SemanticOperation::LocationPattern,
+                    ProvenanceRelation::Modified,
+                    4,
+                ),
+            ],
+        );
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn location_patterns_are_generated_by_the_pattern_line() {
+    fn location_patterns_preserve_every_primitive_and_pattern_relation() {
         for source in [
             r#"from build123d import *
 
@@ -757,17 +799,22 @@ with BuildPart() as part:
         ] {
             let (_scratch, result) = run(source);
             let result = result.unwrap();
-            assert_contains_relation(
+            assert_every_element_has_candidates(
                 &result,
-                SemanticOperation::LocationPattern,
-                ProvenanceRelation::Generated,
-                4,
+                &[
+                    (SemanticOperation::Box, ProvenanceRelation::Generated, 5),
+                    (
+                        SemanticOperation::LocationPattern,
+                        ProvenanceRelation::Modified,
+                        4,
+                    ),
+                ],
             );
         }
     }
 
     #[test]
-    fn transforms_are_modified_by_the_transform_line() {
+    fn transforms_modify_every_final_element_at_the_transform_line() {
         for (source, operation) in [
             (
                 r#"from build123d import *
@@ -796,8 +843,60 @@ result = box.scale(2)
         ] {
             let (_scratch, result) = run(source);
             let result = result.unwrap();
-            assert_contains_relation(&result, operation, ProvenanceRelation::Modified, 4);
+            assert_every_element_has_candidates(
+                &result,
+                &[(operation, ProvenanceRelation::Modified, 4)],
+            );
         }
+    }
+
+    #[test]
+    fn default_rotate_records_every_final_element_at_the_rotate_line() {
+        for (source, line) in [
+            (
+                r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+result = box.rotate(Axis.Z, 30)
+"#,
+                4,
+            ),
+            (
+                r#"from build123d import *
+
+with BuildPart() as part:
+    Box(2, 2, 2)
+result = part.part.rotate(Axis.Z, 30)
+"#,
+                5,
+            ),
+        ] {
+            let (_scratch, result) = run(source);
+            let result = result.unwrap();
+            assert_every_element_has_candidates(
+                &result,
+                &[(
+                    SemanticOperation::Rotate,
+                    ProvenanceRelation::Modified,
+                    line,
+                )],
+            );
+        }
+    }
+
+    #[test]
+    fn builder_mirror_preserves_every_mirror_relation_through_the_fuse() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    Box(10, 5, 5)
+    mirror(about=Plane.YZ)
+"#);
+        let result = result.unwrap();
+        assert_every_element_has_candidate(
+            &result,
+            (SemanticOperation::Mirror, ProvenanceRelation::Modified, 5),
+        );
     }
 
     #[test]
@@ -897,6 +996,31 @@ with BuildPart() as part:
             assert_eq!(result.ledger.untraced_count(), 0);
             assert_every_element_resolves(&result, operation, 3);
             assert_bridge_consumers(&result);
+        }
+    }
+
+    #[test]
+    fn builder_primitives_cover_sphere_cone_torus_and_wedge() {
+        for (source, operation) in [
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Sphere(5)\n",
+                SemanticOperation::Sphere,
+            ),
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Cone(4, 2, 8)\n",
+                SemanticOperation::Cone,
+            ),
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Torus(4, 1)\n",
+                SemanticOperation::Torus,
+            ),
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Wedge(4, 4, 4, 1, 1, 3, 3)\n",
+                SemanticOperation::Wedge,
+            ),
+        ] {
+            let (_scratch, result) = run(source);
+            assert_every_element_resolves(&result.unwrap(), operation, 4);
         }
     }
 
