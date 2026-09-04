@@ -13,6 +13,9 @@ use std::time::Instant;
 use cadmark_core::geometry::GeometryContext;
 use cadmark_core::ledger::LedgerValue;
 use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
+use cadmark_core::pending_comment::{
+    PendingAnchor, PendingComment, PendingCommentId, PendingComments,
+};
 
 use crate::theme;
 
@@ -60,6 +63,12 @@ pub enum ChatAction {
     None,
     /// The user submitted this text.
     Send(String),
+    /// Submit every pending spatial comment with optional chat text as one turn.
+    SendPending {
+        chat: Option<String>,
+    },
+    /// Remove one unsent spatial-comment card.
+    RemovePending(PendingCommentId),
     /// The user asked for the running turn to stop.
     Cancel,
 }
@@ -104,7 +113,12 @@ impl ChatPane {
     }
 
     /// Render the chat pane and report what the user did.
-    pub fn show(&mut self, ui: &mut egui::Ui, conversation: &Conversation) -> ChatAction {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        conversation: &Conversation,
+        pending: &mut PendingComments,
+    ) -> ChatAction {
         // The input sits in a bottom panel so it is laid out first and the
         // messages take whatever height remains: however tall the input
         // grows, the send row below it stays on screen.
@@ -116,17 +130,23 @@ impl ChatPane {
                 bottom: 0,
             }))
             .show_separator_line(false)
-            .show_inside(ui, |ui| self.show_input(ui))
+            .show_inside(ui, |ui| self.show_input(ui, pending))
             .inner;
 
-        egui::CentralPanel::default()
+        let remove = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
-            .show_inside(ui, |ui| self.show_messages(ui, conversation));
+            .show_inside(ui, |ui| self.show_messages(ui, conversation, pending))
+            .inner;
 
-        action
+        remove.map_or(action, ChatAction::RemovePending)
     }
 
-    fn show_messages(&mut self, ui: &mut egui::Ui, conversation: &Conversation) {
+    fn show_messages(
+        &mut self,
+        ui: &mut egui::Ui,
+        conversation: &Conversation,
+        pending: &mut PendingComments,
+    ) -> Option<PendingCommentId> {
         let new_message = conversation.len() != self.seen_messages;
         self.seen_messages = conversation.len();
 
@@ -138,6 +158,12 @@ impl ChatPane {
                 ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let width = ui.available_width();
+                let mut remove = None;
+                for comment in pending.comments_mut() {
+                    if show_pending_comment(ui, comment, width) {
+                        remove = Some(comment.id);
+                    }
+                }
                 for message in conversation.messages() {
                     show_message(ui, message, width);
                 }
@@ -151,13 +177,15 @@ impl ChatPane {
                     ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
                 }
                 ui.add_space(4.0);
-            });
+                remove
+            })
+            .inner
     }
 
     /// The input box and the send row under it. The box grows with its
     /// text up to a cap, then scrolls inside itself. Typing is never
     /// blocked by a running turn: the text waits for the turn to end.
-    fn show_input(&mut self, ui: &mut egui::Ui) -> ChatAction {
+    fn show_input(&mut self, ui: &mut egui::Ui, pending: &PendingComments) -> ChatAction {
         let mut action = ChatAction::None;
         let turn_running = matches!(self.activity, ChatActivity::Turn(_));
         let busy = self.activity != ChatActivity::Idle;
@@ -221,6 +249,12 @@ impl ChatPane {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let has_text = !self.input_text.trim().is_empty();
+                let sending_pending = !pending.is_empty();
+                let can_submit = if sending_pending {
+                    pending.can_send()
+                } else {
+                    has_text
+                };
                 if turn_running
                     && ui
                         .add(egui::Button::new(
@@ -232,12 +266,25 @@ impl ChatPane {
                     action = ChatAction::Cancel;
                 }
                 let send = ui.add_enabled(
-                    can_send && has_text,
-                    egui::Button::new(egui::RichText::new("Send").color(theme::TEXT_STRONG))
-                        .fill(theme::ACCENT.gamma_multiply(0.55)),
+                    can_send && can_submit,
+                    egui::Button::new(
+                        egui::RichText::new(if sending_pending {
+                            format!("Send {} comments", pending.comments().len())
+                        } else {
+                            "Send".to_string()
+                        })
+                        .color(theme::TEXT_STRONG),
+                    )
+                    .fill(theme::ACCENT.gamma_multiply(0.55)),
                 );
-                if (send.clicked() || enter_sent) && can_send && has_text {
-                    action = ChatAction::Send(self.input_text.trim().to_string());
+                if (send.clicked() || enter_sent) && can_send && can_submit {
+                    action = if sending_pending {
+                        ChatAction::SendPending {
+                            chat: has_text.then(|| self.input_text.trim().to_string()),
+                        }
+                    } else {
+                        ChatAction::Send(self.input_text.trim().to_string())
+                    };
                     self.input_text.clear();
                     self.focus_input = true;
                 }
@@ -246,6 +293,71 @@ impl ChatPane {
 
         action
     }
+}
+
+fn marker_colour(comment: &PendingComment) -> egui::Color32 {
+    let [red, green, blue, alpha] = comment.marker_colour();
+    egui::Color32::from_rgba_unmultiplied(
+        (red * 255.0) as u8,
+        (green * 255.0) as u8,
+        (blue * 255.0) as u8,
+        (alpha * 255.0) as u8,
+    )
+}
+
+fn pending_anchor_label(anchor: &PendingAnchor) -> String {
+    match anchor {
+        PendingAnchor::Live(context) => spatial_chip(context),
+        PendingAnchor::Lost { element } => format!("{} · lost", element.display_label()),
+    }
+}
+
+/// Render one editable unsent card. Returns true when the user removes it.
+fn show_pending_comment(ui: &mut egui::Ui, comment: &mut PendingComment, width: f32) -> bool {
+    let colour = marker_colour(comment);
+    let frame = theme::tinted_card(colour);
+    let inner = width - frame.total_margin().sum().x;
+    let mut remove = false;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+        frame.show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_max_width(inner * 0.85);
+                ui.horizontal_wrapped(|ui| {
+                    theme::chip(ui, &format!("Comment {}", comment.marker_number), colour);
+                    for anchor in &comment.anchors {
+                        let label = pending_anchor_label(anchor);
+                        ui.label(egui::RichText::new(label).small().color(theme::TEXT_MUTED));
+                    }
+                });
+                ui.add(
+                    egui::TextEdit::multiline(&mut comment.text)
+                        .id_salt(("pending_comment", comment.id.0))
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.horizontal(|ui| {
+                    if comment
+                        .anchors
+                        .iter()
+                        .any(|anchor| matches!(anchor, PendingAnchor::Lost { .. }))
+                    {
+                        ui.label(
+                            egui::RichText::new("Re-point lost geometry before sending")
+                                .small()
+                                .color(theme::ERROR),
+                        );
+                    }
+                    if ui
+                        .button(egui::RichText::new("Remove").color(theme::ERROR))
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                });
+            });
+        });
+    });
+    remove
 }
 
 /// "looking up build123d docs · 1m 12s · last event 3s ago".
