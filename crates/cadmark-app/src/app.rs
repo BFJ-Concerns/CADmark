@@ -667,6 +667,16 @@ impl CadmarkApp {
     /// Where two candidates were recorded against the same elements their
     /// footprints coincide — the ledger drew no distinction there and this
     /// invents none; the code panel's line is what tells them apart.
+    /// Publish the hovered candidate's footprint to the code panel and the
+    /// viewport.
+    ///
+    /// The whole ledger footprint is sent, vertices included, even though
+    /// the renderer draws only faces and edges: vertices are not a drawable
+    /// element class anywhere in CADmark yet — the tessellation carries no
+    /// vertex positions and nothing can pick one — so their picking IDs
+    /// simply match nothing this frame. Filtering them here would make the
+    /// highlight set disagree with the ledger, and the set would then have
+    /// to be widened again the moment a point pass exists.
     fn apply_candidate_hover(&mut self, ctx: &egui::Context) {
         let hovered = self.overlay.hovered_candidate().cloned();
         let (line, footprint) = match &hovered {
