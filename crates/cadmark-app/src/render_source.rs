@@ -203,7 +203,7 @@ impl RenderSource for ViewportRender {
                 &self.gpu.queue,
                 mesh.as_deref(),
                 sketch.as_deref(),
-                &state.mesh_uniforms(aspect),
+                &state.mesh_uniforms((width, height)),
                 RENDER_CLEAR,
             )
             .map_err(|error| error.to_string())?;

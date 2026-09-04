@@ -12,10 +12,20 @@ struct Uniforms {
     _pad1: f32,
     selected_id: u32,
     hover_id: u32,
+    highlight_count: u32,
+    _pad3: u32,
     marker_count: u32,
     ghost: f32,
+    selected_part_id: u32,
+    hover_part_id: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
+    section_plane: vec4<f32>,
+    mesh_alpha: f32,
+    _pad6: f32,
+    _pad7: f32,
+    _pad8: f32,
+    marker_size: MarkerExtent,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;

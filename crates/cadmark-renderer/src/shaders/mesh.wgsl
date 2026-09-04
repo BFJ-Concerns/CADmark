@@ -34,6 +34,7 @@ struct Uniforms {
     _pad6: f32,
     _pad7: f32,
     _pad8: f32,
+    marker_size: MarkerExtent,
 }
 
 // Whether the section plane keeps `world_pos`. Mirrors

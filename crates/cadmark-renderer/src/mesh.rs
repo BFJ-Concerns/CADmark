@@ -17,13 +17,42 @@ pub struct GpuVertex {
     pub _part_padding: [f32; 3],
 }
 
-/// Vertex layout for wireframe edge rendering.
+/// One corner of an edge segment's screen-space quad. Six of these — two
+/// triangles — carry each polyline segment, and the shader expands them
+/// sideways from the segment's own direction, so the drawn width is in
+/// pixels rather than model units.
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct EdgeVertex {
+    /// The endpoint this corner sits at.
     pub position: [f32; 3],
     /// Edge ID for picking.
     pub edge_id: f32,
+    /// The segment's other endpoint, which gives the screen-space direction.
+    pub other: [f32; 3],
+    /// -1 or +1: which side of the segment this corner expands to.
+    pub side: f32,
+    /// -1 or +1: which way along the segment the end cap extends.
+    pub cap: f32,
+    /// +1 at the segment's first endpoint, -1 at its second. The tangent
+    /// this corner sees points the opposite way at each end, so the side
+    /// the normal picks would flip without it and fold the quad over.
+    pub end_sign: f32,
+}
+
+/// One corner of a vertex marker's screen-space quad. Six of these carry
+/// each marker; the shader masks the quad down to a disc.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct MarkerVertex {
+    /// The model vertex the marker is centred on.
+    pub position: [f32; 3],
+    /// Vertex ID for picking.
+    pub vertex_id: f32,
+    /// Which corner of the quad this is: -1 or +1 on each axis.
+    pub corner: [f32; 2],
+    /// Alignment padding to 32 bytes.
+    pub _padding: [f32; 2],
 }
 
 /// All GPU buffers for a single model.
@@ -33,6 +62,8 @@ pub struct GpuMesh {
     pub index_count: u32,
     pub edge_vertex_buffer: wgpu::Buffer,
     pub edge_vertex_count: u32,
+    pub marker_vertex_buffer: wgpu::Buffer,
+    pub marker_vertex_count: u32,
 }
 
 /// Vertex layout for the sketch profile passes — regions and corner
