@@ -210,7 +210,8 @@ impl Camera {
         let limiting_half_angle = vertical_half_angle.min(horizontal_half_angle);
 
         self.target = bounds.centre();
-        self.distance = (radius / limiting_half_angle.sin() * 1.15).clamp(MIN_DISTANCE, MAX_DISTANCE);
+        self.distance =
+            (radius / limiting_half_angle.sin() * 1.15).clamp(MIN_DISTANCE, MAX_DISTANCE);
         self.near = (radius * 0.001).max(0.0001);
         self.far = (self.distance + radius * 3.0).max(self.near + 1.0);
     }
@@ -435,7 +436,8 @@ mod tests {
         let project = |cam: &Camera| {
             let view = view_from_basis(cam.eye_position(), cam.basis());
             let proj = cam.projection_matrix(1.0);
-            let v: [f32; 4] = std::array::from_fn(|row| (0..4).map(|k| view[k][row] * point[k]).sum());
+            let v: [f32; 4] =
+                std::array::from_fn(|row| (0..4).map(|k| view[k][row] * point[k]).sum());
             let c: [f32; 4] = std::array::from_fn(|row| (0..4).map(|k| proj[k][row] * v[k]).sum());
             [c[0] / c[3], c[1] / c[3]]
         };
@@ -443,7 +445,10 @@ mod tests {
         cam.set_projection(Projection::Orthographic);
         assert_eq!(cam.projection(), Projection::Orthographic);
         let orthographic = project(&cam);
-        assert!(approx_eq(perspective[0], orthographic[0]), "{perspective:?} vs {orthographic:?}");
+        assert!(
+            approx_eq(perspective[0], orthographic[0]),
+            "{perspective:?} vs {orthographic:?}"
+        );
         assert!(approx_eq(perspective[1], orthographic[1]));
     }
 
@@ -534,7 +539,8 @@ mod tests {
             [0.0, 0.0, -1.0],
         ] {
             cam.look_from(direction);
-            let expected: [f32; 3] = std::array::from_fn(|axis| cam.target()[axis] + direction[axis] * 10.0);
+            let expected: [f32; 3] =
+                std::array::from_fn(|axis| cam.target()[axis] + direction[axis] * 10.0);
             assert!(
                 approx_eq_vec(cam.eye_position(), expected),
                 "looking from {direction:?} put the eye at {:?}",

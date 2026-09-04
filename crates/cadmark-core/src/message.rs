@@ -248,7 +248,11 @@ mod tests {
             .map(|m| m.id)
             .collect();
         assert_eq!(applied, [first_id]);
-        assert!(conv.messages().iter().any(|m| m.id == second_id && !m.is_applied()));
+        assert!(
+            conv.messages()
+                .iter()
+                .any(|m| m.id == second_id && !m.is_applied())
+        );
     }
 
     #[test]

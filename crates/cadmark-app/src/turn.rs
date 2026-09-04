@@ -97,7 +97,10 @@ pub trait ScriptExecutor: Send {
 
 /// Answers the documentation tool.
 pub trait DocSource: Send + Sync {
-    fn lookup(&self, query: &str) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + '_>>;
+    fn lookup(
+        &self,
+        query: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + '_>>;
 }
 
 /// Produces the render the model asked for. The viewport owns the GPU, so
@@ -117,7 +120,13 @@ impl RenderSource for NoRender {
 }
 
 /// Everything one turn needs.
-pub struct TurnRunner<'a, M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderSource> {
+pub struct TurnRunner<
+    'a,
+    M: TurnModel + ?Sized,
+    E: ScriptExecutor,
+    D: DocSource + ?Sized,
+    R: RenderSource,
+> {
     pub model: &'a M,
     pub executor: &'a mut E,
     pub docs: &'a D,
@@ -162,10 +171,17 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => emit(TurnEvent::Text(text)),
                 StreamDelta::ToolCallStarted { name } => {
-                    emit(TurnEvent::Phase(format!("preparing to {}", describe_tool(&name))));
+                    emit(TurnEvent::Phase(format!(
+                        "preparing to {}",
+                        describe_tool(&name)
+                    )));
                 }
             };
-            let response = match self.model.respond(request, self.cancel.clone(), &mut sink).await {
+            let response = match self
+                .model
+                .respond(request, self.cancel.clone(), &mut sink)
+                .await
+            {
                 Ok(response) => response,
                 Err(BackendError::Cancelled) => {
                     return self.abort(original.as_deref(), TurnOutcome::Cancelled);
@@ -200,7 +216,11 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 });
                 let (output, failed) = match self.run_tool(&call, &mut attempt, &mut emit).await {
                     ToolRun::Output { output, failed } => (output, failed),
-                    ToolRun::Built { code, model, summary } => {
+                    ToolRun::Built {
+                        code,
+                        model,
+                        summary,
+                    } => {
                         emit(TurnEvent::ModelBuilt {
                             model: model.clone(),
                             source: code.clone(),
@@ -266,7 +286,9 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     Err(error) => return ToolRun::bad_arguments(error),
                 };
                 *attempt += 1;
-                emit(TurnEvent::Phase(format!("running the script, attempt {attempt}")));
+                emit(TurnEvent::Phase(format!(
+                    "running the script, attempt {attempt}"
+                )));
                 if let Err(error) = std::fs::write(&self.script_path, &args.code) {
                     return ToolRun::Abort(TurnOutcome::Failed {
                         error: format!("could not write the script: {error}"),
@@ -356,8 +378,15 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
 }
 
 enum ToolRun {
-    Output { output: String, failed: bool },
-    Built { code: String, model: Box<ExecutedModel>, summary: String },
+    Output {
+        output: String,
+        failed: bool,
+    },
+    Built {
+        code: String,
+        model: Box<ExecutedModel>,
+        summary: String,
+    },
     Abort(TurnOutcome),
 }
 
@@ -423,7 +452,10 @@ fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
 
 /// What the model reads after a successful execution.
 fn describe_model(model: &ExecutedModel) -> String {
-    let mut text = format!("Executed successfully. Model: {}.", model.summary.describe());
+    let mut text = format!(
+        "Executed successfully. Model: {}.",
+        model.summary.describe()
+    );
     match model.validity.len() {
         0 => text.push_str(" No solid was produced."),
         1 => text.push_str(if model.is_printable() {
@@ -474,7 +506,10 @@ pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
     let Ok(entries) = std::fs::read_dir(project_dir.join("references")) else {
         return images;
     };
-    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
     paths.sort();
     for path in paths {
         let media_type = match path.extension().and_then(|ext| ext.to_str()) {
@@ -678,7 +713,12 @@ mod tests {
             }
         }
 
-        async fn run(&mut self, model: &ScriptedModel, input: TurnInput, cancel: CancelFlag) -> TurnOutcome {
+        async fn run(
+            &mut self,
+            model: &ScriptedModel,
+            input: TurnInput,
+            cancel: CancelFlag,
+        ) -> TurnOutcome {
             let mut render = NoRender;
             let mut runner = TurnRunner {
                 model,
@@ -728,7 +768,9 @@ mod tests {
             Some("ORIGINAL = 1"),
             FakeExecutor::new([Err(WorkerError::Script("NameError: BAD".into())), Ok(())]),
         );
-        let outcome = harness.run(&model, chat("make a box"), CancelFlag::new()).await;
+        let outcome = harness
+            .run(&model, chat("make a box"), CancelFlag::new())
+            .await;
 
         assert!(matches!(
             &outcome,
@@ -753,10 +795,18 @@ mod tests {
             TurnEvent::ToolFinished { call_id, output, failed: true } if call_id == "c2" && output.contains("NameError")
         )));
         assert_eq!(
-            harness.events.iter().filter(|event| matches!(event, TurnEvent::ModelBuilt { .. })).count(),
+            harness
+                .events
+                .iter()
+                .filter(|event| matches!(event, TurnEvent::ModelBuilt { .. }))
+                .count(),
             1
         );
-        assert!(harness.events.contains(&TurnEvent::Text("Done: a box.".into())));
+        assert!(
+            harness
+                .events
+                .contains(&TurnEvent::Text("Done: a box.".into()))
+        );
 
         // Every tool result went back to the model paired with its call,
         // and the docs answer reached it.
@@ -825,14 +875,21 @@ mod tests {
         let outcome = harness.run(&model, chat("go"), CancelFlag::new()).await;
         assert!(matches!(&outcome, TurnOutcome::Failed { error } if error.contains("worker died")));
         assert_eq!(harness.on_disk().as_deref(), Some("ORIGINAL = 1"));
-        assert_eq!(model.requests.lock().unwrap().len(), 1, "the model was not asked again");
+        assert_eq!(
+            model.requests.lock().unwrap().len(),
+            1,
+            "the model was not asked again"
+        );
     }
 
     #[tokio::test]
     async fn cancelling_mid_turn_restores_the_original_script() {
         let cancel = CancelFlag::new();
         let model = ScriptedModel::new([run_script("c1", "HALF = 1", "Half"), text("unreached")]);
-        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([Err(WorkerError::Cancelled)]));
+        let mut harness = Harness::with_script(
+            Some("ORIGINAL = 1"),
+            FakeExecutor::new([Err(WorkerError::Cancelled)]),
+        );
         let outcome = harness.run(&model, chat("go"), cancel).await;
         assert_eq!(outcome, TurnOutcome::Cancelled);
         assert_eq!(harness.on_disk().as_deref(), Some("ORIGINAL = 1"));
@@ -841,7 +898,10 @@ mod tests {
     #[tokio::test]
     async fn a_turn_on_a_new_project_that_fails_leaves_no_script_behind() {
         let model = ScriptedModel::new([run_script("c1", "BAD = 1", "Try"), text("gave up")]);
-        let mut harness = Harness::with_script(None, FakeExecutor::new([Err(WorkerError::Script("boom".into()))]));
+        let mut harness = Harness::with_script(
+            None,
+            FakeExecutor::new([Err(WorkerError::Script("boom".into()))]),
+        );
         let outcome = harness.run(&model, chat("go"), CancelFlag::new()).await;
         assert!(matches!(outcome, TurnOutcome::Failed { .. }));
         assert_eq!(harness.on_disk(), None);
@@ -851,7 +911,9 @@ mod tests {
     async fn an_answer_without_tool_calls_changes_nothing() {
         let model = ScriptedModel::new([text("A fillet rounds an edge.")]);
         let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
-        let outcome = harness.run(&model, chat("what is a fillet?"), CancelFlag::new()).await;
+        let outcome = harness
+            .run(&model, chat("what is a fillet?"), CancelFlag::new())
+            .await;
         assert_eq!(outcome, TurnOutcome::Answered);
         assert_eq!(harness.on_disk().as_deref(), Some("ORIGINAL = 1"));
         assert!(harness.executor.executed().is_empty());
@@ -882,7 +944,10 @@ mod tests {
             comments: vec![
                 GroundedComment {
                     text: "round this".into(),
-                    anchors: vec![anchor(TopologyElement::Face(FaceId(3))), anchor(TopologyElement::Edge(EdgeId(4)))],
+                    anchors: vec![
+                        anchor(TopologyElement::Face(FaceId(3))),
+                        anchor(TopologyElement::Edge(EdgeId(4))),
+                    ],
                 },
                 GroundedComment {
                     text: "and chamfer this".into(),
@@ -908,7 +973,14 @@ mod tests {
         let ModelItem::User { text, .. } = &requests[0].items[0] else {
             panic!("first item is the user's turn");
         };
-        for expected in ["- face 3", "- edge 4", "- edge 9", "round this", "and chamfer this", "and make it taller"] {
+        for expected in [
+            "- face 3",
+            "- edge 4",
+            "- edge 9",
+            "round this",
+            "and chamfer this",
+            "and make it taller",
+        ] {
             assert!(text.contains(expected), "missing {expected}");
         }
     }

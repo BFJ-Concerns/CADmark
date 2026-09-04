@@ -62,7 +62,10 @@ pub struct ImageData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ModelItem {
     /// What the user said, with any images attached.
-    User { text: String, images: Vec<ImageData> },
+    User {
+        text: String,
+        images: Vec<ImageData>,
+    },
     /// What the model said.
     Assistant { text: String },
     /// A tool the model asked to run.

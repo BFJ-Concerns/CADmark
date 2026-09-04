@@ -53,7 +53,9 @@ const BOX: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box
 #[test]
 fn executes_a_script_and_exports_its_kept_model() {
     let (project, script, mut worker) = project_with_script(BOX);
-    let model = worker.execute(&script, roomy(), &CancelFlag::new()).unwrap();
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
     assert_eq!(model.ledger.face_count(), 6);
     assert_eq!(model.summary.face_count, 6);
     assert!(model.is_printable());
@@ -82,15 +84,20 @@ fn a_script_fault_is_reported_with_the_users_own_line() {
     // A script fault leaves the worker serving: the next execution runs on
     // the same process.
     let model = worker
-        .execute(&script_path_with(&_project, BOX), roomy(), &CancelFlag::new())
+        .execute(
+            &script_path_with(&_project, BOX),
+            roomy(),
+            &CancelFlag::new(),
+        )
         .unwrap();
     assert_eq!(model.ledger.face_count(), 6);
 }
 
 #[test]
 fn a_syntax_error_is_a_script_fault_the_ai_can_fix() {
-    let (_project, script, mut worker) =
-        project_with_script("from build123d import *\n\nwith BuildPart() as part\n    Box(1, 1, 1)\n");
+    let (_project, script, mut worker) = project_with_script(
+        "from build123d import *\n\nwith BuildPart() as part\n    Box(1, 1, 1)\n",
+    );
     let error = worker
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap_err();
@@ -126,7 +133,11 @@ fn a_runaway_script_is_stopped_at_the_wall_clock_limit() {
 
     // The killed worker is replaced on the next request.
     let model = worker
-        .execute(&script_path_with(&_project, BOX), roomy(), &CancelFlag::new())
+        .execute(
+            &script_path_with(&_project, BOX),
+            roomy(),
+            &CancelFlag::new(),
+        )
         .unwrap();
     assert_eq!(model.ledger.face_count(), 6);
 }
@@ -180,7 +191,9 @@ fn executed_code_can_read_and_write_inside_the_project_folder() {
     );
     // The worker's working directory is the project folder, so a relative
     // path in the script lands there.
-    let model = worker.execute(&script, roomy(), &CancelFlag::new()).unwrap();
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
     assert_eq!(model.ledger.face_count(), 6);
     assert_eq!(
         std::fs::read_to_string(project.path().join("note.txt")).unwrap(),
@@ -209,7 +222,9 @@ fn executed_code_sees_no_inherited_environment() {
     let (_project, script, mut worker) = project_with_script(
         "import os\nfrom build123d import *\nassert 'CADMARK_TEST_CREDENTIAL' not in os.environ, 'credential leaked'\nassert 'HOME' not in os.environ\n\nwith BuildPart() as part:\n    Box(2, 2, 2)\n",
     );
-    worker.execute(&script, roomy(), &CancelFlag::new()).unwrap();
+    worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
 }
 
 #[test]

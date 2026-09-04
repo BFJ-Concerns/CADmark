@@ -268,7 +268,11 @@ impl CadmarkApp {
     }
 
     fn start_turn(&mut self, input: TurnInput, comment_ids: Vec<MessageId>) {
-        let summary_before = self.project.model.as_ref().map(|model| model.summary.clone());
+        let summary_before = self
+            .project
+            .model
+            .as_ref()
+            .map(|model| model.summary.clone());
         let response = self.project.conversation.push(Message::ai_response(""));
         match self.project.start_turn(input) {
             Ok(_cancel) => {
@@ -374,7 +378,11 @@ impl CadmarkApp {
                     .map(|message| message.text.clone())
                     .unwrap_or_default();
                 let text = turn_chat_message(
-                    if reply.trim().is_empty() { &summary } else { &reply },
+                    if reply.trim().is_empty() {
+                        &summary
+                    } else {
+                        &reply
+                    },
                     turn.summary_before.as_ref(),
                     &model.summary,
                 );
@@ -454,14 +462,17 @@ impl CadmarkApp {
                     self.project.has_script = self.project.script_path().exists();
                     self.project.record_script_state();
                     self.status = Some(Status::error(format!("Execution error: {error}")));
-                    self.project.conversation.push(Message::error_notice(format!(
-                        "{SCRIPT_FILENAME} failed to run.\n\n{error}"
-                    )));
+                    self.project
+                        .conversation
+                        .push(Message::error_notice(format!(
+                            "{SCRIPT_FILENAME} failed to run.\n\n{error}"
+                        )));
                 }
                 OrchestratorResult::TurnEvent(event) => self.apply_turn_event(event),
                 OrchestratorResult::TurnEnded(outcome) => self.finish_turn(outcome),
                 OrchestratorResult::Exported { format, result } => {
-                    self.project.exports_in_flight = self.project.exports_in_flight.saturating_sub(1);
+                    self.project.exports_in_flight =
+                        self.project.exports_in_flight.saturating_sub(1);
                     self.status = Some(match result {
                         Ok(path) => Status::info(format!(
                             "Exported {} to {}",
@@ -658,7 +669,9 @@ impl CadmarkApp {
                     self.clear_selection();
                 }
             }
-            PickTransition::Hit(element, screen_pos) => self.handle_pick_result(element, screen_pos),
+            PickTransition::Hit(element, screen_pos) => {
+                self.handle_pick_result(element, screen_pos)
+            }
             PickTransition::ReadbackFailed => {
                 self.status = Some(Status::error("Selection failed: GPU pick readback failed"));
             }
@@ -709,8 +722,9 @@ impl CadmarkApp {
                     }
                 }
                 None => {
-                    self.settings_dialog
-                        .reject("No configuration directory is available to store the credential".into());
+                    self.settings_dialog.reject(
+                        "No configuration directory is available to store the credential".into(),
+                    );
                     return;
                 }
             }
@@ -747,14 +761,22 @@ impl CadmarkApp {
             && !self.settings_dialog.is_open();
         let mut action = ToolbarAction::None;
         ctx.input_mut(|input| {
-            if !typing && idle && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)) {
+            if !typing
+                && idle
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z))
+            {
                 action = ToolbarAction::Undo;
             } else if !typing
                 && idle
-                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z))
+                && input.consume_shortcut(&KeyboardShortcut::new(
+                    Modifiers::COMMAND | Modifiers::SHIFT,
+                    Key::Z,
+                ))
             {
                 action = ToolbarAction::Redo;
-            } else if idle && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O)) {
+            } else if idle
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O))
+            {
                 action = ToolbarAction::OpenProject;
             } else if idle
                 && self.project.has_script
@@ -763,16 +785,21 @@ impl CadmarkApp {
                 action = ToolbarAction::NameVersion;
             } else if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::E)) {
                 action = ToolbarAction::ToggleCode;
-            } else if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma)) {
+            } else if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma))
+            {
                 action = ToolbarAction::OpenSettings;
             } else if idle
                 && self.project.has_script
                 && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F5))
             {
                 action = ToolbarAction::Refresh;
-            } else if !typing && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F)) {
+            } else if !typing
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F))
+            {
                 action = ToolbarAction::FitView;
-            } else if !typing && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::P)) {
+            } else if !typing
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::P))
+            {
                 action = ToolbarAction::ToggleProjection;
             }
         });
@@ -812,7 +839,8 @@ impl CadmarkApp {
             }
             ToolbarAction::Refresh => self.project.request_reload(),
             ToolbarAction::FitView => {
-                self.pending_camera_bounds = self.project.model.as_ref().and_then(|model| model.bounds);
+                self.pending_camera_bounds =
+                    self.project.model.as_ref().and_then(|model| model.bounds);
             }
             ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
             ToolbarAction::Export(format) => self.export(format),
@@ -1048,7 +1076,8 @@ impl CadmarkApp {
 
             if self.has_mesh {
                 let view = self.renderer.camera.view_matrix();
-                let axes = std::array::from_fn(|axis| [view[axis][0], view[axis][1], view[axis][2]]);
+                let axes =
+                    std::array::from_fn(|axis| [view[axis][0], view[axis][1], view[axis][2]]);
                 match cadmark_ui::view_gizmo::show(ui, rect, axes) {
                     GizmoAction::LookFrom(direction) => self.renderer.camera.look_from(direction),
                     GizmoAction::Orbit(delta) => self.renderer.camera.orbit(delta.x, delta.y),
@@ -1081,14 +1110,21 @@ impl CadmarkApp {
             (None, _) if !self.project.has_script => (
                 "No part yet".to_string(),
                 if self.project.ai_model.is_some() {
-                    "Describe what to build in the chat, and the model will appear here.".to_string()
+                    "Describe what to build in the chat, and the model will appear here."
+                        .to_string()
                 } else {
-                    format!("Write {SCRIPT_FILENAME} in the project folder and press Rebuild, or open Settings to add an AI provider.")
+                    format!(
+                        "Write {SCRIPT_FILENAME} in the project folder and press Rebuild, or open Settings to add an AI provider."
+                    )
                 },
                 theme::TEXT_MUTED,
             ),
             (None, Some(status)) => (status.text.clone(), String::new(), theme::TEXT_MUTED),
-            (None, None) => ("Loading\u{2026}".to_string(), String::new(), theme::TEXT_MUTED),
+            (None, None) => (
+                "Loading\u{2026}".to_string(),
+                String::new(),
+                theme::TEXT_MUTED,
+            ),
         };
         let painter = ui.painter();
         let centre = rect.center();

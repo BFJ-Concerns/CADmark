@@ -12,7 +12,9 @@ use cadmark_core::mesh::TessellatedMesh;
 use cadmark_renderer::mesh::GpuMesh;
 use cadmark_renderer::picking::PickingPass;
 use cadmark_renderer::pipeline::{MeshUniforms, RenderPipelines, SimpleUniforms, upload_mesh};
-use cadmark_renderer::viewport::{copy_pick_pixel, decode_pick_result, render_picking, render_scene};
+use cadmark_renderer::viewport::{
+    copy_pick_pixel, decode_pick_result, render_picking, render_scene,
+};
 
 /// GPU resources for the 3D viewport, stored in egui_wgpu's
 /// `callback_resources` so both `prepare()` and `paint()` can reach them.
@@ -352,7 +354,13 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     0,
                     &submission_token.to_le_bytes(),
                 );
-                copy_pick_pixel(&mut pick_encoder, &res.picking, &res.picking.staging_buffer, x, y);
+                copy_pick_pixel(
+                    &mut pick_encoder,
+                    &res.picking,
+                    &res.picking.staging_buffer,
+                    x,
+                    y,
+                );
                 pick_encoder.copy_buffer_to_buffer(
                     &res.submission_marker_source,
                     0,
@@ -385,7 +393,12 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         // The egui paint callback's render pass has no depth attachment,
         // so the scene is rendered here with its own depth texture, then
         // blitted in paint().
-        render_scene(encoder, &res.pipelines, res.mesh.as_ref(), self.clear_colour);
+        render_scene(
+            encoder,
+            &res.pipelines,
+            res.mesh.as_ref(),
+            self.clear_colour,
+        );
 
         Vec::new()
     }

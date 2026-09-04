@@ -223,7 +223,9 @@ impl ChatPane {
                 let has_text = !self.input_text.trim().is_empty();
                 if turn_running
                     && ui
-                        .add(egui::Button::new(egui::RichText::new("Cancel").color(theme::ERROR)))
+                        .add(egui::Button::new(
+                            egui::RichText::new("Cancel").color(theme::ERROR),
+                        ))
                         .on_hover_text("Stop the AI and put the model back as it was")
                         .clicked()
                 {
@@ -381,38 +383,41 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
 /// to each call's input and result.
 fn show_tool_calls(ui: &mut egui::Ui, message: &Message, activities: &[ToolActivity], width: f32) {
     let header = tool_group_label(activities);
-    egui::CollapsingHeader::new(
-        egui::RichText::new(header)
-            .small()
-            .color(theme::TEXT_MUTED),
-    )
-    .id_salt(message.id.0)
-    .default_open(false)
-    .show(ui, |ui| {
-        ui.set_max_width(width);
-        for activity in activities {
-            let tint = if activity.failed {
-                theme::WARNING
-            } else {
-                theme::TEXT_MUTED
-            };
-            egui::CollapsingHeader::new(
-                egui::RichText::new(tool_call_label(activity))
-                    .small()
-                    .color(tint),
-            )
-            .id_salt((message.id.0, &activity.call_id))
-            .show(ui, |ui| {
-                ui.label(egui::RichText::new("Input").small().strong().color(theme::TEXT_MUTED));
-                code_block(ui, &tool_input_text(activity));
-                ui.label(egui::RichText::new("Result").small().strong().color(theme::TEXT_MUTED));
-                code_block(
-                    ui,
-                    activity.output.as_deref().unwrap_or("(still running)"),
-                );
-            });
-        }
-    });
+    egui::CollapsingHeader::new(egui::RichText::new(header).small().color(theme::TEXT_MUTED))
+        .id_salt(message.id.0)
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.set_max_width(width);
+            for activity in activities {
+                let tint = if activity.failed {
+                    theme::WARNING
+                } else {
+                    theme::TEXT_MUTED
+                };
+                egui::CollapsingHeader::new(
+                    egui::RichText::new(tool_call_label(activity))
+                        .small()
+                        .color(tint),
+                )
+                .id_salt((message.id.0, &activity.call_id))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new("Input")
+                            .small()
+                            .strong()
+                            .color(theme::TEXT_MUTED),
+                    );
+                    code_block(ui, &tool_input_text(activity));
+                    ui.label(
+                        egui::RichText::new("Result")
+                            .small()
+                            .strong()
+                            .color(theme::TEXT_MUTED),
+                    );
+                    code_block(ui, activity.output.as_deref().unwrap_or("(still running)"));
+                });
+            }
+        });
 }
 
 fn code_block(ui: &mut egui::Ui, text: &str) {
@@ -491,7 +496,11 @@ fn tool_verb(tool: &str) -> &str {
 /// The arguments as the user reads them: a script shows as its code, the
 /// rest as pretty JSON.
 fn tool_input_text(activity: &ToolActivity) -> String {
-    match activity.arguments.get("code").and_then(|code| code.as_str()) {
+    match activity
+        .arguments
+        .get("code")
+        .and_then(|code| code.as_str())
+    {
         Some(code) => code.to_string(),
         None => serde_json::to_string_pretty(&activity.arguments).unwrap_or_default(),
     }
@@ -565,7 +574,10 @@ mod tests {
             tool_group_label(&activities),
             "3 steps: looked up docs, ran the script \u{00d7}2"
         );
-        assert_eq!(tool_call_label(&activities[1]), "ran the script \u{2014} failed in 1.5 s");
+        assert_eq!(
+            tool_call_label(&activities[1]),
+            "ran the script \u{2014} failed in 1.5 s"
+        );
         assert_eq!(
             tool_call_label(&activity("run_script", None, false)),
             "ran the script \u{2014} running"

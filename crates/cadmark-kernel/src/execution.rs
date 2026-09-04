@@ -509,13 +509,11 @@ mod tests {
 
     #[test]
     fn real_box_resolves_all_final_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
-"#,
-        );
+"#);
         let result = result.unwrap();
 
         assert_eq!(result.ledger.face_count(), 6);
@@ -531,13 +529,11 @@ with BuildPart() as part:
 
     #[test]
     fn real_cylinder_resolves_all_final_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(5, 10)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_every_element_resolves(&result, SemanticOperation::Cylinder, 4);
         assert_bridge_consumers(&result);
@@ -545,15 +541,13 @@ with BuildPart() as part:
 
     #[test]
     fn real_boolean_fuse_resolves_changed_and_unchanged_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
     with Locations((5, 5, 5)):
         Box(10, 10, 10)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::BooleanFuse);
         assert_contains_operation(&result, SemanticOperation::Box);
@@ -562,15 +556,13 @@ with BuildPart() as part:
 
     #[test]
     fn real_boolean_cut_resolves_all_surviving_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
     with Locations((2, 1, 0)):
         Box(4, 4, 14, mode=Mode.SUBTRACT)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::BooleanCut);
         assert_bridge_consumers(&result);
@@ -578,15 +570,13 @@ with BuildPart() as part:
 
     #[test]
     fn real_boolean_common_resolves_all_surviving_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
     with Locations((5, 5, 5)):
         Box(10, 10, 10, mode=Mode.INTERSECT)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::BooleanCommon);
         assert_bridge_consumers(&result);
@@ -594,14 +584,12 @@ with BuildPart() as part:
 
     #[test]
     fn real_fillet_resolves_direct_and_descendant_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
     fillet(part.edges().filter_by(Axis.Z), radius=1)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::Fillet);
         let contexts = resolved_contexts(&result);
@@ -637,14 +625,12 @@ with BuildPart() as part:
 
     #[test]
     fn real_chamfer_resolves_direct_and_descendant_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
     chamfer(part.edges().filter_by(Axis.Z), length=1)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_contains_operation(&result, SemanticOperation::Chamfer);
         let contexts = resolved_contexts(&result);
@@ -680,14 +666,12 @@ with BuildPart() as part:
 
     #[test]
     fn real_locations_transport_primitive_provenance() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     with Locations((0, 0, 0), (10, 0, 0)):
         Box(2, 2, 2)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 12);
         assert_eq!(result.ledger.edge_count(), 24);
@@ -698,14 +682,12 @@ with BuildPart() as part:
 
     #[test]
     fn real_grid_locations_transport_primitive_provenance() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     with GridLocations(20, 20, 2, 2):
         Box(2, 2, 2)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 24);
         assert_eq!(result.ledger.edge_count(), 48);
@@ -716,14 +698,12 @@ with BuildPart() as part:
 
     #[test]
     fn real_polar_locations_transport_rotated_primitive_provenance() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     with PolarLocations(10, 3):
         Box(2, 2, 2)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 18);
         assert_eq!(result.ledger.edge_count(), 36);
@@ -734,15 +714,13 @@ with BuildPart() as part:
 
     #[test]
     fn real_sketch_extrude_resolves_all_final_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     with BuildSketch():
         Rectangle(20, 10)
     extrude(amount=5)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 6);
         assert_every_element_resolves(&result, SemanticOperation::Extrude, 6);
@@ -751,8 +729,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_sketch_cut_extrude_through_box_resolves_all_surviving_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 hole_diameter_mm = 3.4
 hole_inset_mm = 5
@@ -764,8 +741,7 @@ with BuildPart() as part:
         with GridLocations(30, 15, 2, 2):
             Circle(hole_diameter_mm / 2)
     extrude(amount=-12, mode=Mode.SUBTRACT)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 10);
         assert_contains_operation(&result, SemanticOperation::BooleanCut);
@@ -781,16 +757,14 @@ with BuildPart() as part:
 
     #[test]
     fn real_revolve_resolves_all_final_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     with BuildSketch(Plane.XZ) as profile:
         with Locations((6, 0)):
             Rectangle(4, 4)
     revolve(axis=Axis.Z)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_every_element_resolves(&result, SemanticOperation::Revolve, 7);
         assert_bridge_consumers(&result);
@@ -798,8 +772,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_sphere_cone_torus_and_wedge_resolve_all_final_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Sphere(5)
@@ -809,8 +782,7 @@ with BuildPart() as part:
         Torus(4, 1)
     with Locations((0, -20, 0)):
         Wedge(4, 4, 4, 1, 1, 3, 3)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.untraced_count(), 0);
         for operation in [
@@ -826,8 +798,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_loft_and_sweep_resolve_all_final_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     with BuildSketch(Plane.XY) as base:
@@ -841,8 +812,7 @@ with BuildPart() as part:
         with Locations((20, 0)):
             Circle(1)
     sweep(path=path.line)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.untraced_count(), 0);
         assert_contains_operation(&result, SemanticOperation::Loft);
@@ -852,8 +822,7 @@ with BuildPart() as part:
 
     #[test]
     fn real_shell_mirror_split_and_taper_resolve_all_final_topology() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(20, 20, 10)
@@ -863,8 +832,7 @@ with BuildPart() as part:
     with BuildSketch(part.faces().sort_by(Axis.Y)[-1]):
         Circle(3)
     extrude(amount=4, taper=10)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.ledger.untraced_count(), 0);
         assert_contains_operation(&result, SemanticOperation::Split);
@@ -873,14 +841,12 @@ with BuildPart() as part:
 
     #[test]
     fn untraced_geometry_still_renders_and_reports_untraced_on_selection() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 from OCP.BRepPrimAPI import BRepPrimAPI_MakeSphere
 
 with BuildPart() as part:
     add(Solid(BRepPrimAPI_MakeSphere(5).Shape()))
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert!(!result.mesh.indices.is_empty());
         assert_eq!(result.ledger.face_count(), 1);
@@ -896,13 +862,11 @@ with BuildPart() as part:
 
     #[test]
     fn execution_measures_every_final_element_and_the_whole_model() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(20, 10, 5)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert_eq!(result.descriptors.faces.len(), result.ledger.face_count());
         assert_eq!(result.descriptors.edges.len(), result.ledger.edge_count());
@@ -935,13 +899,11 @@ with BuildPart() as part:
 
     #[test]
     fn model_bounds_are_exact_for_curved_geometry() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(10, 5)
-"#,
-        );
+"#);
         let result = result.unwrap();
         let size = result.summary.size();
         assert!((size[0] - 20.0).abs() < 1e-6, "{size:?}");
@@ -955,13 +917,11 @@ with BuildPart() as part:
     /// reversed relative to their planes.
     #[test]
     fn tessellation_faces_outward_on_reversed_faces() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 20, 30)
-"#,
-        );
+"#);
         let result = result.unwrap();
         let mesh = &result.mesh;
         for vertex in &mesh.vertices {
@@ -993,13 +953,11 @@ with BuildPart() as part:
 
     #[test]
     fn tessellation_carries_outward_surface_normals() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(5, 10)
-"#,
-        );
+"#);
         let result = result.unwrap();
         let outward = result
             .mesh
@@ -1024,18 +982,18 @@ with BuildPart() as part:
 
     #[test]
     fn exports_step_stl_and_3mf_from_the_executed_model() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(20, 10, 5)
-"#,
-        );
+"#);
         let result = result.unwrap();
         assert!(result.model.0.is_file(), "model kept at {:?}", result.model);
         let directory = tempfile::tempdir().unwrap();
         for format in cadmark_core::export::ExportFormat::ALL {
-            let path = directory.path().join(format!("part.{}", format.extension()));
+            let path = directory
+                .path()
+                .join(format!("part.{}", format.extension()));
             crate::export::export_model(&result.model, format, &path).unwrap();
             assert!(std::fs::metadata(&path).unwrap().len() > 0, "{path:?}");
         }
@@ -1043,25 +1001,21 @@ with BuildPart() as part:
 
     #[test]
     fn algebra_mode_and_direct_api_scripts_execute_with_provenance() {
-        let (_scratch, algebra) = run(
-            r#"from build123d import *
+        let (_scratch, algebra) = run(r#"from build123d import *
 
 plate = Box(20, 10, 5)
 hole = Cylinder(2, 10)
 result = plate - hole
-"#,
-        );
+"#);
         let algebra = algebra.unwrap();
         assert!(algebra.summary.face_count > 6, "the hole adds faces");
         assert_contains_operation(&algebra, SemanticOperation::BooleanCut);
         assert!(algebra.is_printable());
 
-        let (_scratch, direct) = run(
-            r#"from build123d import *
+        let (_scratch, direct) = run(r#"from build123d import *
 
 block = Solid.make_box(4, 4, 4)
-"#,
-        );
+"#);
         let direct = direct.unwrap();
         assert_eq!(direct.ledger.face_count(), 6);
         assert_every_element_resolves(&direct, SemanticOperation::Box, 3);
@@ -1069,21 +1023,18 @@ block = Solid.make_box(4, 4, 4)
 
     #[test]
     fn a_closed_solid_is_printable_and_an_open_shell_is_flagged() {
-        let (_scratch, closed) = run(
-            r#"from build123d import *
+        let (_scratch, closed) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(10, 10, 10)
-"#,
-        );
+"#);
         let closed = closed.unwrap();
         assert_eq!(closed.validity.len(), 1);
         assert!(closed.is_printable());
 
         // A box with one face removed, closed into a "solid" with a hole in
         // it: the shape the slicer would reject.
-        let (_scratch, open) = run(
-            r#"from build123d import *
+        let (_scratch, open) = run(r#"from build123d import *
 from OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid
 from OCP.TopoDS import TopoDS
 
@@ -1092,8 +1043,7 @@ shell = Shell(box.faces()[:-1])
 leaky = Solid(BRepBuilderAPI_MakeSolid(TopoDS.Shell_s(shell.wrapped)).Solid())
 with BuildPart() as part:
     add(leaky)
-"#,
-        );
+"#);
         let open = open.unwrap();
         assert_eq!(open.validity.len(), 1);
         assert!(!open.validity[0].closed);
@@ -1102,14 +1052,12 @@ with BuildPart() as part:
 
     #[test]
     fn execution_error_restores_bindings_for_the_next_run() {
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Box(1, 1, 1)
 raise RuntimeError("deliberate execution failure")
-"#,
-        );
+"#);
         let error = result.unwrap_err();
         let ExecutionError::Script(message) = error else {
             panic!("expected a script failure, got {error:?}");
@@ -1118,13 +1066,11 @@ raise RuntimeError("deliberate execution failure")
         assert!(message.contains("deliberate execution failure"));
         assert!(message.contains("RuntimeError"));
 
-        let (_scratch, result) = run(
-            r#"from build123d import *
+        let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
     Cylinder(2, 4)
-"#,
-        );
+"#);
         assert_every_element_resolves(&result.unwrap(), SemanticOperation::Cylinder, 4);
     }
 

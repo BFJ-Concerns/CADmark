@@ -77,7 +77,10 @@ impl OverlayState {
         let Self::Active { anchors, .. } = self else {
             return false;
         };
-        match anchors.iter().position(|anchor| anchor.element == context.element) {
+        match anchors
+            .iter()
+            .position(|anchor| anchor.element == context.element)
+        {
             Some(index) if anchors.len() > 1 => {
                 anchors.remove(index);
             }

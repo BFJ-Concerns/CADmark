@@ -47,7 +47,10 @@ pub enum WorkerError {
     Script(String),
     /// A ceiling was crossed and the script was stopped.
     #[error("{}", .hit.describe(.limits))]
-    Limit { hit: LimitHit, limits: ExecutionLimits },
+    Limit {
+        hit: LimitHit,
+        limits: ExecutionLimits,
+    },
     /// The caller cancelled while the request was in flight.
     #[error("execution was cancelled")]
     Cancelled,
@@ -80,8 +83,9 @@ impl WorkerLaunch {
     /// The worker binary next to the running executable, which is where
     /// Cargo puts both binaries of one build.
     pub fn beside_current_exe(project_dir: PathBuf) -> Result<Self, WorkerError> {
-        let exe = std::env::current_exe()
-            .map_err(|error| WorkerError::Runtime(format!("current executable unknown: {error}")))?;
+        let exe = std::env::current_exe().map_err(|error| {
+            WorkerError::Runtime(format!("current executable unknown: {error}"))
+        })?;
         let binary = exe.with_file_name(WORKER_BINARY);
         if !binary.is_file() {
             return Err(WorkerError::Runtime(format!(
@@ -182,9 +186,15 @@ impl KernelWorker {
         let mut line = serde_json::to_string(request)
             .map_err(|error| WorkerError::Runtime(format!("could not encode request: {error}")))?;
         line.push('\n');
-        if let Err(error) = process.stdin.write_all(line.as_bytes()).and_then(|()| process.stdin.flush()) {
+        if let Err(error) = process
+            .stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| process.stdin.flush())
+        {
             self.discard();
-            return Err(WorkerError::Runtime(format!("could not reach the worker: {error}")));
+            return Err(WorkerError::Runtime(format!(
+                "could not reach the worker: {error}"
+            )));
         }
 
         let outcome = supervise(process, limits, cancel);
@@ -203,7 +213,9 @@ impl KernelWorker {
         let scratch_dir = tempfile::Builder::new()
             .prefix("cadmark-kernel-")
             .tempdir()
-            .map_err(|error| WorkerError::Runtime(format!("could not create scratch directory: {error}")))?;
+            .map_err(|error| {
+                WorkerError::Runtime(format!("could not create scratch directory: {error}"))
+            })?;
         let mut command = Command::new(&self.launch.binary);
         command
             .arg("--project-dir")
@@ -225,9 +237,9 @@ impl KernelWorker {
         if let Some(level) = std::env::var_os("RUST_LOG") {
             command.env("RUST_LOG", level);
         }
-        let mut child = command
-            .spawn()
-            .map_err(|error| WorkerError::Runtime(format!("could not start the worker: {error}")))?;
+        let mut child = command.spawn().map_err(|error| {
+            WorkerError::Runtime(format!("could not start the worker: {error}"))
+        })?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = BufReader::new(child.stdout.take().expect("piped stdout"));
         let mut process = Process {
@@ -291,7 +303,9 @@ fn supervise(
         loop {
             match reply_rx.recv_timeout(SUPERVISION_INTERVAL) {
                 Ok(Ok(line)) if line.is_empty() => {
-                    return Err(WorkerError::Runtime("the worker exited without replying".to_string()));
+                    return Err(WorkerError::Runtime(
+                        "the worker exited without replying".to_string(),
+                    ));
                 }
                 Ok(Ok(line)) => {
                     return serde_json::from_str(&line).map_err(|error| {
@@ -302,7 +316,9 @@ fn supervise(
                     return Err(WorkerError::Runtime(format!("lost the worker: {error}")));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(WorkerError::Runtime("the worker reader stopped".to_string()));
+                    return Err(WorkerError::Runtime(
+                        "the worker reader stopped".to_string(),
+                    ));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
@@ -319,7 +335,8 @@ fn supervise(
                         limits,
                     });
                 }
-                if resident_memory_bytes(pid).is_some_and(|resident| resident > limits.memory_bytes) {
+                if resident_memory_bytes(pid).is_some_and(|resident| resident > limits.memory_bytes)
+                {
                     kill(&mut process.child);
                     return Err(WorkerError::Limit {
                         hit: LimitHit::Memory,
@@ -354,7 +371,9 @@ fn read_line_within(process: &mut Process, timeout: Duration) -> Result<String, 
                     return Err(WorkerError::Runtime(format!("lost the worker: {error}")));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(WorkerError::Runtime("the worker reader stopped".to_string()));
+                    return Err(WorkerError::Runtime(
+                        "the worker reader stopped".to_string(),
+                    ));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
@@ -433,7 +452,10 @@ pub fn run_worker(args: WorkerArgs) -> i32 {
             return 2;
         }
     };
-    log::info!("kernel worker confined ({confinement:?}) to {}", policy.project_dir.display());
+    log::info!(
+        "kernel worker confined ({confinement:?}) to {}",
+        policy.project_dir.display()
+    );
 
     crate::python_runtime::configure_python_home();
     if let Some(venv) = &venv
@@ -456,7 +478,11 @@ pub fn run_worker(args: WorkerArgs) -> i32 {
         };
         let mut encoded = serde_json::to_string(&reply).expect("replies serialise");
         encoded.push('\n');
-        if stdout.write_all(encoded.as_bytes()).and_then(|()| stdout.flush()).is_err() {
+        if stdout
+            .write_all(encoded.as_bytes())
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
             break;
         }
     }

@@ -425,7 +425,11 @@ class BuildSketch:
     #[test]
     fn algebra_and_direct_api_results_are_accepted_and_the_last_binding_wins() {
         Python::with_gil(|py| {
-            for script in [c"result = Part()", c"result = Solid()", c"result = Compound()"] {
+            for script in [
+                c"result = Part()",
+                c"result = Solid()",
+                c"result = Compound()",
+            ] {
                 let namespace = namespace_from(py, script);
                 find_result_shape(&namespace).unwrap();
             }
@@ -442,10 +446,17 @@ class BuildSketch:
     #[test]
     fn a_sketch_only_script_is_reported_as_not_yet_a_solid() {
         Python::with_gil(|py| {
-            for script in [c"sketch = BuildSketch(Sketch())", c"profile = Sketch()", c"f = Face()"] {
+            for script in [
+                c"sketch = BuildSketch(Sketch())",
+                c"profile = Sketch()",
+                c"f = Face()",
+            ] {
                 let namespace = namespace_from(py, script);
                 let err = find_result_shape(&namespace).unwrap_err();
-                assert!(matches!(err, TessellationError::UnsupportedScriptOutput(_)), "{script:?}");
+                assert!(
+                    matches!(err, TessellationError::UnsupportedScriptOutput(_)),
+                    "{script:?}"
+                );
                 assert!(err.to_string().contains("no solid yet"), "{err}");
             }
         });

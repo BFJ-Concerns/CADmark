@@ -143,7 +143,9 @@ mod tests {
         assert!(!format!("{error:?}").contains(secret));
 
         assert_eq!(
-            configuration("file:///tmp/ai").build_client(None).unwrap_err(),
+            configuration("file:///tmp/ai")
+                .build_client(None)
+                .unwrap_err(),
             ConfigurationError::InvalidBaseUrl
         );
         let mut blank = configuration("https://provider.example/v1");
@@ -160,7 +162,12 @@ mod tests {
         let parsed: AiConfiguration = serde_json::from_str(json).unwrap();
         assert!(parsed.accepts_images);
         assert!(!parsed.allow_insecure_http);
-        assert!(serde_json::from_str::<AiConfiguration>(r#"{"base_url":"x","model":"m","api_key":"s"}"#).is_err());
+        assert!(
+            serde_json::from_str::<AiConfiguration>(
+                r#"{"base_url":"x","model":"m","api_key":"s"}"#
+            )
+            .is_err()
+        );
         assert!(!format!("{parsed:?}").contains("p.example"));
     }
 }

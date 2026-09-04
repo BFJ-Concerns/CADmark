@@ -416,7 +416,8 @@ impl ResponseAssembly {
                 }
             }
             "response.function_call_arguments.delta" => {
-                if let (Some(call), Some(delta)) = (self.calls.last_mut(), event["delta"].as_str()) {
+                if let (Some(call), Some(delta)) = (self.calls.last_mut(), event["delta"].as_str())
+                {
                     call.arguments.push_str(delta);
                 }
             }
@@ -541,14 +542,23 @@ fn non_success_error(
 }
 
 fn refusal_cause(status: StatusCode, error: &ProviderError) -> Option<RefusalCause> {
-    let code = error.code.as_deref().unwrap_or_default().to_ascii_lowercase();
-    let kind = error.kind.as_deref().unwrap_or_default().to_ascii_lowercase();
+    let code = error
+        .code
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let kind = error
+        .kind
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let message = error
         .message
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let mentions = |needle: &str| code.contains(needle) || kind.contains(needle) || message.contains(needle);
+    let mentions =
+        |needle: &str| code.contains(needle) || kind.contains(needle) || message.contains(needle);
     if status == StatusCode::TOO_MANY_REQUESTS
         || mentions("rate_limit")
         || mentions("usage_limit")
@@ -666,7 +676,12 @@ pub(crate) mod recording {
         }
     }
 
-    pub(crate) fn provider_failure(status: u16, kind: &str, code: &str, message: &str) -> ScriptedResponse {
+    pub(crate) fn provider_failure(
+        status: u16,
+        kind: &str,
+        code: &str,
+        message: &str,
+    ) -> ScriptedResponse {
         ScriptedResponse {
             status,
             body: serde_json::json!({
@@ -705,7 +720,11 @@ pub(crate) mod recording {
                 if let Some(delay) = response.delay {
                     tokio::time::sleep(delay).await;
                 }
-                let reason = if response.status == 200 { "OK" } else { "Error" };
+                let reason = if response.status == 200 {
+                    "OK"
+                } else {
+                    "Error"
+                };
                 let content_type = if response.streamed {
                     "text/event-stream"
                 } else {
@@ -801,7 +820,10 @@ mod tests {
         let (first, second) = whole.split_at(whole.len() / 2);
         let mut seen = parser.push(first.as_bytes());
         seen.extend(parser.push(second.as_bytes()));
-        let kinds: Vec<_> = seen.iter().map(|event| event["type"].as_str().unwrap().to_string()).collect();
+        let kinds: Vec<_> = seen
+            .iter()
+            .map(|event| event["type"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(kinds, ["a", "b"]);
     }
 
@@ -817,7 +839,10 @@ mod tests {
             Some(RefusalCause::UsageLimit)
         );
         assert_eq!(
-            refusal_cause(StatusCode::BAD_GATEWAY, &error("model_cooldown", "usage limit reached")),
+            refusal_cause(
+                StatusCode::BAD_GATEWAY,
+                &error("model_cooldown", "usage limit reached")
+            ),
             Some(RefusalCause::UsageLimit)
         );
         assert_eq!(
@@ -825,11 +850,17 @@ mod tests {
             Some(RefusalCause::Authentication)
         );
         assert_eq!(
-            refusal_cause(StatusCode::NOT_FOUND, &error("model_not_found", "no such model")),
+            refusal_cause(
+                StatusCode::NOT_FOUND,
+                &error("model_not_found", "no such model")
+            ),
             Some(RefusalCause::UnknownModel)
         );
         assert_eq!(
-            refusal_cause(StatusCode::INTERNAL_SERVER_ERROR, &error("boom", "exploded")),
+            refusal_cause(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &error("boom", "exploded")
+            ),
             None
         );
     }
@@ -853,7 +884,10 @@ mod tests {
     async fn sends_the_streamed_responses_contract_and_assembles_text_and_tool_calls() {
         let (base_url, records, server) = recording_server(vec![
             completed("distinctive"),
-            tool_call("run_script", serde_json::json!({"code": "x = 1", "summary": "Set x"})),
+            tool_call(
+                "run_script",
+                serde_json::json!({"code": "x = 1", "summary": "Set x"}),
+            ),
         ])
         .await;
         let client = client(&base_url, Some("fake-token"));
@@ -892,7 +926,10 @@ mod tests {
             .unwrap();
         assert_eq!(first.text, "distinctive");
         assert!(first.tool_calls.is_empty());
-        assert_eq!(*deltas.lock().unwrap(), [StreamDelta::Text("distinctive".into())]);
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            [StreamDelta::Text("distinctive".into())]
+        );
 
         let second = client
             .stream(request, CancelFlag::new(), &mut sink)
@@ -918,10 +955,12 @@ mod tests {
         assert_eq!(body["input"][0]["role"], "user");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(body["input"][0]["content"][1]["type"], "input_image");
-        assert!(body["input"][0]["content"][1]["image_url"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/png;base64,"));
+        assert!(
+            body["input"][0]["content"][1]["image_url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
         assert_eq!(body["input"][1]["role"], "assistant");
         assert_eq!(body["input"][2]["type"], "function_call");
         assert_eq!(body["input"][2]["call_id"], "call_0");
@@ -960,7 +999,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stream_that_never_completes_is_a_parse_error_and_a_failed_response_is_a_request_error() {
+    async fn a_stream_that_never_completes_is_a_parse_error_and_a_failed_response_is_a_request_error()
+     {
         let (base_url, _, server) = recording_server(vec![
             ScriptedResponse {
                 status: 200,

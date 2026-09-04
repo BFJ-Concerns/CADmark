@@ -131,11 +131,7 @@ pub fn show(ui: &mut egui::Ui, viewport: egui::Rect, axes: [[f32; 3]; 3]) -> Giz
 
             let painter = ui.painter();
             if response.hovered() || response.dragged() {
-                painter.circle_filled(
-                    centre,
-                    SIZE * 0.5,
-                    theme::TEXT_STRONG.gamma_multiply(0.08),
-                );
+                painter.circle_filled(centre, SIZE * 0.5, theme::TEXT_STRONG.gamma_multiply(0.08));
             }
 
             // Positive axis lines run under the caps that end them.
@@ -226,9 +222,15 @@ mod tests {
     fn clicking_the_facing_cap_flips_to_the_far_side() {
         let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let caps = layout_caps(axes, 30.0);
-        let facing = caps.iter().find(|cap| cap.axis == 2 && cap.positive).unwrap();
+        let facing = caps
+            .iter()
+            .find(|cap| cap.axis == 2 && cap.positive)
+            .unwrap();
         assert_eq!(facing.look_from_target(), [0.0, 0.0, -1.0]);
-        let side = caps.iter().find(|cap| cap.axis == 0 && cap.positive).unwrap();
+        let side = caps
+            .iter()
+            .find(|cap| cap.axis == 0 && cap.positive)
+            .unwrap();
         assert_eq!(side.look_from_target(), [1.0, 0.0, 0.0]);
     }
 
@@ -236,13 +238,22 @@ mod tests {
     fn caps_sit_on_screen_axes_with_y_flipped() {
         let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let caps = layout_caps(axes, 30.0);
-        let plus_x = caps.iter().find(|cap| cap.axis == 0 && cap.positive).unwrap();
+        let plus_x = caps
+            .iter()
+            .find(|cap| cap.axis == 0 && cap.positive)
+            .unwrap();
         assert_eq!(plus_x.offset, egui::vec2(30.0, 0.0));
         // Screen y runs down, so world up is a negative offset.
-        let plus_y = caps.iter().find(|cap| cap.axis == 1 && cap.positive).unwrap();
+        let plus_y = caps
+            .iter()
+            .find(|cap| cap.axis == 1 && cap.positive)
+            .unwrap();
         assert_eq!(plus_y.offset, egui::vec2(0.0, -30.0));
         assert_eq!(plus_y.direction(), [0.0, 1.0, 0.0]);
-        let minus_y = caps.iter().find(|cap| cap.axis == 1 && !cap.positive).unwrap();
+        let minus_y = caps
+            .iter()
+            .find(|cap| cap.axis == 1 && !cap.positive)
+            .unwrap();
         assert_eq!(minus_y.direction(), [0.0, -1.0, 0.0]);
     }
 }

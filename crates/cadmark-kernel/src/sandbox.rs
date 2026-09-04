@@ -157,9 +157,24 @@ fn network_denial_program() -> Vec<libc::sock_filter> {
     let denied = DENIED_SYSCALLS.len() as u8;
 
     let mut program = vec![
-        bpf(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, arch_offset),
-        bpf(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, 1, 0, AUDIT_ARCH),
-        bpf(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_KILL_PROCESS),
+        bpf(
+            libc::BPF_LD | libc::BPF_W | libc::BPF_ABS,
+            0,
+            0,
+            arch_offset,
+        ),
+        bpf(
+            libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K,
+            1,
+            0,
+            AUDIT_ARCH,
+        ),
+        bpf(
+            libc::BPF_RET | libc::BPF_K,
+            0,
+            0,
+            libc::SECCOMP_RET_KILL_PROCESS,
+        ),
         bpf(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, nr_offset),
     ];
     // Each comparison jumps straight to the EPERM return when it matches
@@ -174,7 +189,12 @@ fn network_denial_program() -> Vec<libc::sock_filter> {
             *syscall as u32,
         ));
     }
-    program.push(bpf(libc::BPF_RET | libc::BPF_K, 0, 0, libc::SECCOMP_RET_ALLOW));
+    program.push(bpf(
+        libc::BPF_RET | libc::BPF_K,
+        0,
+        0,
+        libc::SECCOMP_RET_ALLOW,
+    ));
     program.push(bpf(
         libc::BPF_RET | libc::BPF_K,
         0,
@@ -245,7 +265,12 @@ mod tests {
         for denied in DENIED_SYSCALLS {
             assert_eq!(evaluate(&program, *denied as u32, AUDIT_ARCH), eperm);
         }
-        for allowed in [libc::SYS_read, libc::SYS_write, libc::SYS_openat, libc::SYS_mmap] {
+        for allowed in [
+            libc::SYS_read,
+            libc::SYS_write,
+            libc::SYS_openat,
+            libc::SYS_mmap,
+        ] {
             assert_eq!(
                 evaluate(&program, allowed as u32, AUDIT_ARCH),
                 libc::SECCOMP_RET_ALLOW
