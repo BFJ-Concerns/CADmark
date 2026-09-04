@@ -1,9 +1,10 @@
 // Embedded Python runtime discovery shared between build scripts and runtime.
 //
-// CADmark embeds CPython via PyO3 and currently supports a uv-managed
-// Python 3.12 runtime. The final executable must be able to recover the
-// Python home from the configured interpreter path so it can set
-// `PYTHONHOME` before the interpreter initialises.
+// CADmark embeds CPython via PyO3 and supports a Python 3.12 runtime. The
+// build scripts locate the interpreter (from `PYO3_PYTHON` or the
+// project's `.venv/`) and bake its home into the binary; the executable
+// recovers that home so it can set `PYTHONHOME` before the interpreter
+// initialises.
 
 use std::path::{Path, PathBuf};
 use std::sync::Once;
@@ -13,6 +14,15 @@ const EMBEDDED_PYTHON_HOME: Option<&str> = option_env!("CADMARK_EMBEDDED_PYTHON_
 
 /// One-time guard for configuring `PYTHONHOME`.
 static PYTHON_HOME_CONFIGURED: Once = Once::new();
+
+/// The interpreter PyO3 builds against, with symlinks resolved so a
+/// virtual environment's `bin/python` leads to the real install. `None`
+/// when `PYO3_PYTHON` is unset or names nothing on disk.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn configured_interpreter() -> Option<PathBuf> {
+    let path = std::env::var_os("PYO3_PYTHON").map(PathBuf::from)?;
+    std::fs::canonicalize(path).ok()
+}
 
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +109,22 @@ mod tests {
             layout.lib_dir,
             Path::new("/home/user/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/lib")
         );
+    }
+
+    #[test]
+    fn a_venv_symlink_resolves_to_the_real_interpreter_home() {
+        let workspace = tempfile::tempdir().unwrap();
+        let runtime_home = workspace.path().join("runtime");
+        let real = runtime_home.join("bin").join("python3.12");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&real, "").unwrap();
+        let venv_bin = workspace.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        std::os::unix::fs::symlink(&real, venv_bin.join("python")).unwrap();
+
+        let found = std::fs::canonicalize(venv_bin.join("python")).unwrap();
+        let layout = super::derive_runtime_layout_from_interpreter(&found).unwrap();
+        assert_eq!(layout.home, std::fs::canonicalize(&runtime_home).unwrap());
     }
 
     #[test]
