@@ -94,7 +94,7 @@ fn measures_the_known_gap_between_faces_through_the_worker() {
 }
 
 #[test]
-fn measures_picked_edge_and_vertex_ids_in_the_topology_map_order() {
+fn measures_picked_edge_ids_in_the_topology_map_order() {
     let (_project, script, mut worker) = project_with_script(BOX);
     let model = worker
         .execute(&script, roomy(), &CancelFlag::new())
@@ -113,19 +113,6 @@ fn measures_picked_edge_and_vertex_ids_in_the_topology_map_order() {
         "{edge_distance:?}"
     );
 
-    let vertex_distance = worker
-        .minimum_distance(
-            &model.model,
-            TopologyElement::Vertex(VertexId(0)),
-            TopologyElement::Vertex(VertexId(1)),
-            roomy(),
-        )
-        .unwrap();
-    assert!(
-        (vertex_distance.millimetres - 10.0).abs() < 1e-6,
-        "{vertex_distance:?}"
-    );
-
     let error = worker
         .minimum_distance(
             &model.model,
@@ -142,7 +129,28 @@ fn measures_picked_edge_and_vertex_ids_in_the_topology_map_order() {
 }
 
 #[test]
-fn exposes_known_circular_edge_diameter_and_face_area_in_descriptors() {
+fn measures_picked_vertex_ids_in_the_topology_map_order() {
+    let (_project, script, mut worker) = project_with_script(BOX);
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let vertex_distance = worker
+        .minimum_distance(
+            &model.model,
+            TopologyElement::Vertex(VertexId(2)),
+            TopologyElement::Vertex(VertexId(4)),
+            roomy(),
+        )
+        .unwrap();
+    assert!(
+        (vertex_distance.millimetres - (200.0_f64).sqrt()).abs() < 1e-6,
+        "{vertex_distance:?}"
+    );
+}
+
+#[test]
+fn exposes_known_circular_edge_radius_and_face_area_in_descriptors() {
     let (_project, script, mut worker) = project_with_script(
         "from build123d import *\n\nwith BuildPart() as part:\n    Cylinder(5, 10)\n",
     );
@@ -155,7 +163,7 @@ fn exposes_known_circular_edge_diameter_and_face_area_in_descriptors() {
         .iter()
         .find(|edge| edge.curve_type == "circle")
         .expect("cylinder has circular edges");
-    assert!((circle.length / std::f64::consts::PI - 10.0).abs() < 1e-6);
+    assert_eq!(circle.radius, Some(5.0));
     assert!(
         model
             .descriptors
