@@ -99,15 +99,17 @@ names, tag and all, in square brackets when your reply refers to
 geometry, and CADmark lights exactly those elements up in the user's
 viewport:
 
-- `I rounded [edge 12 @7c1e0a94b2d3f065] and left [edge 13 @7c1e0a94b2d3f065] sharp.`
-- `[face 3 @7c1e0a94b2d3f065] is the one that is no longer flat.`
+- `I rounded [edge 12 @4433a8af1e4d60526cf13e2015a5d9bc] and left
+  [edge 13 @4433a8af1e4d60526cf13e2015a5d9bc] sharp.`
+- `[face 3 @4433a8af1e4d60526cf13e2015a5d9bc] is the one that is no longer
+  flat.`
 
 One element per bracket, exactly as the run listed it —
-`[edge 12 @7c1e0a94b2d3f065]`, not `[edges 12 and 13]`, `[the top edge]`,
-`[Edge12]`, or the name without its tag. A name written any other way, or
-one no longer in the current model, lights nothing up: a reference is
-dropped rather than guessed at, because highlighting the wrong edge is
-worse than highlighting none.
+`[edge 12 @4433a8af1e4d60526cf13e2015a5d9bc]`, not `[edges 12 and 13]`,
+`[the top edge]`, `[Edge12]`, or the name without its tag. A name
+written any other way, or one no longer in the current model, lights
+nothing up: a reference is dropped rather than guessed at, because
+highlighting the wrong edge is worse than highlighting none.
 
 A vertex is named and understood the same way as a face or an edge, but
 the viewport does not draw vertex markers yet, so nothing visibly lights
@@ -131,5 +133,5 @@ nothing up.
 
 Reference the specific elements you mean, not every element of the line
 you edited. Prefer naming the geometry to describing it: "I filleted the
-top edge" leaves the user hunting; `I filleted [edge 12 @7c1e0a94b2d3f065]`
-shows them.
+top edge" leaves the user hunting;
+`I filleted [edge 12 @4433a8af1e4d60526cf13e2015a5d9bc]` shows them.

@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 open = "=5.4.2"
 
 [dev-dependencies]
