@@ -12,6 +12,7 @@ pub mod orchestrator;
 pub mod parts;
 mod project;
 mod render_source;
+mod script_parameters;
 pub mod turn;
 mod user_settings;
 mod validity;

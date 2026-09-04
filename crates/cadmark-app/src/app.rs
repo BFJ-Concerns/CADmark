@@ -24,6 +24,7 @@ use cadmark_renderer::section::{self, Axis};
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
+use cadmark_ui::parameters::{ParameterRow, ParametersAction, ParametersPanel, ParametersView};
 use cadmark_ui::part_name_dialog::{PartNameAction, PartNameDialog};
 use cadmark_ui::settings_dialog::{SettingsAction, SettingsDialog, SettingsForm};
 use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
@@ -37,6 +38,7 @@ use crate::orchestrator::OrchestratorResult;
 use crate::parts::{self, OpenPart};
 use crate::project::{Busy, Project, SCRIPT_WATCH_INTERVAL};
 use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
+use crate::script_parameters::{self, Parameter};
 use crate::turn::{
     NoRender, RenderSource, TurnEvent, TurnInput, TurnOutcome, context_usage,
     reference_image_count, reference_images,
@@ -170,6 +172,11 @@ fn measurement_readout(
     })
 }
 
+/// The design step's one-line summary for an edited parameter.
+fn parameter_step_summary(name: &str, value: f64) -> String {
+    format!("Set {name} to {value}")
+}
+
 /// The running turn's chat bookkeeping: which message its text streams
 /// into, and the tool calls made so far.
 struct TurnRecord {
@@ -202,6 +209,10 @@ pub struct CadmarkApp {
     minimum_distance: Option<MinimumDistance>,
     code_panel: CodePanel,
     code_visible: bool,
+    parameters_panel: ParametersPanel,
+    /// The open part's module-level numeric names, re-read whenever the
+    /// executed script changes.
+    parameters: Vec<Parameter>,
     /// Source line of the selected element, when its provenance is known.
     highlighted_line: Option<u32>,
     /// The line the hovered candidate names, shown in place of the
@@ -287,6 +298,8 @@ impl CadmarkApp {
             minimum_distance: None,
             code_panel: CodePanel::default(),
             code_visible: false,
+            parameters_panel: ParametersPanel::default(),
+            parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
             version_dialog: VersionDialog::default(),
@@ -644,8 +657,6 @@ impl CadmarkApp {
         };
         project.busy = None;
         let Some(turn) = self.turn.take() else { return };
-        let dir = project.dir.clone();
-        let script_filename = project.part_file_name().to_string();
         let conversation = &mut project.conversation;
         // What the outcome asks of the rest of the application, once the
         // conversation has been brought up to date.
@@ -683,20 +694,9 @@ impl CadmarkApp {
                 if let Some(message) = conversation.message_mut(turn.response) {
                     message.text = text;
                 }
-                match crate::git_ops::create_microversion(
-                    &dir,
-                    &summary,
-                    &summary,
-                    &script_filename,
-                ) {
-                    Ok(_) => project.reload_history(),
-                    Err(e) => {
-                        log::error!("Failed to record the design step: {e}");
-                        self.status = Some(Status::error(format!(
-                            "The design step was not recorded: {e}"
-                        )));
-                    }
-                }
+                // A failure has already gone to the status; the reply
+                // stands either way, so the turn reads no further.
+                let _ = self.record_design_step(&summary, &summary);
                 show = Some((model, source));
             }
             TurnOutcome::Answered => {
@@ -730,6 +730,35 @@ impl CadmarkApp {
             project.save_conversation();
         }
         self.chat.focus_input();
+    }
+
+    /// Record the open part's script as it now stands as a design step.
+    /// Every change to the script goes through here — a completed turn
+    /// and a parameter edit alike — so the script on disk and the newest
+    /// step never differ (C15). A failure leaves the reason in the status
+    /// and says so to the caller: the script has changed and the history
+    /// has not, which no caller may report as success.
+    fn record_design_step(&mut self, summary: &str, trigger: &str) -> Result<(), String> {
+        let Some((dir, script_filename)) = self
+            .project()
+            .map(|project| (project.dir.clone(), project.part_file_name().to_string()))
+        else {
+            return Err("No project is open.".to_string());
+        };
+        match crate::git_ops::create_microversion(&dir, summary, trigger, &script_filename) {
+            Ok(_) => {
+                if let Some(project) = self.project_mut() {
+                    project.reload_history();
+                }
+                Ok(())
+            }
+            Err(e) => {
+                log::error!("Failed to record the design step: {e}");
+                let reason = format!("The design step was not recorded: {e}");
+                self.status = Some(Status::error(reason.clone()));
+                Err(reason)
+            }
+        }
     }
 
     /// A turn that failed after a mid-turn execution left that model on
@@ -914,6 +943,7 @@ impl CadmarkApp {
         if let Some(bounds) = frame {
             self.pending_camera_bounds = Some(bounds);
         }
+        self.read_parameters();
     }
 
     fn clear_selection(&mut self) {
@@ -930,6 +960,7 @@ impl CadmarkApp {
     /// Clear the loaded model and any selection so the viewport cannot
     /// show stale geometry after a reload failure.
     fn clear_loaded_model(&mut self) {
+        self.parameters.clear();
         self.pending_camera_bounds = None;
         if let Some(project) = self.project_mut() {
             project.clear_model();
@@ -1676,6 +1707,114 @@ impl CadmarkApp {
         }
     }
 
+    /// Re-read the open part's parameters from the source that was
+    /// executed, so the panel always describes the model on screen.
+    fn read_parameters(&mut self) {
+        self.parameters = match self
+            .project()
+            .and_then(|project| project.script_source.as_deref())
+        {
+            Some(source) => script_parameters::extract(source),
+            None => Vec::new(),
+        };
+    }
+
+    fn show_parameters(&mut self, ctx: &egui::Context) {
+        let rows: Vec<ParameterRow<'_>> = self
+            .parameters
+            .iter()
+            .map(|parameter| ParameterRow {
+                name: &parameter.name,
+                value: parameter.value(),
+                expression: parameter.expression().unwrap_or_default(),
+                line: parameter.line,
+            })
+            .collect();
+        let mut action = ParametersAction::None;
+        egui::SidePanel::left("parameters_panel")
+            .resizable(true)
+            .default_width(240.0)
+            .width_range(180.0..=420.0)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
+            .show(ctx, |ui| {
+                let Some(project) = self.project.as_ref() else {
+                    return;
+                };
+                action = self.parameters_panel.show(
+                    ui,
+                    ParametersView {
+                        script_filename: project.part_file_name(),
+                        parameters: &rows,
+                        has_script: project.has_script,
+                        controls_enabled: project.busy.is_none(),
+                    },
+                );
+            });
+        if let ParametersAction::Commit { name, value } = action {
+            self.apply_parameter_edit(&name, value);
+        }
+    }
+
+    /// A parameter edit: rewrite that one value in the open part's
+    /// script, record the design step, and rebuild. No AI turn is
+    /// involved (C16), and the step is recorded as the file is written so
+    /// the newest step is always the script on disk.
+    fn apply_parameter_edit(&mut self, name: &str, value: f64) {
+        let Some((path, part)) = self
+            .project()
+            .map(|project| (project.script_path(), project.part_file_name().to_string()))
+        else {
+            return;
+        };
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.status = Some(Status::error(format!("Could not read {part}: {error}")));
+                return;
+            }
+        };
+        let rewritten = match script_parameters::rewrite(&source, name, value) {
+            Ok(rewritten) => rewritten,
+            Err(error) => {
+                self.status = Some(Status::error(error.to_string()));
+                return;
+            }
+        };
+        if rewritten == source {
+            return;
+        }
+        if let Err(error) = std::fs::write(&path, &rewritten) {
+            self.status = Some(Status::error(format!("Could not write {part}: {error}")));
+            return;
+        }
+        let summary = parameter_step_summary(name, value);
+        let recorded = self.record_design_step(&summary, &summary);
+        if let Some(project) = self.project_mut() {
+            project.record_script_state();
+        }
+        match recorded {
+            Ok(()) => self.status = Some(Status::info(summary)),
+            // The rebuild that follows will post its own status over
+            // this one, so a divergence between the script and the
+            // newest design step (C15) also goes to the conversation,
+            // where the user still has it afterwards.
+            Err(reason) => {
+                if let Some(project) = self.project_mut() {
+                    project.conversation.push(Message::error_notice(format!(
+                        "{reason}\n\n{summary} in {part}, so the model will rebuild, but the history has no step for it — undo goes back past this change rather than to it."
+                    )));
+                    project.save_conversation();
+                }
+            }
+        }
+        if let Some(project) = self.project_mut() {
+            project.request_reload();
+        }
+    }
+
     fn show_code_panel(&mut self, ctx: &egui::Context) {
         let mut action = CodePanelAction::None;
         egui::TopBottomPanel::bottom("code_panel")
@@ -2088,6 +2227,7 @@ impl eframe::App for CadmarkApp {
         self.show_toolbar(ctx, frame);
         self.show_status_bar(ctx);
         self.show_chat(ctx);
+        self.show_parameters(ctx);
         if self.code_visible {
             self.show_code_panel(ctx);
         }
@@ -2134,11 +2274,11 @@ mod tests {
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        Bounds3, CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project,
-        Renderer, SceneHandle, SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome,
-        TurnRecord, UserSettings, VersionDialog, ai_services, camera_change,
-        candidate_highlight_ids, measurement_pair, measurement_readout, record_tool_start,
-        turn_chat_message,
+        Bounds3, CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, ParametersPanel,
+        PartNameDialog, Project, Renderer, SceneHandle, SettingsDialog, SettingsStore,
+        TurnGeometry, TurnOutcome, TurnRecord, UserSettings, VersionDialog, ai_services,
+        camera_change, candidate_highlight_ids, measurement_pair, measurement_readout,
+        record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2268,14 +2408,31 @@ mod tests {
     }
 
     fn app_with_pending_response(project_dir: std::path::PathBuf) -> CadmarkApp {
-        let mut project = Project::open(
+        let mut project = open_test_project(project_dir, None);
+        let response = project.conversation.push(Message::ai_response(""));
+        let mut app = app_around(project);
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            comment_ids: vec![],
+            summary_before: None,
+            history_len: 1,
+        });
+        app
+    }
+
+    fn open_test_project(project_dir: std::path::PathBuf, part: Option<&str>) -> Project {
+        Project::open(
             project_dir,
-            None,
+            part,
             Err("test provider is injected directly".to_string()),
             ExecutionLimits::default(),
             Box::new(NoRender),
-        );
-        let response = project.conversation.push(Message::ai_response(""));
+        )
+    }
+
+    /// An application around an open project and nothing in flight.
+    fn app_around(project: Project) -> CadmarkApp {
         CadmarkApp {
             project: Some(project),
             settings: UserSettings::default(),
@@ -2288,6 +2445,8 @@ mod tests {
             minimum_distance: None,
             code_panel: CodePanel::default(),
             code_visible: false,
+            parameters_panel: ParametersPanel::default(),
+            parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
             version_dialog: VersionDialog::default(),
@@ -2306,14 +2465,144 @@ mod tests {
             wgpu_render_state: None,
             scene: SceneHandle::new(),
             status: None,
-            turn: Some(TurnRecord {
-                response,
-                tools: None,
-                comment_ids: vec![],
-                summary_before: None,
-                history_len: 1,
-            }),
+            turn: None,
         }
+    }
+
+    /// The newest commit's full message in a project folder.
+    fn newest_commit_message(dir: &std::path::Path) -> String {
+        let out = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%B"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// A folder holding two parts, the second of which is opened.
+    fn two_part_project() -> (tempfile::TempDir, CadmarkApp) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("part.py"), "width = 10\n").unwrap();
+        std::fs::write(dir.path().join("bracket.py"), "width = 80\ndepth = 40\n").unwrap();
+        let project = open_test_project(dir.path().to_path_buf(), Some("bracket.py"));
+        let app = app_around(project);
+        (dir, app)
+    }
+
+    #[test]
+    fn a_parameter_edit_rewrites_the_open_part_and_records_a_step_naming_it() {
+        let (dir, mut app) = two_part_project();
+        assert_eq!(app.project().unwrap().part_file_name(), "bracket.py");
+
+        app.apply_parameter_edit("width", 90.0);
+
+        // The open part's script carries the new value; the folder's
+        // other part, which binds the same name, is untouched.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 90\ndepth = 40\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("part.py")).unwrap(),
+            "width = 10\n"
+        );
+
+        // The change is a design step, recorded through the same path a
+        // completed turn uses, against the part it changed.
+        let message = newest_commit_message(dir.path());
+        assert!(message.contains("Set width to 90"), "{message}");
+        assert!(message.contains("part: bracket.py"), "{message}");
+
+        // And no AI turn was involved.
+        assert!(app.turn.is_none());
+    }
+
+    #[test]
+    fn a_completed_turn_records_its_design_step_against_the_open_part() {
+        let (dir, mut app) = two_part_project();
+        let response = app
+            .project_mut()
+            .unwrap()
+            .conversation
+            .push(Message::ai_response("Widened the bracket"));
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            comment_ids: vec![],
+            summary_before: None,
+            history_len: 1,
+        });
+        std::fs::write(dir.path().join("bracket.py"), "width = 120\ndepth = 40\n").unwrap();
+
+        app.finish_turn(TurnOutcome::Completed {
+            summary: "Widen the bracket".to_string(),
+            model: Box::new(solid_model()),
+            source: "width = 120\ndepth = 40\n".to_string(),
+        });
+
+        let message = newest_commit_message(dir.path());
+        assert!(message.contains("Widen the bracket"), "{message}");
+        assert!(message.contains("part: bracket.py"), "{message}");
+        // The step is in the history the undo lane reads, not only in
+        // git: recording reloads it.
+        assert_eq!(app.project().unwrap().history.len(), 1);
+    }
+
+    /// The plainest successful execution: a solid with nothing to draw.
+    fn solid_model() -> cadmark_kernel::protocol::ExecutedModel {
+        cadmark_kernel::protocol::ExecutedModel {
+            mesh: cadmark_core::mesh::TessellatedMesh::default(),
+            ledger: cadmark_core::ledger::ProvenanceLedger::new(),
+            descriptors: GeometryDescriptors::default(),
+            form: cadmark_kernel::protocol::ModelForm::Solid(
+                cadmark_kernel::protocol::SolidResult {
+                    summary: summary(1000.0, 6),
+                    validity: vec![],
+                    file: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(
+                        "/scratch/model-1.brep",
+                    )),
+                },
+            ),
+        }
+    }
+
+    #[test]
+    fn a_parameter_edit_with_no_project_open_changes_nothing() {
+        let (dir, mut app) = two_part_project();
+        app.project = None;
+
+        app.read_parameters();
+        assert!(app.parameters.is_empty());
+
+        app.apply_parameter_edit("width", 90.0);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80\ndepth = 40\n"
+        );
+        assert!(app.status.is_none());
+    }
+
+    #[test]
+    fn the_panel_reads_the_parameters_of_the_script_that_was_executed() {
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().script_source =
+            Some("plate = 80\nmargin = plate / 4\nlabel = \"rib\"\n".to_string());
+
+        app.read_parameters();
+
+        let names: Vec<&str> = app
+            .parameters
+            .iter()
+            .map(|parameter| parameter.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["plate", "margin"]);
+        assert_eq!(app.parameters[0].value(), Some(80.0));
+        assert_eq!(app.parameters[1].value(), None);
+        assert_eq!(app.parameters[1].expression(), Some("plate / 4"));
+
+        // A model leaving the screen takes its parameters with it.
+        app.clear_loaded_model();
+        assert!(app.parameters.is_empty());
     }
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {

@@ -305,9 +305,7 @@ fn operation_branch_on_line(
     if code.contains("matches!") {
         return operation_in_pattern(code, imported, permit_self);
     }
-    let Some((_, condition)) = code.split_once("if") else {
-        return None;
-    };
+    let (_, condition) = code.split_once("if")?;
     let condition = condition.split('{').next().unwrap_or(condition);
     if condition.contains("==") || condition.contains("!=") {
         operation_in_pattern(condition, imported, permit_self)
