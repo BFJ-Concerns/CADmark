@@ -4,6 +4,7 @@
 // for faces/edges/vertices, selection glow, and hover highlight.
 
 pub mod camera;
+pub mod markers;
 pub mod mesh;
 pub mod offscreen;
 pub mod picking;

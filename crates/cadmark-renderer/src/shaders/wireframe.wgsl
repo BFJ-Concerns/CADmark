@@ -1,5 +1,10 @@
-// Wireframe edge overlay — draws edges as lines over the shaded mesh, with
-// the selected or hovered edge picked out in its highlight colour.
+// Wireframe edge overlay — draws each edge as a screen-space quad over
+// the shaded mesh, so it holds a constant width at any camera distance,
+// with the selected or hovered edge picked out in its highlight colour.
+//
+// The marker expansion comes from the shared snippet prepended at
+// pipeline creation. The picking pass expands the same buffer through the
+// same function, so what is drawn is what picks.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -27,6 +32,7 @@ struct Uniforms {
     _pad6: f32,
     _pad7: f32,
     _pad8: f32,
+    marker_size: MarkerExtent,
 }
 
 // Whether the section plane keeps `world_pos`. Mirrors
@@ -73,6 +79,11 @@ fn in_highlight(id: u32) -> bool {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) edge_id: f32,
+    // The segment's other endpoint, for the screen-space direction.
+    @location(2) other: vec3<f32>,
+    @location(3) side: f32,
+    @location(4) cap: f32,
+    @location(5) end_sign: f32,
 }
 
 struct VertexOutput {
@@ -84,7 +95,9 @@ struct VertexOutput {
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_pos = uniforms.view_proj * vec4<f32>(in.position, 1.0);
+    let here = uniforms.view_proj * vec4<f32>(in.position, 1.0);
+    let other = uniforms.view_proj * vec4<f32>(in.other, 1.0);
+    out.clip_pos = expand_edge(here, other, in.side, in.cap, in.end_sign, uniforms.marker_size);
     out.edge_id = in.edge_id;
     out.world_pos = in.position;
     return out;
