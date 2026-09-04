@@ -215,7 +215,7 @@ impl CadmarkApp {
 
     /// Show the system folder picker on its own thread; the choice is
     /// collected in `poll_results`.
-    fn pick_project_folder(&mut self) {
+    fn pick_project_folder(&mut self, frame: &eframe::Frame) {
         if self.folder_pick_rx.is_some() {
             return;
         }
@@ -226,13 +226,14 @@ impl CadmarkApp {
             .parent()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.project.dir.clone());
+        let dialog = rfd::FileDialog::new()
+            .set_parent(frame)
+            .set_title("Open a CADmark project folder")
+            .set_directory(start_in);
         std::thread::Builder::new()
             .name("cadmark-folder-picker".into())
             .spawn(move || {
-                let choice = rfd::FileDialog::new()
-                    .set_title("Open a CADmark project folder")
-                    .set_directory(start_in)
-                    .pick_folder();
+                let choice = dialog.pick_folder();
                 let _ = tx.send(choice);
             })
             .expect("failed to spawn the folder picker thread");
@@ -825,7 +826,12 @@ impl CadmarkApp {
         action
     }
 
-    fn apply_toolbar_action(&mut self, ctx: &egui::Context, action: ToolbarAction) {
+    fn apply_toolbar_action(
+        &mut self,
+        ctx: &egui::Context,
+        frame: &eframe::Frame,
+        action: ToolbarAction,
+    ) {
         match action {
             ToolbarAction::Undo => {
                 if let Some(version) = self.project.history.undo() {
@@ -846,7 +852,7 @@ impl CadmarkApp {
                 }
             }
             ToolbarAction::NameVersion => self.version_dialog.open(),
-            ToolbarAction::OpenProject => self.pick_project_folder(),
+            ToolbarAction::OpenProject => self.pick_project_folder(frame),
             ToolbarAction::OpenRecent(path) => self.open_project(ctx, path),
             ToolbarAction::RevealProject => {
                 let dir = self.project.dir.clone();
@@ -878,7 +884,7 @@ impl CadmarkApp {
         }
     }
 
-    fn show_toolbar(&mut self, ctx: &egui::Context) {
+    fn show_toolbar(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let mut action = ToolbarAction::None;
         egui::TopBottomPanel::top("toolbar")
             .frame(
@@ -901,7 +907,7 @@ impl CadmarkApp {
                 };
                 action = toolbar::show_toolbar(ui, &self.project.history, state);
             });
-        self.apply_toolbar_action(ctx, action);
+        self.apply_toolbar_action(ctx, frame, action);
     }
 
     fn show_status_bar(&mut self, ctx: &egui::Context) {
@@ -1197,7 +1203,7 @@ fn ai_services(
 }
 
 impl eframe::App for CadmarkApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_results(ctx);
         self.project.watch_script();
         self.consume_pick_result();
@@ -1218,9 +1224,9 @@ impl eframe::App for CadmarkApp {
         }
 
         let shortcut = self.handle_shortcuts(ctx);
-        self.apply_toolbar_action(ctx, shortcut);
+        self.apply_toolbar_action(ctx, frame, shortcut);
 
-        self.show_toolbar(ctx);
+        self.show_toolbar(ctx, frame);
         self.show_status_bar(ctx);
         self.show_chat(ctx);
         if self.code_visible {
