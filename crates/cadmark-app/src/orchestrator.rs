@@ -43,7 +43,7 @@ pub enum OrchestratorCommand {
 /// Results and progress sent from the worker back to the UI thread.
 pub enum OrchestratorResult {
     /// The script on disk executed; show its model.
-    Reloaded { model: ExecutedModel, source: String },
+    Reloaded { model: Box<ExecutedModel>, source: String },
     /// There is no script on disk yet: the normal state of a new project.
     NoScript,
     /// The script on disk failed to execute.
@@ -114,7 +114,10 @@ impl Orchestrator {
             }
         };
         match self.executor.execute(&script_path, &CancelFlag::new()) {
-            Ok(model) => OrchestratorResult::Reloaded { model, source },
+            Ok(model) => OrchestratorResult::Reloaded {
+                model: Box::new(model),
+                source,
+            },
             Err(error) => OrchestratorResult::ReloadFailed {
                 error: error.to_string(),
             },

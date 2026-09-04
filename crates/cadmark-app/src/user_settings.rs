@@ -24,7 +24,7 @@ const SETTINGS_FILE: &str = "settings.json";
 const CREDENTIAL_FILE: &str = "credential";
 
 /// Everything in the settings file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UserSettings {
     /// The provider, absent until the user configures one.
@@ -32,16 +32,6 @@ pub struct UserSettings {
     pub limits: ExecutionLimits,
     /// Recently opened project folders, most recent first.
     pub recent_projects: Vec<PathBuf>,
-}
-
-impl Default for UserSettings {
-    fn default() -> Self {
-        Self {
-            ai: None,
-            limits: ExecutionLimits::default(),
-            recent_projects: Vec::new(),
-        }
-    }
 }
 
 impl UserSettings {
@@ -177,13 +167,15 @@ mod tests {
         let (_dir, store) = store();
         assert_eq!(store.load().unwrap(), UserSettings::default());
 
-        let mut settings = UserSettings::default();
-        settings.ai = Some(AiConfiguration {
-            base_url: "https://provider.example/v1".into(),
-            model: "m".into(),
-            accepts_images: true,
-            allow_insecure_http: false,
-        });
+        let mut settings = UserSettings {
+            ai: Some(AiConfiguration {
+                base_url: "https://provider.example/v1".into(),
+                model: "m".into(),
+                accepts_images: true,
+                allow_insecure_http: false,
+            }),
+            ..UserSettings::default()
+        };
         settings.limits.wall_clock = std::time::Duration::from_secs(30);
         settings.remember_project(Path::new("/parts/bracket"));
         store.save(&settings).unwrap();

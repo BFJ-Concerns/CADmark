@@ -60,7 +60,7 @@ pub enum TurnEvent {
     },
     /// A script executed successfully mid-turn; the viewport shows it.
     ModelBuilt {
-        model: ExecutedModel,
+        model: Box<ExecutedModel>,
         source: String,
     },
 }
@@ -72,7 +72,7 @@ pub enum TurnOutcome {
     /// and its model on screen, and this is the design step's summary.
     Completed {
         summary: String,
-        model: ExecutedModel,
+        model: Box<ExecutedModel>,
         source: String,
     },
     /// The model answered without changing the script (a question, a
@@ -145,7 +145,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             images: input.images.clone(),
         });
         let tools = tools_for(self.model.accepts_images());
-        let mut last_good: Option<(String, ExecutedModel, String)> = None;
+        let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
 
@@ -275,7 +275,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 match self.executor.execute(&self.script_path, &self.cancel) {
                     Ok(model) => ToolRun::Built {
                         code: args.code,
-                        model,
+                        model: Box::new(model),
                         summary: args.summary,
                     },
                     Err(error) if error.is_script_fault() => ToolRun::Output {
@@ -357,7 +357,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
 
 enum ToolRun {
     Output { output: String, failed: bool },
-    Built { code: String, model: ExecutedModel, summary: String },
+    Built { code: String, model: Box<ExecutedModel>, summary: String },
     Abort(TurnOutcome),
 }
 

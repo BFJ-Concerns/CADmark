@@ -258,10 +258,8 @@ pub(crate) fn find_result_shape<'py>(
                     flat_outputs.push(format!("{name}: {type_name}"));
                 }
             }
-            "Part" | "Solid" | "Compound" => {
-                if has_non_none_attr(&value, "wrapped")? {
-                    solids.push((name, value));
-                }
+            "Part" | "Solid" | "Compound" if has_non_none_attr(&value, "wrapped")? => {
+                solids.push((name, value));
             }
             _ => {}
         }

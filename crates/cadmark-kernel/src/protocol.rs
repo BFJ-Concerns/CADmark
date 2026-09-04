@@ -76,11 +76,12 @@ impl WorkerFailure {
     }
 }
 
-/// The reply to one request.
+/// The reply to one request. The executed model is boxed: it dwarfs the
+/// other variants and every reply is moved once.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum WorkerReply {
-    Executed(ExecutedModel),
+    Executed(Box<ExecutedModel>),
     Exported,
     Failed(WorkerFailure),
 }
@@ -102,7 +103,7 @@ mod tests {
 
         let mut ledger = ProvenanceLedger::new();
         ledger.record_face(FaceId(0), LedgerValue::Untraced).unwrap();
-        let reply = WorkerReply::Executed(ExecutedModel {
+        let reply = WorkerReply::Executed(Box::new(ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger,
             descriptors: GeometryDescriptors::default(),
@@ -119,7 +120,7 @@ mod tests {
                 valid: true,
             }],
             model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
-        });
+        }));
         let line = serde_json::to_string(&reply).unwrap();
         assert!(!line.contains('\n'));
         assert_eq!(serde_json::from_str::<WorkerReply>(&line).unwrap(), reply);
