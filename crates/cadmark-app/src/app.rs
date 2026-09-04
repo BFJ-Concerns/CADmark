@@ -97,6 +97,24 @@ enum TurnGeometry<'a> {
     Sketch(&'a cadmark_core::sketch::SketchProfile),
 }
 
+/// What a freshly installed model does to the camera: the plane to face,
+/// and the bounds to frame. A sketch is always read flat-on to its own
+/// plane and framed to its own extent — it may follow a solid that is
+/// still on screen, ghosted behind it, and the view then belongs to the
+/// sketch rather than to the solid it was left over from. A solid is
+/// framed only when it is the first model, so a rebuild does not move a
+/// view the user has set.
+fn camera_change(
+    sketch: Option<&cadmark_core::sketch::SketchProfile>,
+    first_bounds: Option<Bounds3>,
+    model_bounds: Option<Bounds3>,
+) -> (Option<[f32; 3]>, Option<Bounds3>) {
+    match sketch {
+        Some(sketch) => (Some(sketch.plane.normal), model_bounds.or(first_bounds)),
+        None => (None, first_bounds),
+    }
+}
+
 fn turn_chat_message(response_message: &str, geometry: TurnGeometry<'_>) -> String {
     let mut message = response_message.to_string();
     let (before, after) = match geometry {
@@ -863,24 +881,27 @@ impl CadmarkApp {
         // A new mesh under a resting cursor must be picked afresh.
         self.last_hover_probe = None;
         let mesh = std::sync::Arc::new(model.mesh.clone());
-        let bounds = self
+        let first_bounds = self
             .project_mut()
             .and_then(|project| project.install_model(model, source));
+        let model_bounds = self
+            .project()
+            .and_then(|project| project.model.as_ref())
+            .and_then(|model| model.bounds);
+        let (face_plane, frame) = camera_change(sketch.as_ref(), first_bounds, model_bounds);
         match &sketch {
             Some(sketch) => self
                 .scene
-                .set_sketch(Some((std::sync::Arc::new(sketch.clone()), bounds))),
+                .set_sketch(Some((std::sync::Arc::new(sketch.clone()), frame))),
             None => {
                 self.scene.set_sketch(None);
-                self.scene.set_mesh(Some((mesh, bounds)));
+                self.scene.set_mesh(Some((mesh, first_bounds)));
             }
         }
-        if let Some(bounds) = bounds {
-            // A sketch is read face-on and flat: the plane it was drawn
-            // on decides the view, and the framing follows it.
-            if let Some(sketch) = &sketch {
-                self.renderer.camera.view_plane_face_on(sketch.plane.normal);
-            }
+        if let Some(normal) = face_plane {
+            self.renderer.camera.view_plane_face_on(normal);
+        }
+        if let Some(bounds) = frame {
             self.pending_camera_bounds = Some(bounds);
         }
     }
@@ -1969,11 +1990,11 @@ mod tests {
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
-        SceneHandle, SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome, TurnRecord,
-        UserSettings, VersionDialog, ai_services, grounded_comments, measurement_pair,
-        measurement_readout, pending_markers, record_tool_start, stage_pending_comment,
-        turn_chat_message,
+        Bounds3, CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project,
+        Renderer, SceneHandle, SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome,
+        TurnRecord, UserSettings, VersionDialog, ai_services, camera_change, grounded_comments,
+        measurement_pair, measurement_readout, pending_markers, record_tool_start,
+        stage_pending_comment, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2285,6 +2306,42 @@ mod tests {
         .unwrap();
         let error = SettingsStore::at(malformed_dir).load().unwrap_err();
         assert!(!error.contains(wrong_type));
+    }
+
+    #[test]
+    fn a_sketch_faces_its_own_plane_even_when_a_solid_is_already_on_screen() {
+        let sketch = cadmark_core::sketch::SketchProfile {
+            plane: cadmark_core::sketch::SketchPlane {
+                origin: [0.0; 3],
+                normal: [1.0, 0.0, 0.0],
+                x_axis: [0.0, 1.0, 0.0],
+            },
+            curves: Vec::new(),
+            corners: Vec::new(),
+            regions: Vec::new(),
+        };
+        let profile_bounds = Bounds3::from_positions([[0.0, -5.0, -5.0], [0.0, 5.0, 5.0]]);
+
+        // A solid was built first, so the install reports no fresh
+        // framing; the sketch drawn in front of it is still faced and
+        // framed on its own plane.
+        let (face, frame) = camera_change(Some(&sketch), None, profile_bounds);
+        assert_eq!(face, Some([1.0, 0.0, 0.0]));
+        assert_eq!(frame, profile_bounds);
+
+        // The first model on screen behaves the same way.
+        let (face, frame) = camera_change(Some(&sketch), profile_bounds, profile_bounds);
+        assert_eq!(face, Some([1.0, 0.0, 0.0]));
+        assert_eq!(frame, profile_bounds);
+
+        // A solid faces nothing in particular, and a rebuild after the
+        // first model leaves the user's view alone.
+        let solid_bounds = Bounds3::from_positions([[0.0; 3], [10.0; 3]]);
+        assert_eq!(camera_change(None, None, solid_bounds), (None, None));
+        assert_eq!(
+            camera_change(None, solid_bounds, solid_bounds),
+            (None, solid_bounds)
+        );
     }
 
     #[test]
