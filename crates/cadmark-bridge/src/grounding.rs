@@ -78,7 +78,11 @@ fn render_anchor(context: &GeometryContext) -> String {
         );
     }
     out.push_str("\n    surrounding code:\n");
-    out.push_str(&context.source_context);
+    if context.source_context.trim().is_empty() {
+        out.push_str("The executed script text is unavailable.");
+    } else {
+        out.push_str(&context.source_context);
+    }
     out.push_str("\n    neighbours: ");
     if context.neighbours.is_empty() {
         out.push_str("none measured");
@@ -175,5 +179,21 @@ mod tests {
         assert!(text.contains("lines 1-3:\n1 | from build123d import *"));
         assert!(text.contains("neighbours: edge 8"));
         assert!(text.ends_with("\nround this"));
+    }
+
+    #[test]
+    fn legacy_anchor_without_source_context_states_what_is_unavailable() {
+        let text = render_comment(&GroundedComment {
+            text: "adjust this".into(),
+            anchors: vec![GeometryContext {
+                element: TopologyElement::Face(FaceId(0)),
+                provenance: LedgerValue::Untraced,
+                identification: Default::default(),
+                source_context: String::new(),
+                neighbours: Vec::new(),
+            }],
+        });
+
+        assert!(text.contains("surrounding code:\nThe executed script text is unavailable."));
     }
 }

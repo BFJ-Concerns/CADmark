@@ -22,7 +22,7 @@ from OCP.BRepTools import BRepTools
 from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
 from OCP.gp import gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
-from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID, TopAbs_VERTEX
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_SHELL, TopAbs_SOLID, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
 
@@ -97,18 +97,16 @@ def measure_vertices(shapes):
     return [{'position': _point(BRep_Tool.Pnt_s(TopoDS.Vertex_s(v)))} for v in shapes]
 
 
-def _index_of(shapes, candidate):
-    for index, shape in enumerate(shapes):
-        if shape.IsSame(candidate):
-            return index
-    return None
-
-
 def _children(shape, kind):
     return list(_explore(shape, kind))
 
 
-def measure_neighbours(faces, edges, vertices):
+def _append_once(neighbours, neighbour):
+    if neighbour not in neighbours:
+        neighbours.append(neighbour)
+
+
+def measure_neighbours(session, faces, edges, vertices):
     # Adjacency is read from final OCCT topology.  IDs come from the same
     # final maps as picking and provenance, so this never relies on geometry
     # matching or a kernel type crossing the worker boundary.
@@ -119,17 +117,15 @@ def measure_neighbours(faces, edges, vertices):
 
     for face_index, face in enumerate(faces):
         for edge in _children(face, TopAbs_EDGE):
-            edge_index = _index_of(edges, edge)
-            if edge_index is not None:
-                face_neighbours[face_index].append({'kind': 'edge', 'id': edge_index})
-                edge_faces[edge_index].append({'kind': 'face', 'id': face_index})
+            edge_index = session.topology_index(edge, 'edge')
+            _append_once(face_neighbours[face_index], {'kind': 'edge', 'id': edge_index})
+            _append_once(edge_faces[edge_index], {'kind': 'face', 'id': face_index})
 
     for edge_index, edge in enumerate(edges):
         for vertex in _children(edge, TopAbs_VERTEX):
-            vertex_index = _index_of(vertices, vertex)
-            if vertex_index is not None:
-                edge_vertices[edge_index].append({'kind': 'vertex', 'id': vertex_index})
-                vertex_edges[vertex_index].append({'kind': 'edge', 'id': edge_index})
+            vertex_index = session.topology_index(vertex, 'vertex')
+            _append_once(edge_vertices[edge_index], {'kind': 'vertex', 'id': vertex_index})
+            _append_once(vertex_edges[vertex_index], {'kind': 'edge', 'id': edge_index})
 
     edge_neighbours = [edge_faces[index] + edge_vertices[index] for index in range(len(edges))]
     return face_neighbours, edge_neighbours, vertex_edges
@@ -179,7 +175,7 @@ def measure(shape, session):
     faces = session.map_values(session.final_maps['face'])
     edges = session.map_values(session.final_maps['edge'])
     vertices = session.map_values(session.final_maps['vertex'])
-    face_neighbours, edge_neighbours, vertex_neighbours = measure_neighbours(faces, edges, vertices)
+    face_neighbours, edge_neighbours, vertex_neighbours = measure_neighbours(session, faces, edges, vertices)
     measured_faces = measure_faces(faces)
     measured_edges = measure_edges(edges)
     measured_vertices = measure_vertices(vertices)
