@@ -1304,7 +1304,7 @@ mod tests {
     /// buffer must match. Sizes alone do not say this: two same-width fields
     /// in the wrong order leave the total unchanged while every read after
     /// them lands on the wrong word.
-    fn uniform_struct_layout(source: &str) -> Vec<(String, u32)> {
+    fn uniform_struct_layout(source: &str, expected_size: usize) -> Vec<(String, u32)> {
         let module = naga::front::wgsl::parse_str(source).expect("shader must compile");
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
@@ -1336,9 +1336,8 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            layouter[handle].size,
-            std::mem::size_of::<MeshUniforms>() as u32,
-            "the shader's Uniforms is a different size from MeshUniforms"
+            layouter[handle].size as usize, expected_size,
+            "the shader's Uniforms is a different size from the Rust struct it binds"
         );
         fields
     }
@@ -1410,13 +1409,320 @@ mod tests {
         .collect();
 
         assert_eq!(
-            uniform_struct_layout(include_str!("shaders/mesh.wgsl")),
+            uniform_struct_layout(include_str!("shaders/mesh.wgsl"), size_of::<MeshUniforms>()),
             expected
         );
         assert_eq!(
-            uniform_struct_layout(include_str!("shaders/wireframe.wgsl")),
+            uniform_struct_layout(
+                include_str!("shaders/wireframe.wgsl"),
+                size_of::<MeshUniforms>()
+            ),
             expected
         );
+    }
+
+    /// The picking pass binds its own, smaller uniform struct, which the
+    /// mesh-uniforms instrument above never reads. A field added to one
+    /// side and not the other misreads the view-projection or the section
+    /// plane, and the pass renders IDs for the wrong pixels.
+    #[test]
+    fn the_picking_shader_mirrors_the_whole_of_simple_uniforms() {
+        let expected: Vec<(String, u32)> = vec![
+            ("view_proj", std::mem::offset_of!(SimpleUniforms, view_proj)),
+            (
+                "section_plane",
+                std::mem::offset_of!(SimpleUniforms, section_plane),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, offset)| (name.to_string(), offset as u32))
+        .collect();
+
+        assert_eq!(
+            uniform_struct_layout(
+                include_str!("shaders/picking.wgsl"),
+                size_of::<SimpleUniforms>()
+            ),
+            expected
+        );
+    }
+
+    #[test]
+    fn the_uniforms_carry_the_section_plane_to_the_visible_and_picking_passes() {
+        // Both must clip identically, or the user clicks a face the section
+        // cut away and selects something they cannot see.
+        let mut renderer = Renderer::new();
+        renderer.section = crate::section::SectionPlane {
+            enabled: true,
+            axis: crate::section::Axis::Y,
+            offset: 3.0,
+            flipped: true,
+        };
+
+        let expected = renderer.section.equation();
+        assert_ne!(expected, [0.0; 4]);
+        assert_eq!(renderer.mesh_uniforms(1.0).section_plane, expected);
+        assert_eq!(renderer.simple_uniforms(1.0).section_plane, expected);
+    }
+
+    #[test]
+    fn a_see_through_model_reaches_the_shader_as_alpha_below_one() {
+        let mut renderer = Renderer::new();
+        assert_eq!(renderer.mesh_uniforms(1.0).mesh_alpha, 1.0);
+
+        renderer.transparent = true;
+        let alpha = renderer.mesh_uniforms(1.0).mesh_alpha;
+        assert!(
+            (0.0..1.0).contains(&alpha),
+            "see-through alpha {alpha} would draw solid or invisible"
+        );
+    }
+
+    /// Ghosting and see-through both fade the solid, and stacking them
+    /// erases it: the ghost already mixes the surface most of the way to
+    /// the background colour, and blending *that* at a third of its
+    /// opacity leaves the near-background result indistinguishable from
+    /// the background. The sketch drawn in front would then have nothing
+    /// behind it to read as being in front of. Ghosting wins.
+    #[test]
+    fn a_ghosted_solid_stays_opaque_even_when_see_through_is_on() {
+        let mut renderer = Renderer::new();
+        renderer.transparent = true;
+        renderer.ghost_solid = true;
+
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(
+            uniforms.mesh_alpha, 1.0,
+            "a ghosted solid must not also be alpha-blended away"
+        );
+        assert!(
+            uniforms.ghost > 0.0,
+            "the ghost fade is what the user sees instead"
+        );
+
+        // The setting is kept, not cleared: dropping the sketch brings
+        // the see-through view straight back.
+        renderer.ghost_solid = false;
+        assert!(renderer.mesh_uniforms(1.0).mesh_alpha < 1.0);
+    }
+
+    /// A device for the tests that must actually run a pass. The software
+    /// adapter is asked for first, because a host that has one gives every
+    /// seat the same instrument; where none is installed the host's own
+    /// adapter is taken instead, which is what the marker-layout test beside
+    /// this one has always done. An adapter is required either way — a test
+    /// that quietly skips reads green while proving nothing, which is the
+    /// failure this whole readback exists to stop.
+    fn verification_device() -> (wgpu::Device, wgpu::Queue) {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: true,
+            compatible_surface: None,
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options))
+            .or_else(|| {
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: false,
+                    ..options
+                }))
+            })
+            .expect("a wgpu adapter is required for renderer verification");
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            .expect("the verification adapter must yield a device")
+    }
+
+    #[test]
+    fn every_pass_builds_against_a_real_device() {
+        // WGSL is compiled when a pipeline is created, not when the crate
+        // is: a shader that does not parse, a uniform struct the shader
+        // declares differently, or a binding whose visibility does not cover
+        // the stage that reads it all surface here and nowhere earlier.
+        let (device, _queue) = verification_device();
+
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = errors.clone();
+        device.on_uncaptured_error(Box::new(move |error| {
+            sink.lock().expect("error sink").push(error.to_string());
+        }));
+
+        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
+        let _ = pipelines.surface_format;
+        let _ = device.poll(wgpu::Maintain::Wait);
+
+        let errors = errors.lock().expect("error sink").clone();
+        assert!(
+            errors.is_empty(),
+            "building the passes reported: {errors:#?}"
+        );
+    }
+
+    /// One quad, one plane, and the picking texture read back on both sides
+    /// of the cut.
+    ///
+    /// Building the pipeline only proves the shader compiles. What the user
+    /// meets is the readback: click a face the section has cut away and the
+    /// pick must come back empty, not with the face they cannot see. That is
+    /// what this renders and reads.
+    #[test]
+    fn the_section_plane_makes_a_clipped_face_unpickable_in_the_readback() {
+        let (device, queue) = verification_device();
+
+        const SIZE: u32 = 64;
+        let pipelines =
+            RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, SIZE, SIZE);
+        let picking = crate::picking::PickingPass::new(&device, SIZE, SIZE);
+
+        // A quad across the whole viewport at z = 0, drawn under an identity
+        // view-projection so a vertex position is also its NDC position and a
+        // pixel maps to a world x by hand.
+        let face = cadmark_core::geometry::TopologyElement::Face(cadmark_core::geometry::FaceId(3));
+        let face_id = crate::picking::encode_picking_id(&face) as f32;
+        let part_id = crate::picking::encode_picking_id(
+            &cadmark_core::geometry::TopologyElement::Part(cadmark_core::geometry::PartId(0)),
+        ) as f32;
+        let corner = |x: f32, y: f32| crate::mesh::GpuVertex {
+            position: [x, y, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            face_id,
+            _padding: 0.0,
+            part_id,
+            _part_padding: [0.0; 3],
+        };
+        let vertices = [
+            corner(-0.9, -0.9),
+            corner(0.9, -0.9),
+            corner(0.9, 0.9),
+            corner(-0.9, 0.9),
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let mesh = crate::mesh::GpuMesh {
+            vertex_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            index_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            index_count: indices.len() as u32,
+            edge_vertex_buffer: buffer_of(&device, &queue, &[0u8; 16], wgpu::BufferUsages::VERTEX),
+            edge_vertex_count: 0,
+        };
+
+        // Cut at x = 0, keeping the low side.
+        let section = crate::section::SectionPlane {
+            enabled: true,
+            axis: crate::section::Axis::X,
+            offset: 0.0,
+            flipped: false,
+        };
+        let uniforms = SimpleUniforms {
+            view_proj: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            section_plane: section.equation(),
+        };
+        queue.write_buffer(
+            &pipelines.picking_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&uniforms),
+        );
+
+        // A pixel's centre in NDC, so the sides are named by the same
+        // arithmetic the shader clips by rather than by eye.
+        let ndc_x = |px: u32| (px as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+        let (kept_px, clipped_px) = (SIZE / 4, SIZE * 3 / 4);
+        assert!(
+            section.keeps([ndc_x(kept_px), 0.0, 0.0])
+                && !section.keeps([ndc_x(clipped_px), 0.0, 0.0]),
+            "the sampled pixels do not straddle the plane"
+        );
+
+        let kept = read_pick(
+            &device,
+            &queue,
+            &pipelines,
+            &picking,
+            &mesh,
+            kept_px,
+            SIZE / 2,
+        );
+        let clipped = read_pick(
+            &device,
+            &queue,
+            &pipelines,
+            &picking,
+            &mesh,
+            clipped_px,
+            SIZE / 2,
+        );
+
+        assert_eq!(
+            kept,
+            Some(cadmark_core::geometry::PickedElement::Solid(face)),
+            "the half the section keeps stopped answering a click"
+        );
+        assert_eq!(
+            clipped, None,
+            "a face the section cut away is still pickable: the user selects what they cannot see"
+        );
+    }
+
+    fn buffer_of(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: data.len() as u64,
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, data);
+        buffer
+    }
+
+    /// Render the picking pass and read one pixel back, the way the
+    /// application does when the user clicks. The one part in the scene is
+    /// also the active one, so it appears in both slices the pass takes.
+    fn read_pick(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &RenderPipelines,
+        picking: &crate::picking::PickingPass,
+        mesh: &crate::mesh::GpuMesh,
+        x: u32,
+        y: u32,
+    ) -> Option<cadmark_core::geometry::PickedElement> {
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        crate::viewport::render_picking(
+            &mut encoder,
+            pipelines,
+            picking,
+            std::slice::from_ref(mesh),
+            std::slice::from_ref(mesh),
+        );
+        crate::viewport::copy_pick_pixel(&mut encoder, picking, &picking.staging_buffer, x, y);
+        queue.submit([encoder.finish()]);
+
+        let slice = picking.staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let element = crate::viewport::decode_pick_result(&slice.get_mapped_range());
+        picking.staging_buffer.unmap();
+        element
     }
 
     #[test]
