@@ -123,8 +123,8 @@ def _explore(shape, kind):
 
 
 def solid_validity(shape):
-    """One entry per solid: whether every shell is closed and OCCT's
-    analyser finds no defect. A model with no solid yields nothing."""
+    # One entry per solid: whether every shell is closed and the OCCT
+    # analyser finds no defect. A model with no solid yields nothing.
     results = []
     for solid in _explore(shape, TopAbs_SOLID):
         closed = all(

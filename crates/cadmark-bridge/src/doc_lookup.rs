@@ -1,14 +1,16 @@
-//! Documentation lookup consumer.
-//
-// Searches the build123d documentation corpus for API references
-// relevant to the user's request. Runs before the design agent so
-// it has exact signatures and usage patterns to work from, countering
-// incorrect syntax from general training knowledge.
-//
+//! Documentation lookup: the `lookup_docs` tool's implementation.
+//!
+//! Answers the model's build123d API question from the documentation
+//! corpus bundled into the binary, so the modelling agent works from exact
+//! signatures rather than training-data recall.
+
 use crate::openai_compatible::OpenAiCompatibleClient;
 
 /// System prompt for the reference lookup consumer.
 const LOOKUP_PROMPT: &str = include_str!("doc_lookup_prompt.md");
+
+/// The exact sentence the lookup prompt asks for when nothing applies.
+pub const NO_RESULT: &str = "No relevant documentation found.";
 
 /// Full build123d documentation corpus, baked in at compile time.
 /// Ordered from conceptual overview to detailed API reference so the lookup
@@ -88,51 +90,30 @@ impl DocLookup {
         Self { client }
     }
 
-    /// Search the documentation corpus for content relevant to the
-    /// user's request. Returns extracted API references and usage
-    /// patterns, or `None` if the lookup fails for any reason.
-    ///
-    /// Failure is intentionally non-fatal — a warning is logged but
-    /// the design agent proceeds without extra documentation context.
-    pub async fn lookup(&self, user_message: &str, message_history: &[String]) -> Option<String> {
-        let prompt = Self::build_prompt(user_message, message_history);
+    /// Answer a documentation question. The result is what the model
+    /// reads as the tool's output: extracted API references, the corpus's
+    /// own "nothing relevant" sentence, or the reason the lookup failed —
+    /// a failed lookup is information the model acts on, not a silent gap.
+    pub async fn lookup(&self, query: &str) -> String {
+        let prompt = Self::build_prompt(query);
         match self.client.request_text(LOOKUP_PROMPT, &prompt).await {
-            Ok(text)
-                if text.trim().is_empty() || text.trim() == "No relevant documentation found." =>
-            {
-                log::debug!("Doc lookup returned no relevant results");
-                None
-            }
+            Ok(text) if text.trim().is_empty() => NO_RESULT.to_string(),
             Ok(text) => {
                 log::debug!("Doc lookup returned {} bytes of API reference", text.len());
-                Some(text)
+                text
             }
             Err(error) => {
                 log::warn!("Documentation lookup failed: {error}");
-                None
+                format!("Documentation lookup failed ({error}); rely on what you know.")
             }
         }
     }
 
-    /// Assemble the lookup prompt. Contains the conversation
-    /// history, the current request, and the full documentation corpus.
-    fn build_prompt(user_message: &str, message_history: &[String]) -> String {
+    /// Assemble the lookup prompt: the question and the full corpus.
+    fn build_prompt(query: &str) -> String {
         let mut prompt = String::new();
-
-        // Recent conversation history for context (e.g. knowing what
-        // "make it taller" refers to).
-        if !message_history.is_empty() {
-            prompt.push_str("<conversation_history>\n");
-            for msg in message_history {
-                prompt.push_str("- ");
-                prompt.push_str(msg);
-                prompt.push('\n');
-            }
-            prompt.push_str("</conversation_history>\n\n");
-        }
-
         prompt.push_str("<current_request>\n");
-        prompt.push_str(user_message);
+        prompt.push_str(query);
         prompt.push_str("\n</current_request>\n\n");
 
         prompt.push_str("<build123d_documentation>\n");
@@ -148,30 +129,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_prompt_includes_all_sections() {
-        let prompt = DocLookup::build_prompt(
-            "fillet the top edges",
-            &["make a box".to_string(), "add a hole".to_string()],
-        );
-        // Conversation history present with both messages.
-        assert!(prompt.contains("<conversation_history>"));
-        assert!(prompt.contains("- make a box"));
-        assert!(prompt.contains("- add a hole"));
-        // Current request present.
+    fn build_prompt_carries_the_query_and_the_corpus() {
+        let prompt = DocLookup::build_prompt("fillet the top edges");
         assert!(prompt.contains("<current_request>"));
         assert!(prompt.contains("fillet the top edges"));
-        // Documentation corpus present.
         assert!(prompt.contains("<build123d_documentation>"));
-        // Spot-check that the corpus actually contains doc content.
         assert!(prompt.contains("build123d"));
     }
 
-    #[test]
-    fn build_prompt_omits_history_when_empty() {
-        let prompt = DocLookup::build_prompt("make a box", &[]);
-        assert!(!prompt.contains("<conversation_history>"));
-        assert!(prompt.contains("<current_request>"));
-        assert!(prompt.contains("make a box"));
+    #[tokio::test]
+    async fn a_failed_lookup_tells_the_model_so() {
+        use crate::openai_compatible::recording::{provider_failure, recording_server};
+        let (base_url, _, server) =
+            recording_server(vec![provider_failure(500, "server_error", "boom", "exploded")]).await;
+        let client = crate::config::AiConfiguration {
+            base_url,
+            model: "m".into(),
+            accepts_images: false,
+            allow_insecure_http: true,
+        }
+        .build_client(None)
+        .unwrap();
+        let answer = DocLookup::new(client).lookup("fillet").await;
+        server.await.unwrap();
+        assert!(answer.starts_with("Documentation lookup failed"));
+        assert!(answer.contains("boom"));
     }
 
     #[test]
