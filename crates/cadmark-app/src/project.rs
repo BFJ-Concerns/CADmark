@@ -11,7 +11,7 @@ use cadmark_bridge::AiServices;
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
-use cadmark_core::geometry::ModelSummary;
+use cadmark_core::geometry::{ModelSummary, SolidValidity};
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::{Conversation, Message};
@@ -21,6 +21,7 @@ use cadmark_renderer::camera::Bounds3;
 
 use crate::orchestrator::{OrchestratorCommand, OrchestratorResult, spawn_orchestrator};
 use crate::turn::TurnInput;
+use crate::validity::{ExportDecision, export_decision, export_warning};
 
 /// The one script a project folder holds at present.
 pub const SCRIPT_FILENAME: &str = "part.py";
@@ -37,6 +38,8 @@ pub struct LoadedModel {
     pub summary: ModelSummary,
     pub bounds: Option<Bounds3>,
     pub model: ModelFile,
+    /// Per-solid kernel validity retained for status and the export gate.
+    pub validity: Vec<SolidValidity>,
     pub printable: bool,
 }
 
@@ -225,6 +228,10 @@ impl Project {
     /// Write the current model next to the script.
     pub fn request_export(&mut self, format: ExportFormat) -> Result<PathBuf, String> {
         let model = self.model.as_ref().ok_or("no model to export")?;
+        let decision = export_decision(&model.validity);
+        if decision != ExportDecision::Ready {
+            return Err(export_warning(&decision).expect("non-ready decision has warning"));
+        }
         let path = self.dir.join(format!("part.{}", format.extension()));
         self.send(OrchestratorCommand::Export {
             model: model.model.clone(),
@@ -267,6 +274,7 @@ impl Project {
             summary: model.summary,
             bounds,
             model: model.model,
+            validity: model.validity,
             printable,
         });
         self.script_source = Some(source);
