@@ -279,6 +279,10 @@ fn parse_operation(value: &str) -> Result<SemanticOperation, ProvenanceError> {
         "BooleanCommon" => Ok(SemanticOperation::BooleanCommon),
         "Fillet" => Ok(SemanticOperation::Fillet),
         "Chamfer" => Ok(SemanticOperation::Chamfer),
+        "LocationPattern" => Ok(SemanticOperation::LocationPattern),
+        "Mirror" => Ok(SemanticOperation::Mirror),
+        "Rotate" => Ok(SemanticOperation::Rotate),
+        "Scale" => Ok(SemanticOperation::Scale),
         other => Err(ProvenanceError::MalformedCapture(format!(
             "unknown semantic operation {other}"
         ))),
