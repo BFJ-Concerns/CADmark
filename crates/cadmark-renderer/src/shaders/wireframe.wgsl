@@ -18,6 +18,20 @@ struct Uniforms {
     _pad5: vec2<u32>,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
+    // Section plane [nx, ny, nz, d]: a fragment is discarded when
+    // dot(n, world_pos) + d < 0. All zeroes means no section.
+    section_plane: vec4<f32>,
+    // Opacity of the shaded surface.
+    mesh_alpha: f32,
+    _pad6: f32,
+    _pad7: f32,
+    _pad8: f32,
+}
+
+// Whether the section plane keeps `world_pos`. Mirrors
+// `SectionPlane::equation` in the renderer's `section` module.
+fn section_keeps(section_plane: vec4<f32>, world_pos: vec3<f32>) -> bool {
+    return dot(section_plane.xyz, world_pos) + section_plane.w >= 0.0;
 }
 
 // What a ghosted solid's edges fade towards — the viewport background,
@@ -63,6 +77,7 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) edge_id: f32,
+    @location(1) world_pos: vec3<f32>,
 }
 
 @vertex
@@ -70,11 +85,15 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_pos = uniforms.view_proj * vec4<f32>(in.position, 1.0);
     out.edge_id = in.edge_id;
+    out.world_pos = in.position;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    if !section_keeps(uniforms.section_plane, in.world_pos) {
+        discard;
+    }
     let ghost = clamp(uniforms.ghost, 0.0, 1.0);
     let eid = u32(in.edge_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {

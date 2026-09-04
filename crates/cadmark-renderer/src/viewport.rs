@@ -17,6 +17,7 @@ pub fn render_scene(
     mesh: Option<&GpuMesh>,
     sketch: Option<&GpuSketch>,
     clear_colour: wgpu::Color,
+    transparent: bool,
 ) {
     render_scene_into(
         encoder,
@@ -24,6 +25,7 @@ pub fn render_scene(
         mesh,
         sketch,
         clear_colour,
+        transparent,
         &pipelines.viewport_colour_view,
     );
 }
@@ -38,6 +40,7 @@ pub fn render_scene_into(
     mesh: Option<&GpuMesh>,
     sketch: Option<&GpuSketch>,
     clear_colour: wgpu::Color,
+    transparent: bool,
     colour_target: &wgpu::TextureView,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -62,7 +65,11 @@ pub fn render_scene_into(
     });
 
     if let Some(mesh) = mesh {
-        pass.set_pipeline(&pipelines.mesh_pipeline);
+        if transparent {
+            pass.set_pipeline(&pipelines.mesh_transparent_pipeline);
+        } else {
+            pass.set_pipeline(&pipelines.mesh_pipeline);
+        }
         pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

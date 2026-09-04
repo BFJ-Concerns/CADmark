@@ -20,6 +20,7 @@ use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolA
 use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
 use cadmark_renderer::pipeline::{Renderer, ViewportMarker};
+use cadmark_renderer::section::{self, Axis};
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
@@ -1304,6 +1305,13 @@ impl CadmarkApp {
         action
     }
 
+    /// The loaded model's extent, when there is one.
+    fn model_bounds(&self) -> Option<Bounds3> {
+        self.project()
+            .and_then(|project| project.model.as_ref())
+            .and_then(|model| model.bounds)
+    }
+
     fn apply_toolbar_action(
         &mut self,
         ctx: &egui::Context,
@@ -1422,12 +1430,37 @@ impl CadmarkApp {
             ToolbarAction::StandardView(view) => {
                 self.renderer.camera.look_at_standard(standard_view(view));
             }
+            ToolbarAction::ToggleSection => {
+                let section = &mut self.renderer.section;
+                section.enabled = !section.enabled;
+                if section.enabled {
+                    // Open on a cut through the middle of the part, so
+                    // switching it on always shows something.
+                    let axis = section.axis;
+                    let bounds = self.model_bounds();
+                    self.renderer.section.cut_along(axis, bounds);
+                }
+            }
+            ToolbarAction::SetSectionAxis(axis) => {
+                let bounds = self.model_bounds();
+                self.renderer.section.cut_along(section_axis(axis), bounds);
+            }
+            ToolbarAction::SetSectionOffset(offset) => {
+                self.renderer.section.offset = offset;
+            }
+            ToolbarAction::FlipSection => self.renderer.section.flip(),
+            ToolbarAction::ToggleTransparency => {
+                self.renderer.transparent = !self.renderer.transparent;
+            }
             ToolbarAction::None => {}
         }
     }
 
     fn show_toolbar(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let mut action = ToolbarAction::None;
+        // Taken before the panel borrows `self.project`: the slider's
+        // travel is the model's own extent along the section's axis.
+        let section_range = section::travel_along(self.model_bounds(), self.renderer.section.axis);
         egui::TopBottomPanel::top("toolbar")
             .frame(
                 egui::Frame::side_top_panel(&ctx.style())
@@ -1464,6 +1497,14 @@ impl CadmarkApp {
                     orthographic: self.renderer.camera.projection() == Projection::Orthographic,
                     export_warning: export_warning.as_deref(),
                     ai_model: project.ai_model.as_deref(),
+                    section: toolbar::SectionState {
+                        enabled: self.renderer.section.enabled,
+                        axis: section_axis_label(self.renderer.section.axis),
+                        offset: self.renderer.section.offset,
+                        flipped: self.renderer.section.flipped,
+                        range: section_range,
+                    },
+                    transparent: self.renderer.transparent,
                 };
                 action = toolbar::show_toolbar(ui, &project.history, state);
             });
@@ -1920,6 +1961,22 @@ fn stage_pending_comment(
     let message_count = conversation.len();
     pending.add(text, anchors);
     debug_assert_eq!(conversation.len(), message_count);
+}
+
+fn section_axis(axis: toolbar::SectionAxis) -> Axis {
+    match axis {
+        toolbar::SectionAxis::X => Axis::X,
+        toolbar::SectionAxis::Y => Axis::Y,
+        toolbar::SectionAxis::Z => Axis::Z,
+    }
+}
+
+fn section_axis_label(axis: Axis) -> toolbar::SectionAxis {
+    match axis {
+        Axis::X => toolbar::SectionAxis::X,
+        Axis::Y => toolbar::SectionAxis::Y,
+        Axis::Z => toolbar::SectionAxis::Z,
+    }
 }
 
 fn standard_view(view: toolbar::StandardView) -> StandardView {
