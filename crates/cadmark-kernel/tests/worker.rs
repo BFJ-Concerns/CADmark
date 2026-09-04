@@ -363,6 +363,120 @@ fn exposes_known_circular_edge_radius_and_face_area_in_descriptors() {
 }
 
 #[test]
+fn execution_keeps_each_completed_part_with_its_own_measurements_and_brep() {
+    let source = "from build123d import *\n\nwith BuildPart() as bracket:\n    Box(10, 10, 2)\n\nwith BuildPart() as cap:\n    with Locations((30, 0, 0)):\n        Cylinder(3, 5)\n";
+    let (_project, script, mut worker) = project_with_script(source);
+
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .expect("two completed parts execute through the real worker");
+
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2, "both completed builders survive discovery");
+    assert_eq!(parts[0].id, 0);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].id, 1);
+    assert_eq!(parts[1].name, "cap");
+    assert!(parts[0].is_printable());
+    assert!(parts[1].is_printable());
+    assert!((parts[0].summary.volume - 200.0).abs() < 1e-6);
+    assert!((parts[1].summary.volume - (45.0 * std::f64::consts::PI)).abs() < 1e-4);
+    assert_ne!(parts[0].file, parts[1].file);
+    assert!(parts.iter().all(|part| part.file.0.is_file()));
+}
+
+#[test]
+fn aliases_do_not_duplicate_or_hide_completed_builder_parts() {
+    let source = "from build123d import *\n\nwith BuildPart() as bracket:\n    Box(10, 10, 2)\n\nwith BuildPart() as cap:\n    with Locations((30, 0, 0)):\n        Cylinder(3, 5)\nresult = cap.part\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let parts = &executed.solid().expect("a solid result").parts;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "result");
+}
+
+#[test]
+fn independent_algebra_mode_solids_are_separate_parts() {
+    let source = "from build123d import *\n\nbracket = Part() + Box(10, 10, 2)\ncap = Part() + Pos(30, 0, 0) * Cylinder(3, 5)\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .expect("independent algebra-mode solids execute through the real worker");
+
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "cap");
+    assert_ne!(parts[0].file, parts[1].file);
+}
+
+#[test]
+fn mixed_builder_and_algebra_mode_solids_are_separate_parts() {
+    let source = "from build123d import *\n\nwith BuildPart() as bracket:\n    Box(10, 10, 2)\ncap = Part() + Pos(30, 0, 0) * Cylinder(3, 5)\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .expect("mixed builder and algebra-mode solids execute through the real worker");
+
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "cap");
+    assert_ne!(parts[0].file, parts[1].file);
+}
+
+#[test]
+fn rebinding_one_name_keeps_one_part_with_the_base_volume() {
+    let source = "from build123d import *\n\npart = Part() + Box(20, 20, 5)\npart = part - Pos(0, 0, 0) * Cylinder(3, 20)\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].name, "part");
+    assert!((parts[0].summary.volume - 1_858.628_330_588_459).abs() < 1e-6);
+}
+
+#[test]
+fn a_part_used_for_relative_placement_remains_a_second_part() {
+    let source = "from build123d import *\n\nbracket = Part() + Box(10, 10, 2)\ncap = Part() + Pos(0, 0, bracket.bounding_box().size.Z) * Cylinder(3, 5)\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "cap");
+}
+
+#[test]
+fn an_alias_of_one_shape_is_one_part() {
+    let source = "from build123d import *\n\npart = Part() + Box(10, 10, 2)\nalias = part\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].name, "alias");
+}
+
+#[test]
 fn a_script_that_prints_does_not_corrupt_the_protocol() {
     // print() goes to the worker's stderr, never into the reply stream.
     let (_project, script, mut worker) = project_with_script(

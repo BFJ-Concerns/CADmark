@@ -564,11 +564,12 @@ with BuildPart() as part:
             builtins
                 .call_method1("exec", (&code, &namespace, &namespace))
                 .unwrap();
-            let crate::tessellation::ScriptResult::Solid(shape) =
+            let crate::tessellation::ScriptResult::Solids(mut parts) =
                 crate::tessellation::find_result_shape(&namespace).unwrap()
             else {
                 panic!("the probe script builds a solid");
             };
+            let (_, shape) = parts.pop().unwrap();
             let (raw, ledger, _sketch_lineage) = finalise(py, &session, &shape, source).unwrap();
             restore(py, &session).unwrap();
 

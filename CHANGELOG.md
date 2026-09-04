@@ -31,6 +31,11 @@ All notable changes to this project will be documented in this file.
   the first save asks for its name, which becomes its file name, after which
   the same key names a version
 - Design steps record which part they changed, so undo reopens that part
+- Multi-part scripts render every distinct completed `BuildPart` and top-level
+  `Part`, `Solid`, or `Compound` binding; aliases of one shape are de-duplicated.
+  Rebind one name when constructing a part in stages. They provide a dedicated
+  whole-part picker and export one selected part or all parts from retained
+  worker BREP files
 - A design that has reached only a sketch renders: its curves, corners and
   enclosed regions draw face-on to the sketch's plane in an orthographic
   view, with any solid already on screen ghosted behind them. A sketch-only
