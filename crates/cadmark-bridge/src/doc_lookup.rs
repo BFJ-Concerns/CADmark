@@ -228,7 +228,11 @@ mod tests {
                 DocumentationSource::Operations,
                 "### thicken\nExpand a 2D face into a 3D solid",
             ),
-            SemanticOperation::Shell => ("Shell", DocumentationSource::DirectApi, "*class *Shell("),
+            SemanticOperation::Shell => (
+                "offset",
+                DocumentationSource::Operations,
+                "### offset\nInset or outset a shape",
+            ),
             SemanticOperation::Draft => (
                 "draft",
                 DocumentationSource::Operations,
@@ -329,27 +333,7 @@ mod tests {
         // word in a table or a neighbouring API name. The exhaustive mapping
         // above ties this list to the provenance instrumenter's operation
         // vocabulary: adding an operation requires a documentation anchor.
-        for operation in [
-            SemanticOperation::Box,
-            SemanticOperation::Cylinder,
-            SemanticOperation::Sphere,
-            SemanticOperation::Cone,
-            SemanticOperation::Torus,
-            SemanticOperation::Wedge,
-            SemanticOperation::Extrude,
-            SemanticOperation::Revolve,
-            SemanticOperation::Loft,
-            SemanticOperation::Sweep,
-            SemanticOperation::Thicken,
-            SemanticOperation::Shell,
-            SemanticOperation::Draft,
-            SemanticOperation::Split,
-            SemanticOperation::BooleanFuse,
-            SemanticOperation::BooleanCut,
-            SemanticOperation::BooleanCommon,
-            SemanticOperation::Fillet,
-            SemanticOperation::Chamfer,
-        ] {
+        for operation in SemanticOperation::ALL {
             let (construct, source, anchor) = documentation_for(operation);
             assert!(
                 source.contents().contains(anchor),
@@ -360,8 +344,25 @@ mod tests {
                 "lookup_docs payload no longer contains the {source:?} reference for {construct}"
             );
         }
-        // Location patterns and rotation are real consumer constructs but are
-        // not provenance operations, so they remain separately explicit.
+        // Location patterns and mirror/rotate/scale transforms are real
+        // consumer constructs but are not provenance operations, so they
+        // remain separately explicit.
+        for (construct, anchor) in [
+            (
+                "mirror",
+                "### mirror\nMirror the shape about a specified plane",
+            ),
+            ("scale", "### scale\nChange the size of a shape"),
+        ] {
+            assert!(
+                OPERATIONS_REFERENCE.contains(anchor),
+                "operations reference is missing the documented {construct} entry"
+            );
+            assert!(
+                DOC_CORPUS.contains(OPERATIONS_REFERENCE),
+                "lookup_docs payload no longer contains the operations reference for {construct}"
+            );
+        }
         for (construct, anchor) in [
             (
                 "Locations",
