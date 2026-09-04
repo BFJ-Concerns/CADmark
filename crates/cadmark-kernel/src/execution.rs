@@ -391,6 +391,252 @@ mod tests {
         (scratch, result)
     }
 
+    #[derive(Debug)]
+    struct MakerHistoryQuery {
+        builder: String,
+        method: String,
+        input_kind: String,
+        result_kinds: Vec<String>,
+        direct_answer: String,
+        direct_result_kinds: Vec<String>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum DirectHistoryExpectation {
+        ReturnedSame,
+        UnavailableEmpty,
+    }
+
+    /// Run CADmark's consumer path once while observing the real wrapper's
+    /// maker queries. The probe is installed after CADmark's instrumentation;
+    /// it records the `Generated`, `Modified`, and `IsDeleted` calls without
+    /// replacing the wrapper or separating query evidence from its ledger.
+    fn run_with_maker_history(
+        source: &str,
+    ) -> (
+        tempfile::TempDir,
+        Result<(ExecutedModel, Vec<MakerHistoryQuery>), ExecutionError>,
+    ) {
+        activate_test_runtime();
+        let scratch = tempfile::tempdir().unwrap();
+        let _execution_guard = PYTHON_EXECUTION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = Python::with_gil(|py| {
+            let globals = PyDict::new(py);
+            let session = crate::provenance::install_instrumentation(
+                py,
+                &globals,
+                "<cadmark-maker-history-probe>",
+            )
+            .unwrap();
+            py.run(
+                c"
+_cadmark_probe_queries = []
+_cadmark_probe_history_results = _CadmarkSession.history_results
+_cadmark_probe_capture_history = _CadmarkSession.capture_history
+
+def _cadmark_probe_history(builder, method, shape):
+    result = _cadmark_probe_history_results(builder, method, shape)
+    try:
+        direct_result = list(getattr(builder, method)(shape))
+        direct_answer = 'returned'
+        direct_result_kinds = tuple(
+            _CadmarkSession.kind_of(item) or 'other' for item in direct_result
+        )
+    except (AttributeError, TypeError, RuntimeError) as error:
+        direct_answer = type(error).__name__
+        direct_result_kinds = ()
+    _cadmark_probe_queries.append((
+        getattr(builder, '_cadmark_probe_class', type(builder).__name__),
+        method,
+        _CadmarkSession.kind_of(shape) or 'other',
+        tuple(_CadmarkSession.kind_of(item) or 'other' for item in result),
+        direct_answer,
+        direct_result_kinds,
+    ))
+    return result
+
+class _CadmarkProbeBuilder:
+    def __init__(self, builder):
+        self._cadmark_probe_builder = builder
+        self._cadmark_probe_class = type(builder).__name__
+
+    def __getattr__(self, name):
+        return getattr(self._cadmark_probe_builder, name)
+
+    def IsDeleted(self, shape):
+        result = self._cadmark_probe_builder.IsDeleted(shape)
+        _cadmark_probe_queries.append((
+            type(self._cadmark_probe_builder).__name__,
+            'IsDeleted',
+            _CadmarkSession.kind_of(shape) or 'other',
+            ('deleted',) if result else (),
+            'returned',
+            ('deleted',) if result else (),
+        ))
+        return result
+
+def _cadmark_probe_capture(self, builder, result, operation, api_class):
+    return _cadmark_probe_capture_history(
+        self, _CadmarkProbeBuilder(builder), result, operation, api_class
+    )
+
+_CadmarkSession.history_results = staticmethod(_cadmark_probe_history)
+_CadmarkSession.capture_history = _cadmark_probe_capture
+",
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+
+            let execution =
+                (|| -> Result<(ExecutedModel, Vec<MakerHistoryQuery>), ExecutionError> {
+                    let builtins = py.import("builtins")?;
+                    let code = builtins.call_method1(
+                        "compile",
+                        (source, "<cadmark-maker-history-probe>", "exec"),
+                    )?;
+                    builtins.call_method1("exec", (&code, &globals, &globals))?;
+                    let shape = crate::tessellation::find_result_shape(&globals)?;
+                    let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
+                    let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
+                    validate_tessellation_ids(&mesh, &ledger)?;
+                    let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
+                    let (descriptors, summary) =
+                        crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
+                    let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
+                    let model = keep_model(py, &shape, scratch.path())?;
+                    let queries = globals
+                        .get_item("_cadmark_probe_queries")?
+                        .expect("probe query collection exists")
+                        .extract::<Vec<(String, String, String, Vec<String>, String, Vec<String>)>>(
+                        )?;
+                    let queries = queries
+                        .into_iter()
+                        .map(
+                            |(
+                                builder,
+                                method,
+                                input_kind,
+                                result_kinds,
+                                direct_answer,
+                                direct_result_kinds,
+                            )| MakerHistoryQuery {
+                                builder,
+                                method,
+                                input_kind,
+                                result_kinds,
+                                direct_answer,
+                                direct_result_kinds,
+                            },
+                        )
+                        .collect();
+                    Ok((
+                        ExecutedModel {
+                            mesh,
+                            ledger,
+                            descriptors,
+                            summary,
+                            validity,
+                            model,
+                        },
+                        queries,
+                    ))
+                })();
+            crate::provenance::restore(py, &session)?;
+            execution
+        });
+        (scratch, result)
+    }
+
+    fn assert_cleanup_between_prism_and_boolean(queries: &[MakerHistoryQuery]) {
+        let prism = queries
+            .iter()
+            .position(|query| query.builder == "BRepPrimAPI_MakePrism")
+            .expect("prism issued maker-history queries");
+        let boolean = queries
+            .iter()
+            .rposition(|query| query.builder == "BRepAlgoAPI_Cut")
+            .expect("boolean issued maker-history queries");
+        assert!(
+            queries[prism..boolean]
+                .iter()
+                .any(|query| query.builder == "ShapeUpgrade_UnifySameDomain"),
+            "no clean-up query occurred after the sketch prism and before the following boolean: {queries:?}"
+        );
+    }
+
+    fn assert_maker_queries_reach_topology(
+        queries: &[MakerHistoryQuery],
+        builder: &str,
+        input_expectations: &[(&str, bool)],
+        direct_expectation: DirectHistoryExpectation,
+    ) {
+        for (input_kind, expects_output_face) in input_expectations {
+            let required_methods: &[&str] = match direct_expectation {
+                DirectHistoryExpectation::ReturnedSame => &["Generated", "Modified", "IsDeleted"],
+                DirectHistoryExpectation::UnavailableEmpty => &["Generated", "Modified"],
+            };
+            for method in required_methods {
+                assert!(
+                    queries.iter().any(|query| {
+                        query.builder == builder
+                            && query.method == *method
+                            && query.input_kind == *input_kind
+                    }),
+                    "{builder} did not issue {method} for an input {input_kind}: {queries:?}"
+                );
+            }
+            for query in queries.iter().filter(|query| {
+                query.builder == builder
+                    && query.input_kind == *input_kind
+                    && matches!(query.method.as_str(), "Generated" | "Modified")
+            }) {
+                match direct_expectation {
+                    DirectHistoryExpectation::ReturnedSame => {
+                        assert_eq!(
+                            query.direct_answer,
+                            "returned",
+                            "{builder} {method} for input {input_kind} was swallowed as {}: {queries:?}",
+                            query.direct_answer,
+                            method = query.method,
+                        );
+                        assert_eq!(
+                            query.result_kinds,
+                            query.direct_result_kinds,
+                            "{builder} {method} for input {input_kind} differed from its direct maker answer: {queries:?}",
+                            method = query.method,
+                        );
+                    }
+                    DirectHistoryExpectation::UnavailableEmpty => {
+                        assert_eq!(
+                            query.direct_answer,
+                            "AttributeError",
+                            "{builder} {method} for input {input_kind} unexpectedly exposed maker history: {queries:?}",
+                            method = query.method,
+                        );
+                        assert!(
+                            query.result_kinds.is_empty() && query.direct_result_kinds.is_empty(),
+                            "{builder} {method} for input {input_kind} unexpectedly returned maker history: {queries:?}",
+                            method = query.method,
+                        );
+                    }
+                }
+            }
+            let returns_output_face = queries.iter().any(|query| {
+                query.builder == builder
+                    && query.input_kind == *input_kind
+                    && matches!(query.method.as_str(), "Generated" | "Modified")
+                    && query.result_kinds.iter().any(|kind| kind == "face")
+            });
+            assert!(
+                returns_output_face == *expects_output_face,
+                "{builder} output-face result for input {input_kind} was {returns_output_face}, expected {expects_output_face}: {queries:?}"
+            );
+        }
+    }
+
     fn assert_every_element_resolves(
         result: &ExecutedModel,
         operation: SemanticOperation,
@@ -728,6 +974,197 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 6);
         assert_every_element_resolves(&result, SemanticOperation::Extrude, 6);
         assert_bridge_consumers(&result);
+    }
+
+    // This matrix is deliberately at `run(source)`: it exercises the same
+    // build123d call path, wrapper installation, finalisation, and consumer
+    // ledger that CADmark uses.  It is a characterisation probe, not a
+    // sketch-lineage implementation; an operation's absence from the final
+    // ledger is the result to investigate and record rather than a reason to
+    // manufacture a substitute route.
+    #[test]
+    fn sketch_prism_history_reaches_the_consumer_ledger() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+"#;
+        let (_scratch, result) = run_with_maker_history(source);
+        let (result, queries) = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Extrude);
+        assert_bridge_consumers(&result);
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepPrimAPI_MakePrism",
+            &[("face", false), ("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+    }
+
+    #[test]
+    fn sketch_revolve_history_reaches_the_consumer_ledger() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch(Plane.XZ):
+        with Locations((6, 0)):
+            Rectangle(4, 4)
+    revolve(axis=Axis.Z)
+"#;
+        let (_scratch, result) = run_with_maker_history(source);
+        let (result, queries) = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Revolve);
+        assert_bridge_consumers(&result);
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepPrimAPI_MakeRevol",
+            &[("face", false), ("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+    }
+
+    #[test]
+    fn sketch_loft_history_reaches_the_consumer_ledger() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch(Plane.XY):
+        Rectangle(6, 6)
+    with BuildSketch(Plane.XY.offset(8)):
+        Circle(2)
+    loft()
+"#;
+        let (_scratch, result) = run_with_maker_history(source);
+        let (result, queries) = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Loft);
+        assert_bridge_consumers(&result);
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepOffsetAPI_ThruSections",
+            &[("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+    }
+
+    #[test]
+    fn sketch_sweep_history_reaches_the_consumer_ledger() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildLine() as path:
+        Polyline((0, 0, 0), (0, 0, 10), (5, 0, 15))
+    with BuildSketch(Plane.XZ):
+        Circle(1)
+    sweep(path=path.line)
+"#;
+        let (_scratch, result) = run_with_maker_history(source);
+        let (result, queries) = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Sweep);
+        assert_bridge_consumers(&result);
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepOffsetAPI_MakePipeShell",
+            &[("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+    }
+
+    #[test]
+    fn sketch_fillet_history_reaches_the_consumer_ledger() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+    fillet(part.edges().filter_by(Axis.Z), radius=1)
+"#;
+        let (_scratch, result) = run_with_maker_history(source);
+        let (result, queries) = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Fillet);
+        assert_bridge_consumers(&result);
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepFilletAPI_MakeFillet",
+            &[("face", true), ("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+    }
+
+    #[test]
+    fn sketch_boolean_chain_history_reaches_the_consumer_ledger() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+    with Locations((5, 0, 0)):
+        Box(10, 10, 5, mode=Mode.SUBTRACT)
+    with Locations((7, 0, 0)):
+        Box(5, 5, 5)
+"#;
+        let (_scratch, result) = run_with_maker_history(source);
+        let (result, queries) = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::BooleanCut);
+        assert_contains_operation(&result, SemanticOperation::BooleanFuse);
+        assert_bridge_consumers(&result);
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepAlgoAPI_Cut",
+            &[("face", true), ("edge", false)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepAlgoAPI_Fuse",
+            &[("face", true), ("edge", false)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+    }
+
+    #[test]
+    fn default_cleanup_and_following_boolean_preserve_sketch_lineage() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+    with Locations((5, 0, 0)):
+        Box(10, 10, 5, mode=Mode.SUBTRACT)
+"#;
+        let (_scratch, result) = run_with_maker_history(source);
+        let (result, queries) = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Extrude);
+        assert_contains_operation(&result, SemanticOperation::BooleanCut);
+        assert_bridge_consumers(&result);
+        assert_maker_queries_reach_topology(
+            &queries,
+            "BRepAlgoAPI_Cut",
+            &[("face", true), ("edge", false)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+        assert_maker_queries_reach_topology(
+            &queries,
+            "ShapeUpgrade_UnifySameDomain",
+            &[("edge", false), ("face", false), ("vertex", false)],
+            DirectHistoryExpectation::UnavailableEmpty,
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|query| {
+                    query.builder == "ShapeUpgrade_UnifySameDomain"
+                        && matches!(query.method.as_str(), "Generated" | "Modified")
+                })
+                .count(),
+            198,
+            "clean-up maker-history query count changed: {queries:?}"
+        );
+        assert_cleanup_between_prism_and_boolean(&queries);
     }
 
     #[test]
