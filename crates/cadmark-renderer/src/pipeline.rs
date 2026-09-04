@@ -921,26 +921,30 @@ mod tests {
         );
     }
 
-    /// A device from any available adapter, software included, or `None`
-    /// where the machine has neither.
-    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    /// A device on the **software** adapter, which is the instrument the
+    /// consumer ladder names for renderer work at the unit rung. Forcing the
+    /// fallback is the whole point: a pass that happens to work on this
+    /// machine's GPU proves nothing about the rung, so a hardware adapter is
+    /// never substituted silently. `None` means the software adapter is
+    /// absent and the instrument is unavailable.
+    fn software_device() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
+            force_fallback_adapter: true,
             compatible_surface: None,
         }))?;
         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).ok()
     }
 
     #[test]
-    fn every_pass_builds_against_a_real_device() {
+    fn every_pass_builds_on_the_software_adapter() {
         // WGSL is compiled when a pipeline is created, not when the crate
         // is: a shader that does not parse, a uniform struct the shader
         // declares differently, or a binding whose visibility does not cover
         // the stage that reads it all surface here and nowhere earlier.
-        let Some((device, _queue)) = test_device() else {
-            panic!("no wgpu adapter, not even a software one: cannot build the passes");
+        let Some((device, _queue)) = software_device() else {
+            panic!("no software adapter: the ladder's unit-rung instrument is unavailable");
         };
 
         let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -981,5 +985,163 @@ mod tests {
         assert_eq!(edge_vertices.len(), 2);
         assert_eq!(edge_vertices[0].edge_id, encoded);
         assert_eq!(edge_vertices[1].edge_id, encoded);
+    }
+
+    /// One quad, one plane, and the picking texture read back on both sides
+    /// of the cut.
+    ///
+    /// Building the pipeline only proves the shader compiles. What the user
+    /// meets is the readback: click a face the section has cut away and the
+    /// pick must come back empty, not with the face they cannot see. That is
+    /// what this renders and reads.
+    #[test]
+    fn the_section_plane_makes_a_clipped_face_unpickable_in_the_readback() {
+        let Some((device, queue)) = software_device() else {
+            panic!("no software adapter: the ladder's unit-rung instrument is unavailable");
+        };
+
+        const SIZE: u32 = 64;
+        let pipelines =
+            RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, SIZE, SIZE);
+        let picking = crate::picking::PickingPass::new(&device, SIZE, SIZE);
+
+        // A quad across the whole viewport at z = 0, drawn under an identity
+        // view-projection so a vertex position is also its NDC position and a
+        // pixel maps to a world x by hand.
+        let face = cadmark_core::geometry::TopologyElement::Face(cadmark_core::geometry::FaceId(3));
+        let face_id = crate::picking::encode_picking_id(&face) as f32;
+        let corner = |x: f32, y: f32| crate::mesh::GpuVertex {
+            position: [x, y, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            face_id,
+            _padding: 0.0,
+        };
+        let vertices = [
+            corner(-0.9, -0.9),
+            corner(0.9, -0.9),
+            corner(0.9, 0.9),
+            corner(-0.9, 0.9),
+        ];
+        let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
+
+        let mesh = crate::mesh::GpuMesh {
+            vertex_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            index_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            index_count: indices.len() as u32,
+            edge_vertex_buffer: buffer_of(&device, &queue, &[0u8; 16], wgpu::BufferUsages::VERTEX),
+            edge_vertex_count: 0,
+        };
+
+        // Cut at x = 0, keeping the low side.
+        let section = crate::section::SectionPlane {
+            enabled: true,
+            axis: crate::section::Axis::X,
+            offset: 0.0,
+            flipped: false,
+        };
+        let uniforms = SimpleUniforms {
+            view_proj: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            section_plane: section.equation(),
+        };
+        queue.write_buffer(
+            &pipelines.picking_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&uniforms),
+        );
+
+        // A pixel's centre in NDC, so the sides are named by the same
+        // arithmetic the shader clips by rather than by eye.
+        let ndc_x = |px: u32| (px as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+        let (kept_px, clipped_px) = (SIZE / 4, SIZE * 3 / 4);
+        assert!(
+            section.keeps([ndc_x(kept_px), 0.0, 0.0])
+                && !section.keeps([ndc_x(clipped_px), 0.0, 0.0]),
+            "the sampled pixels do not straddle the plane"
+        );
+
+        let kept = read_pick(
+            &device,
+            &queue,
+            &pipelines,
+            &picking,
+            &mesh,
+            kept_px,
+            SIZE / 2,
+        );
+        let clipped = read_pick(
+            &device,
+            &queue,
+            &pipelines,
+            &picking,
+            &mesh,
+            clipped_px,
+            SIZE / 2,
+        );
+
+        assert_eq!(
+            kept,
+            Some(face),
+            "the half the section keeps stopped answering a click"
+        );
+        assert_eq!(
+            clipped, None,
+            "a face the section cut away is still pickable: the user selects what they cannot see"
+        );
+    }
+
+    fn buffer_of(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        data: &[u8],
+        usage: wgpu::BufferUsages,
+    ) -> wgpu::Buffer {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: data.len() as u64,
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, data);
+        buffer
+    }
+
+    /// Render the picking pass and read one pixel back, the way the
+    /// application does when the user clicks.
+    fn read_pick(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipelines: &RenderPipelines,
+        picking: &crate::picking::PickingPass,
+        mesh: &crate::mesh::GpuMesh,
+        x: u32,
+        y: u32,
+    ) -> Option<cadmark_core::geometry::TopologyElement> {
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        crate::viewport::render_picking(&mut encoder, pipelines, picking, mesh);
+        crate::viewport::copy_pick_pixel(&mut encoder, picking, &picking.staging_buffer, x, y);
+        queue.submit([encoder.finish()]);
+
+        let slice = picking.staging_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let element = crate::viewport::decode_pick_result(&slice.get_mapped_range());
+        picking.staging_buffer.unmap();
+        element
     }
 }
