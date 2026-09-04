@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Section plane: cut the model along X, Y or Z, slide the plane across
+  it, and flip which half is kept, so an internal pocket can be seen
+  without exporting. Cut-away geometry is also unclickable
+- Ghost button makes the model see-through, another way to see inside
+  it without cutting
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally

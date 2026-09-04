@@ -16,6 +16,7 @@ use cadmark_core::geometry::{GeometryContext, ScreenPosition, SelectionState, To
 use cadmark_core::message::{Conversation, Message, MessageId, ToolActivity};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
 use cadmark_renderer::pipeline::Renderer;
+use cadmark_renderer::section::{self, Axis};
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
@@ -825,6 +826,11 @@ impl CadmarkApp {
         action
     }
 
+    /// The loaded model's extent, when there is one.
+    fn model_bounds(&self) -> Option<Bounds3> {
+        self.project.model.as_ref().and_then(|model| model.bounds)
+    }
+
     fn apply_toolbar_action(&mut self, ctx: &egui::Context, action: ToolbarAction) {
         match action {
             ToolbarAction::Undo => {
@@ -874,6 +880,28 @@ impl CadmarkApp {
             ToolbarAction::StandardView(view) => {
                 self.renderer.camera.look_at_standard(standard_view(view));
             }
+            ToolbarAction::ToggleSection => {
+                let section = &mut self.renderer.section;
+                section.enabled = !section.enabled;
+                if section.enabled {
+                    // Open on a cut through the middle of the part, so
+                    // switching it on always shows something.
+                    let axis = section.axis;
+                    let bounds = self.model_bounds();
+                    self.renderer.section.cut_along(axis, bounds);
+                }
+            }
+            ToolbarAction::SetSectionAxis(axis) => {
+                let bounds = self.model_bounds();
+                self.renderer.section.cut_along(section_axis(axis), bounds);
+            }
+            ToolbarAction::SetSectionOffset(offset) => {
+                self.renderer.section.offset = offset;
+            }
+            ToolbarAction::FlipSection => self.renderer.section.flip(),
+            ToolbarAction::ToggleTransparency => {
+                self.renderer.transparent = !self.renderer.transparent;
+            }
             ToolbarAction::None => {}
         }
     }
@@ -898,6 +926,17 @@ impl CadmarkApp {
                     orthographic: self.renderer.camera.projection() == Projection::Orthographic,
                     printable: self.project.model.as_ref().map(|model| model.printable),
                     ai_model: self.project.ai_model.as_deref(),
+                    section: toolbar::SectionState {
+                        enabled: self.renderer.section.enabled,
+                        axis: section_axis_label(self.renderer.section.axis),
+                        offset: self.renderer.section.offset,
+                        flipped: self.renderer.section.flipped,
+                        range: section::travel_along(
+                            self.model_bounds(),
+                            self.renderer.section.axis,
+                        ),
+                    },
+                    transparent: self.renderer.transparent,
                 };
                 action = toolbar::show_toolbar(ui, &self.project.history, state);
             });
@@ -1168,6 +1207,22 @@ impl CadmarkApp {
                 colour,
             );
         }
+    }
+}
+
+fn section_axis(axis: toolbar::SectionAxis) -> Axis {
+    match axis {
+        toolbar::SectionAxis::X => Axis::X,
+        toolbar::SectionAxis::Y => Axis::Y,
+        toolbar::SectionAxis::Z => Axis::Z,
+    }
+}
+
+fn section_axis_label(axis: Axis) -> toolbar::SectionAxis {
+    match axis {
+        Axis::X => toolbar::SectionAxis::X,
+        Axis::Y => toolbar::SectionAxis::Y,
+        Axis::Z => toolbar::SectionAxis::Z,
     }
 }
 

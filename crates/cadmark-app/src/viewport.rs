@@ -398,6 +398,9 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             &res.pipelines,
             res.mesh.as_ref(),
             self.clear_colour,
+            // The alpha already in the uniforms decides the pass: one source
+            // of truth for "the model is see-through this frame".
+            self.mesh_uniforms.mesh_alpha < 1.0,
         );
 
         Vec::new()

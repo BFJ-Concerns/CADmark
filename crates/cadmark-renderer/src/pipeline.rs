@@ -5,6 +5,12 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::camera::Camera;
 use crate::mesh::{EdgeVertex, GpuMesh, GpuVertex};
+use crate::section::SectionPlane;
+
+/// Opacity of the shaded surface while the model is see-through. Low enough
+/// that an internal pocket reads through the near wall, high enough that the
+/// near wall is still visibly there.
+pub const TRANSPARENT_ALPHA: f32 = 0.35;
 
 /// Configuration for the selection glow effect.
 #[derive(Debug, Clone)]
@@ -44,6 +50,16 @@ pub struct MeshUniforms {
     pub _pad3: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
+    /// Section plane as `[nx, ny, nz, d]`; a fragment is discarded when
+    /// `dot(n, world_pos) + d < 0`. All zeroes when no section is active,
+    /// which keeps every fragment without a second flag.
+    pub section_plane: [f32; 4],
+    /// Opacity of the shaded surface: 1.0 solid, less when the user has
+    /// switched the model to see-through.
+    pub mesh_alpha: f32,
+    pub _pad4: f32,
+    pub _pad5: f32,
+    pub _pad6: f32,
 }
 
 /// Uniforms for the picking shader (just view_proj).
@@ -51,11 +67,18 @@ pub struct MeshUniforms {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimpleUniforms {
     pub view_proj: [[f32; 4]; 4],
+    /// The same section plane the visible passes use, in the same form.
+    /// Picking must clip identically: a face the section has cut away must
+    /// not still answer a click.
+    pub section_plane: [f32; 4],
 }
 
 /// GPU pipelines and resources for rendering.
 pub struct RenderPipelines {
     pub mesh_pipeline: wgpu::RenderPipeline,
+    /// The shaded pass again, alpha-blended with depth writes off, for when
+    /// the user has made the model see-through.
+    pub mesh_transparent_pipeline: wgpu::RenderPipeline,
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
     pub mesh_uniform_buffer: wgpu::Buffer,
     pub mesh_bind_group: wgpu::BindGroup,
@@ -185,6 +208,59 @@ impl RenderPipelines {
             cache: None,
         });
 
+        // The see-through variant of the same pass. Depth writes are off so
+        // a near surface cannot hide the interior behind it; the depth test
+        // stays on so the wireframe overlay still resolves against the
+        // surface it was drawn over.
+        let mesh_transparent_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("mesh_transparent_pipeline"),
+                layout: Some(&mesh_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &mesh_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![
+                            0 => Float32x3, // position
+                            1 => Float32x3, // normal
+                            2 => Float32,   // face_id
+                            3 => Float32,   // _padding
+                        ],
+                    }],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &mesh_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    // As the opaque pass: CAD models may have non-manifold
+                    // faces, and culling would drop an open shell's far side
+                    // altogether — the one thing this mode exists to show.
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Less,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
         // Picking layout — a single uniform buffer at binding 0 with
         // vertex-stage visibility.
         let simple_bind_group_layout =
@@ -192,7 +268,9 @@ impl RenderPipelines {
                 label: Some("simple_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // The fragment stage reads the section plane to discard
+                    // clipped geometry, so it binds this too.
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -466,6 +544,7 @@ impl RenderPipelines {
 
         Self {
             mesh_pipeline,
+            mesh_transparent_pipeline,
             mesh_bind_group_layout,
             mesh_uniform_buffer,
             mesh_bind_group,
@@ -563,6 +642,10 @@ pub struct Renderer {
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
+    /// The half-space the viewport keeps. Disabled by default.
+    pub section: SectionPlane,
+    /// Whether the shaded surface is drawn see-through.
+    pub transparent: bool,
 }
 
 impl Renderer {
@@ -573,6 +656,17 @@ impl Renderer {
             selected_id: 0,
             hover_id: 0,
             target_is_srgb: false,
+            section: SectionPlane::default(),
+            transparent: false,
+        }
+    }
+
+    /// Opacity the shaded pass draws at this frame.
+    pub fn mesh_alpha(&self) -> f32 {
+        if self.transparent {
+            TRANSPARENT_ALPHA
+        } else {
+            1.0
         }
     }
 
@@ -598,6 +692,11 @@ impl Renderer {
             _pad3: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
+            section_plane: self.section.equation(),
+            mesh_alpha: self.mesh_alpha(),
+            _pad4: 0.0,
+            _pad5: 0.0,
+            _pad6: 0.0,
         }
     }
 
@@ -607,6 +706,7 @@ impl Renderer {
         let proj = self.camera.projection_matrix(aspect_ratio);
         SimpleUniforms {
             view_proj: mat4_mul(proj, view),
+            section_plane: self.section.equation(),
         }
     }
 }
@@ -708,6 +808,157 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fields of the `Uniforms` struct in a WGSL source, as `(name, type)`.
+    fn wgsl_uniform_fields(source: &str) -> Vec<(String, String)> {
+        let body = source
+            .split_once("struct Uniforms {")
+            .expect("no Uniforms struct")
+            .1
+            .split_once('}')
+            .expect("unterminated Uniforms struct")
+            .0;
+
+        body.lines()
+            .map(|line| line.split("//").next().unwrap_or("").trim())
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let line = line.trim_end_matches(',');
+                let (name, ty) = line.split_once(':').expect("field without a type");
+                (name.trim().to_owned(), ty.trim().to_owned())
+            })
+            .collect()
+    }
+
+    /// Size of a WGSL uniform-address-space struct with these fields, under
+    /// WGSL's alignment rules. Compared against the Rust struct, this is what
+    /// catches a field added on one side and not the other.
+    fn wgsl_struct_size(fields: &[(String, String)]) -> usize {
+        let mut offset = 0usize;
+        let mut struct_align = 1usize;
+        for (_, ty) in fields {
+            let (align, size) = match ty.as_str() {
+                "f32" | "u32" | "i32" => (4, 4),
+                "vec2<f32>" | "vec2<u32>" => (8, 8),
+                "vec3<f32>" | "vec3<u32>" => (16, 12),
+                "vec4<f32>" | "vec4<u32>" => (16, 16),
+                "mat4x4<f32>" => (16, 64),
+                other => panic!("unhandled WGSL type in Uniforms: {other}"),
+            };
+            struct_align = struct_align.max(align);
+            offset = offset.div_ceil(align) * align + size;
+        }
+        offset.div_ceil(struct_align) * struct_align
+    }
+
+    const MESH_SHADER: &str = include_str!("shaders/mesh.wgsl");
+    const WIREFRAME_SHADER: &str = include_str!("shaders/wireframe.wgsl");
+    const PICKING_SHADER: &str = include_str!("shaders/picking.wgsl");
+
+    #[test]
+    fn every_shader_binding_mesh_uniforms_mirrors_the_whole_struct() {
+        // A field on the Rust struct with no counterpart in a shader that
+        // binds it does not fail to compile: the frame renders garbage
+        // silently, and every field past the mismatch is misread.
+        for (name, source) in [("mesh", MESH_SHADER), ("wireframe", WIREFRAME_SHADER)] {
+            let fields = wgsl_uniform_fields(source);
+            assert_eq!(
+                wgsl_struct_size(&fields),
+                std::mem::size_of::<MeshUniforms>(),
+                "{name}.wgsl's Uniforms is not the same size as MeshUniforms"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_shaders_sharing_mesh_uniforms_declare_it_identically() {
+        // The two bind one buffer through one bind group. Mirroring a change
+        // into one and not the other is the failure this catches.
+        assert_eq!(
+            wgsl_uniform_fields(MESH_SHADER),
+            wgsl_uniform_fields(WIREFRAME_SHADER),
+            "mesh.wgsl and wireframe.wgsl disagree about Uniforms"
+        );
+    }
+
+    #[test]
+    fn the_picking_shader_mirrors_the_whole_of_simple_uniforms() {
+        assert_eq!(
+            wgsl_struct_size(&wgsl_uniform_fields(PICKING_SHADER)),
+            std::mem::size_of::<SimpleUniforms>(),
+            "picking.wgsl's Uniforms is not the same size as SimpleUniforms"
+        );
+    }
+
+    #[test]
+    fn the_uniforms_carry_the_section_plane_to_the_visible_and_picking_passes() {
+        // Both must clip identically, or the user clicks a face the section
+        // cut away and selects something they cannot see.
+        let mut renderer = Renderer::new();
+        renderer.section = crate::section::SectionPlane {
+            enabled: true,
+            axis: crate::section::Axis::Y,
+            offset: 3.0,
+            flipped: true,
+        };
+
+        let expected = renderer.section.equation();
+        assert_ne!(expected, [0.0; 4]);
+        assert_eq!(renderer.mesh_uniforms(1.0).section_plane, expected);
+        assert_eq!(renderer.simple_uniforms(1.0).section_plane, expected);
+    }
+
+    #[test]
+    fn a_see_through_model_reaches_the_shader_as_alpha_below_one() {
+        let mut renderer = Renderer::new();
+        assert_eq!(renderer.mesh_uniforms(1.0).mesh_alpha, 1.0);
+
+        renderer.transparent = true;
+        let alpha = renderer.mesh_uniforms(1.0).mesh_alpha;
+        assert!(
+            (0.0..1.0).contains(&alpha),
+            "see-through alpha {alpha} would draw solid or invisible"
+        );
+    }
+
+    /// A device from any available adapter, software included, or `None`
+    /// where the machine has neither.
+    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).ok()
+    }
+
+    #[test]
+    fn every_pass_builds_against_a_real_device() {
+        // WGSL is compiled when a pipeline is created, not when the crate
+        // is: a shader that does not parse, a uniform struct the shader
+        // declares differently, or a binding whose visibility does not cover
+        // the stage that reads it all surface here and nowhere earlier.
+        let Some((device, _queue)) = test_device() else {
+            panic!("no wgpu adapter, not even a software one: cannot build the passes");
+        };
+
+        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = errors.clone();
+        device.on_uncaptured_error(Box::new(move |error| {
+            sink.lock().expect("error sink").push(error.to_string());
+        }));
+
+        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
+        let _ = pipelines.surface_format;
+        let _ = device.poll(wgpu::Maintain::Wait);
+
+        let errors = errors.lock().expect("error sink").clone();
+        assert!(
+            errors.is_empty(),
+            "building the passes reported: {errors:#?}"
+        );
+    }
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {

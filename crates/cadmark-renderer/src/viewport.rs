@@ -15,6 +15,7 @@ pub fn render_scene(
     pipelines: &RenderPipelines,
     mesh: Option<&GpuMesh>,
     clear_colour: wgpu::Color,
+    transparent: bool,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("viewport_main_pass"),
@@ -41,7 +42,11 @@ pub fn render_scene(
         return;
     };
 
-    pass.set_pipeline(&pipelines.mesh_pipeline);
+    if transparent {
+        pass.set_pipeline(&pipelines.mesh_transparent_pipeline);
+    } else {
+        pass.set_pipeline(&pipelines.mesh_pipeline);
+    }
     pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
     pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
     pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
