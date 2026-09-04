@@ -380,6 +380,7 @@ mod tests {
                 edges: vec![EdgeDescriptor {
                     curve_type: "line".into(),
                     length: 1.0,
+                    radius: None,
                     centre: [0.0; 3],
                     neighbours: vec![TopologyElement::Face(FaceId(0))],
                 }],

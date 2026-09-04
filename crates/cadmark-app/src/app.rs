@@ -12,7 +12,10 @@ use std::time::Duration;
 use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
-use cadmark_core::geometry::{GeometryContext, ScreenPosition, SelectionState, TopologyElement};
+use cadmark_core::geometry::{
+    GeometryContext, GeometryDescriptors, MinimumDistance, ScreenPosition, SelectionState,
+    TopologyElement,
+};
 use cadmark_core::message::{Conversation, Message, MessageId, ToolActivity};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
 use cadmark_renderer::pipeline::Renderer;
@@ -62,6 +65,28 @@ fn turn_chat_message(
     message
 }
 
+/// The pair C21 measures: exactly the two anchors currently held for the
+/// comment the user is composing. Additional anchors remain comments only.
+fn measurement_pair(anchors: &[GeometryContext]) -> Option<(TopologyElement, TopologyElement)> {
+    (anchors.len() == 2).then(|| (anchors[0].element.clone(), anchors[1].element.clone()))
+}
+
+/// The readout tracks the element currently highlighted by the application;
+/// comment anchors only provide the special two-element distance pair.
+fn measurement_readout(
+    selection: &SelectionState,
+    minimum_distance: Option<MinimumDistance>,
+    descriptors: Option<&GeometryDescriptors>,
+) -> Option<String> {
+    minimum_distance.map(MinimumDistance::describe).or_else(|| {
+        let SelectionState::Selected(element) = selection else {
+            return None;
+        };
+        descriptors
+            .and_then(|descriptors| cadmark_ui::status::selection_measurement(element, descriptors))
+    })
+}
+
 /// The running turn's chat bookkeeping: which message its text streams
 /// into, and the tool calls made so far.
 struct TurnRecord {
@@ -86,6 +111,8 @@ pub struct CadmarkApp {
     overlay: OverlayState,
     renderer: Renderer,
     selection: SelectionState,
+    /// The completed distance for the current two-anchor selection.
+    minimum_distance: Option<MinimumDistance>,
     code_panel: CodePanel,
     code_visible: bool,
     /// Source line of the selected element, when its provenance is known.
@@ -157,6 +184,7 @@ impl CadmarkApp {
             overlay: OverlayState::default(),
             renderer: Renderer::new(),
             selection: SelectionState::None,
+            minimum_distance: None,
             code_panel: CodePanel::default(),
             code_visible: false,
             highlighted_line: None,
@@ -514,6 +542,24 @@ impl CadmarkApp {
                         }
                     });
                 }
+                OrchestratorResult::MinimumDistanceMeasured {
+                    first,
+                    second,
+                    result,
+                } => {
+                    self.project.measurements_in_flight =
+                        self.project.measurements_in_flight.saturating_sub(1);
+                    if measurement_pair(self.overlay.anchors()) == Some((first, second)) {
+                        self.minimum_distance = match result {
+                            Ok(measurement) => Some(measurement),
+                            Err(error) => {
+                                self.status =
+                                    Some(Status::error(format!("Measurement failed: {error}")));
+                                None
+                            }
+                        };
+                    }
+                }
             }
         }
 
@@ -565,6 +611,7 @@ impl CadmarkApp {
 
     fn clear_selection(&mut self) {
         self.selection = SelectionState::None;
+        self.minimum_distance = None;
         self.renderer.selected_id = 0;
         self.renderer.hover_id = 0;
         self.highlighted_line = None;
@@ -674,6 +721,12 @@ impl CadmarkApp {
                 },
                 context,
             );
+        }
+        self.minimum_distance = None;
+        if let Some((first, second)) = measurement_pair(self.overlay.anchors())
+            && let Err(error) = self.project.request_minimum_distance(first, second)
+        {
+            self.status = Some(Status::error(format!("Measurement failed: {error}")));
         }
     }
 
@@ -957,6 +1010,11 @@ impl CadmarkApp {
                     SelectionState::None => None,
                 };
                 let activity = self.project.busy.as_ref().map(Busy::label);
+                let measurement = measurement_readout(
+                    &self.selection,
+                    self.minimum_distance,
+                    self.project.model.as_ref().map(|model| &model.descriptors),
+                );
                 cadmark_ui::status::show_status_bar(
                     ui,
                     StatusView {
@@ -964,6 +1022,7 @@ impl CadmarkApp {
                         status: self.status.as_ref(),
                         summary: self.project.model.as_ref().map(|model| &model.summary),
                         selection,
+                        measurement: measurement.as_deref(),
                     },
                 );
             });
@@ -1249,6 +1308,7 @@ impl eframe::App for CadmarkApp {
         // Keep the frame loop alive while anything is in flight.
         if self.project.busy.is_some()
             || self.project.exports_in_flight > 0
+            || self.project.measurements_in_flight > 0
             || self.pick_in_flight.is_some()
             || self.folder_pick_rx.is_some()
         {
@@ -1289,9 +1349,13 @@ impl eframe::App for CadmarkApp {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::ModelSummary;
+    use cadmark_core::geometry::{
+        EdgeDescriptor, EdgeId, FaceId, GeometryContext, GeometryDescriptors, ModelSummary,
+        SelectionState, TopologyElement,
+    };
+    use cadmark_core::ledger::LedgerValue;
 
-    use super::turn_chat_message;
+    use super::{measurement_pair, measurement_readout, turn_chat_message};
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -1330,6 +1394,52 @@ mod tests {
         assert_eq!(
             message,
             "Added a hole\n\nModel change: faces 6 to 9; volume 1000 to 900 mm³ (-10.0%). Before: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm. After: 9 faces, volume 900 mm³, 10 × 10 × 10 mm."
+        );
+    }
+
+    #[test]
+    fn exactly_two_comment_anchors_become_the_measurement_pair() {
+        let anchor = |id| GeometryContext {
+            element: TopologyElement::Face(FaceId(id)),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: vec![],
+        };
+        let first = anchor(1);
+        let second = anchor(4);
+        assert_eq!(measurement_pair(&[first.clone()]), None);
+        assert_eq!(
+            measurement_pair(&[first.clone(), second.clone()]),
+            Some((first.element.clone(), second.element.clone()))
+        );
+        assert_eq!(measurement_pair(&[first, second, anchor(7)]), None);
+    }
+
+    #[test]
+    fn single_readout_tracks_the_latest_selection_not_an_earlier_anchor() {
+        let descriptors = GeometryDescriptors {
+            faces: vec![],
+            edges: vec![EdgeDescriptor {
+                curve_type: "line".into(),
+                length: 12.0,
+                radius: None,
+                centre: [0.0; 3],
+                neighbours: vec![],
+            }],
+            vertices: vec![],
+        };
+        assert_eq!(
+            measurement_readout(
+                &SelectionState::Selected(TopologyElement::Edge(EdgeId(0))),
+                None,
+                Some(&descriptors),
+            ),
+            Some("Length 12 mm".into())
+        );
+        assert_eq!(
+            measurement_readout(&SelectionState::None, None, Some(&descriptors)),
+            None
         );
     }
 }
