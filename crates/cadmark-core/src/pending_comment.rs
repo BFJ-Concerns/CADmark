@@ -18,7 +18,7 @@ pub struct PendingCommentId(pub u64);
 /// without changing the card identity or the rest of its anchors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingAnchor {
-    Live(GeometryContext),
+    Live(Box<GeometryContext>),
     Lost { element: PickedElement },
 }
 
@@ -102,7 +102,10 @@ impl PendingComments {
             id,
             marker_number: id.0 + 1,
             text,
-            anchors: anchors.into_iter().map(PendingAnchor::Live).collect(),
+            anchors: anchors
+                .into_iter()
+                .map(|context| PendingAnchor::Live(Box::new(context)))
+                .collect(),
         });
         id
     }
