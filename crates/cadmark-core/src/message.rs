@@ -206,6 +206,7 @@ mod tests {
                 relation: ProvenanceRelation::Generated,
             }),
             identification: Default::default(),
+            chosen_candidate: None,
         }
     }
 

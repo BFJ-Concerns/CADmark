@@ -40,11 +40,20 @@ pub struct MeshUniforms {
     pub _pad1: f32,
     pub selected_id: u32,
     pub hover_id: u32,
-    pub _pad2: u32,
+    /// How many entries of `highlight_ids` are live.
+    pub highlight_count: u32,
     pub _pad3: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
+    /// Picking IDs the shaders tint as a secondary highlight, packed four
+    /// to a row because a uniform array's stride is sixteen bytes. Used for
+    /// the geometry one candidate source line accounts for.
+    pub highlight_ids: [[u32; 4]; HIGHLIGHT_CAPACITY / 4],
 }
+
+/// How many elements a secondary highlight can cover in one frame. A
+/// footprint larger than this is drawn truncated rather than dropped.
+pub const HIGHLIGHT_CAPACITY: usize = 32;
 
 /// Uniforms for the picking shader (just view_proj).
 #[repr(C)]
@@ -560,6 +569,10 @@ pub struct Renderer {
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
+    /// Picking IDs of a secondary highlight — the geometry attributed to
+    /// one candidate source line. Beyond `HIGHLIGHT_CAPACITY` the tail is
+    /// not drawn.
+    pub highlight_ids: Vec<u32>,
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
@@ -572,6 +585,7 @@ impl Renderer {
             selection_style: SelectionStyle::default(),
             selected_id: 0,
             hover_id: 0,
+            highlight_ids: Vec::new(),
             target_is_srgb: false,
         }
     }
@@ -584,6 +598,12 @@ impl Renderer {
 
         let lights = self.camera.light_rig();
 
+        let mut highlight_ids = [[0_u32; 4]; HIGHLIGHT_CAPACITY / 4];
+        let highlight_count = self.highlight_ids.len().min(HIGHLIGHT_CAPACITY);
+        for (slot, id) in self.highlight_ids.iter().take(highlight_count).enumerate() {
+            highlight_ids[slot / 4][slot % 4] = *id;
+        }
+
         MeshUniforms {
             view_proj,
             eye_pos: self.camera.eye_position(),
@@ -594,10 +614,11 @@ impl Renderer {
             _pad1: 0.0,
             selected_id: self.selected_id,
             hover_id: self.hover_id,
-            _pad2: 0,
+            highlight_count: highlight_count as u32,
             _pad3: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
+            highlight_ids,
         }
     }
 
@@ -708,6 +729,26 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_highlight_set_packs_into_the_uniform_rows_the_shaders_read() {
+        let mut renderer = Renderer::new();
+        renderer.highlight_ids = vec![3, 100_001, 7, 9, 11];
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(uniforms.highlight_count, 5);
+        assert_eq!(uniforms.highlight_ids[0], [3, 100_001, 7, 9]);
+        assert_eq!(uniforms.highlight_ids[1], [11, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_footprint_larger_than_the_uniform_is_truncated_not_wrapped() {
+        let mut renderer = Renderer::new();
+        renderer.highlight_ids = (1..=(HIGHLIGHT_CAPACITY as u32 + 8)).collect();
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(uniforms.highlight_count as usize, HIGHLIGHT_CAPACITY);
+        let last = uniforms.highlight_ids[HIGHLIGHT_CAPACITY / 4 - 1];
+        assert_eq!(last[3], HIGHLIGHT_CAPACITY as u32);
+    }
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {

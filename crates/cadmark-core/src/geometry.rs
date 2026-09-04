@@ -68,6 +68,13 @@ pub struct GeometryContext {
     /// key-value pairs here without changing the outer format.
     #[serde(default)]
     pub identification: std::collections::HashMap<String, String>,
+    /// The candidate the user picked when the provenance was ambiguous.
+    ///
+    /// Kept beside `provenance` rather than collapsing it: that the element
+    /// was ambiguous and that a person resolved it are both facts the AI
+    /// needs, and a resolved entry would carry neither.
+    #[serde(default)]
+    pub chosen_candidate: Option<crate::ledger::ProvenanceEntry>,
 }
 
 /// Measured geometry of one face in the final model, in model units (mm).

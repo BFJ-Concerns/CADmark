@@ -5,7 +5,9 @@
 // Escape cancels. Clicking more geometry while the overlay is open adds
 // anchors, so one comment can point at several elements.
 
+use cadmark_core::candidates::order_candidates;
 use cadmark_core::geometry::{GeometryContext, ScreenPosition};
+use cadmark_core::ledger::{LedgerValue, ProvenanceEntry};
 
 use crate::theme;
 
@@ -25,6 +27,82 @@ fn context_summary(context: &GeometryContext) -> String {
     summary
 }
 
+/// Offer every candidate source line of each ambiguous anchor, and record
+/// which one the pointer is over and which one the user chose.
+///
+/// Ordering comes from the ledger or not at all: where it cannot rank the
+/// candidates the list says so and stays in the order the ledger recorded,
+/// so an arbitrary order is never read as a likelihood.
+fn show_candidate_choices(
+    ui: &mut egui::Ui,
+    anchors: &mut [GeometryContext],
+    hovered_candidate: &mut Option<ProvenanceEntry>,
+) {
+    *hovered_candidate = None;
+    for context in anchors.iter_mut() {
+        let LedgerValue::Ambiguous(candidates) = context.provenance.clone() else {
+            continue;
+        };
+        let ordering = order_candidates(&candidates);
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "{} could have come from {} lines. {}",
+                    context.element.display_label(),
+                    candidates.len(),
+                    if ordering.ranked {
+                        "Most likely first."
+                    } else {
+                        "CADmark cannot tell which is likeliest; these are in the order it \
+                         recorded them."
+                    }
+                ))
+                .small()
+                .color(theme::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+        for &index in &ordering.order {
+            let candidate = &candidates[index];
+            let is_chosen = context.chosen_candidate.as_ref() == Some(candidate);
+            let row = ui.selectable_label(
+                is_chosen,
+                egui::RichText::new(format!(
+                    "{}: `{}`",
+                    candidate.describe(),
+                    candidate.source.code
+                ))
+                .small(),
+            );
+            if row.hovered() {
+                *hovered_candidate = Some(candidate.clone());
+            }
+            if row.clicked() {
+                context.chosen_candidate = if is_chosen {
+                    None
+                } else {
+                    Some(candidate.clone())
+                };
+            }
+        }
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(match &context.chosen_candidate {
+                    Some(chosen) => format!("Sending line {} alone.", chosen.source.line),
+                    None => format!(
+                        "No line chosen: sending all {} for the AI to decide.",
+                        candidates.len()
+                    ),
+                })
+                .small()
+                .color(theme::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+    }
+}
+
 /// State for the spatial comment overlay.
 #[derive(Debug, Default)]
 pub enum OverlayState {
@@ -42,6 +120,9 @@ pub enum OverlayState {
         anchors: Vec<GeometryContext>,
         /// Whether the text field has been given focus since opening.
         focused: bool,
+        /// The candidate row the pointer is over, recomputed each frame so
+        /// the viewport and code panel can show what that line accounts for.
+        hovered_candidate: Option<ProvenanceEntry>,
     },
 }
 
@@ -68,6 +149,7 @@ impl OverlayState {
             text: String::new(),
             anchors: vec![context],
             focused: false,
+            hovered_candidate: None,
         };
     }
 
@@ -98,6 +180,18 @@ impl OverlayState {
         }
     }
 
+    /// The candidate line the pointer is resting on, if any. Hovering a
+    /// candidate is what shows the user which geometry that line accounts
+    /// for; the caller drives the highlights from this.
+    pub fn hovered_candidate(&self) -> Option<&ProvenanceEntry> {
+        match self {
+            Self::Active {
+                hovered_candidate, ..
+            } => hovered_candidate.as_ref(),
+            Self::Hidden => None,
+        }
+    }
+
     /// Close the overlay.
     pub fn close(&mut self) {
         *self = Self::Hidden;
@@ -117,6 +211,7 @@ impl OverlayState {
                 text,
                 anchors,
                 focused,
+                hovered_candidate,
             } => {
                 let mut action = OverlayAction::None;
                 let anchor_pos = egui::pos2(anchor.x, anchor.y);
@@ -192,6 +287,8 @@ impl OverlayState {
                                     )
                                     .wrap(),
                                 );
+
+                                show_candidate_choices(ui, anchors, hovered_candidate);
 
                                 let response = egui::Frame::new()
                                     .fill(theme::SUNKEN)
@@ -319,6 +416,7 @@ mod tests {
                 relation: ProvenanceRelation::Generated,
             }),
             identification,
+            chosen_candidate: None,
         };
 
         assert_eq!(
@@ -334,6 +432,7 @@ mod tests {
             element,
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
+            chosen_candidate: None,
         };
         let mut overlay = OverlayState::default();
         assert!(!overlay.toggle_anchor(anchor(TopologyElement::Face(FaceId(1)))));
@@ -356,6 +455,7 @@ mod tests {
             element: TopologyElement::Face(FaceId(0)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
+            chosen_candidate: None,
         };
         assert!(context_summary(&context).starts_with("face 0: no source line"));
     }

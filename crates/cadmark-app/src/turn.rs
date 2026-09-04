@@ -979,6 +979,7 @@ mod tests {
             element,
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
+            chosen_candidate: None,
         };
         let input = TurnInput {
             chat: Some("and make it taller".into()),
