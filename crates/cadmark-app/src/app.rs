@@ -350,7 +350,7 @@ impl CadmarkApp {
                 self.project.note_turn_event(None);
             }
             TurnEvent::ModelBuilt { model, source } => {
-                self.show_model(model, source);
+                self.show_model(*model, source);
                 self.project.note_turn_event(None);
             }
         }
@@ -395,7 +395,7 @@ impl CadmarkApp {
                         )));
                     }
                 }
-                self.show_model(model, source);
+                self.show_model(*model, source);
             }
             TurnOutcome::Answered => {
                 if conversation
@@ -435,7 +435,7 @@ impl CadmarkApp {
             match result {
                 OrchestratorResult::Reloaded { model, source } => {
                     self.project.busy = None;
-                    self.show_model(model, source);
+                    self.show_model(*model, source);
                 }
                 OrchestratorResult::NoScript => {
                     self.project.busy = None;

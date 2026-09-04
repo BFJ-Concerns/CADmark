@@ -221,14 +221,13 @@ impl ChatPane {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let has_text = !self.input_text.trim().is_empty();
-                if turn_running {
-                    if ui
+                if turn_running
+                    && ui
                         .add(egui::Button::new(egui::RichText::new("Cancel").color(theme::ERROR)))
                         .on_hover_text("Stop the AI and put the model back as it was")
                         .clicked()
-                    {
-                        action = ChatAction::Cancel;
-                    }
+                {
+                    action = ChatAction::Cancel;
                 }
                 let send = ui.add_enabled(
                     can_send && has_text,

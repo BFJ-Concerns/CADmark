@@ -133,7 +133,7 @@ impl KernelWorker {
             script_path: script_path.to_path_buf(),
         };
         match self.request(&request, Some(limits), cancel)? {
-            WorkerReply::Executed(model) => Ok(model),
+            WorkerReply::Executed(model) => Ok(*model),
             WorkerReply::Failed(failure) => Err(failure_error(failure)),
             WorkerReply::Exported => Err(WorkerError::Runtime(
                 "worker replied to an execution with an export".to_string(),
@@ -473,10 +473,10 @@ fn runtime_roots(venv: Option<&Path>) -> Vec<PathBuf> {
     }
     if let Some(venv) = venv {
         roots.push(venv.to_path_buf());
-        if let Ok(real) = std::fs::canonicalize(venv.join("bin").join("python")) {
-            if let Some(home) = real.parent().and_then(Path::parent) {
-                roots.push(home.to_path_buf());
-            }
+        if let Ok(real) = std::fs::canonicalize(venv.join("bin").join("python"))
+            && let Some(home) = real.parent().and_then(Path::parent)
+        {
+            roots.push(home.to_path_buf());
         }
     }
     roots
@@ -486,7 +486,7 @@ fn serve(request: WorkerRequest, scratch_dir: &Path) -> WorkerReply {
     match request {
         WorkerRequest::Execute { script_path } => {
             match crate::execution::execute_script(&script_path, scratch_dir) {
-                Ok(model) => WorkerReply::Executed(model),
+                Ok(model) => WorkerReply::Executed(Box::new(model)),
                 Err(error) => WorkerReply::Failed(classify(error)),
             }
         }
