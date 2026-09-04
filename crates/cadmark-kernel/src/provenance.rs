@@ -5,11 +5,11 @@ use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cadmark_core::geometry::{EdgeId, FaceId, VertexId};
-use cadmark_core::sketch_lineage::SketchLineageLedger;
 use cadmark_core::ledger::{
     LedgerValue, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation,
     SourceRef,
 };
+use cadmark_core::sketch_lineage::SketchLineageLedger;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
@@ -129,8 +129,7 @@ pub(crate) fn finalise(
     let capture = session.inner.bind(py).call_method1("finalise", (shape,))?;
     let raw = parse_capture(&capture)?;
     let ledger = build_ledger(&raw, source)?;
-    let sketch_lineage =
-        crate::sketch_lineage::build_ledger(&capture, &raw.operations, source)?;
+    let sketch_lineage = crate::sketch_lineage::build_ledger(&capture, &raw.operations, source)?;
     Ok((raw, ledger, sketch_lineage))
 }
 

@@ -94,7 +94,13 @@ fn parse_sketch_elements(
         let entry = entry?;
         let kind = parse_element_kind(&item(&entry, "kind")?.extract::<String>()?)?;
         let index = next_index.entry(kind).or_insert(0);
-        elements.push((SketchElement { kind, index: *index }, item(&entry, "sketch_id")?.extract()?));
+        elements.push((
+            SketchElement {
+                kind,
+                index: *index,
+            },
+            item(&entry, "sketch_id")?.extract()?,
+        ));
         *index += 1;
     }
     Ok(elements)

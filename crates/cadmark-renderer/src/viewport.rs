@@ -195,7 +195,9 @@ pub fn decode_pick_result(data: &[u8]) -> Option<cadmark_core::geometry::PickedE
 #[cfg(test)]
 mod tests {
     use super::decode_pick_result;
-    use cadmark_core::geometry::{FaceId, PickedElement, SketchElement, SketchElementKind, TopologyElement};
+    use cadmark_core::geometry::{
+        FaceId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
+    };
 
     #[test]
     fn a_mapped_pixel_decodes_to_its_element_or_the_background() {

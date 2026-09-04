@@ -340,8 +340,7 @@ mod tests {
 
     #[test]
     fn ambiguity_names_every_curve_that_reached_the_element() {
-        let lineage =
-            SketchLineage::Ambiguous(vec![source(4, "Rectangle"), source(9, "Circle")]);
+        let lineage = SketchLineage::Ambiguous(vec![source(4, "Rectangle"), source(9, "Circle")]);
         assert_eq!(lineage.candidates().len(), 2);
         assert_eq!(lineage.resolved(), None);
         assert_eq!(

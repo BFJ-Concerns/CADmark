@@ -981,7 +981,11 @@ impl CadmarkApp {
             return;
         };
         let lineage = project.sketch_lineage.lookup_element(&element);
-        log::info!("Selected {}: {}", element.display_label(), lineage.describe());
+        log::info!(
+            "Selected {}: {}",
+            element.display_label(),
+            lineage.describe()
+        );
         self.highlighted_line = lineage.resolved().map(|source| source.source.line);
         self.status = Some(Status::info(format!(
             "{} — {}",

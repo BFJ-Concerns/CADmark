@@ -199,15 +199,17 @@ mod tests {
 
         let drawn = render_comment(&GroundedComment {
             text: "widen this".into(),
-            anchors: vec![anchor(cadmark_core::sketch_lineage::SketchLineage::Resolved(
-                cadmark_core::sketch_lineage::SketchSource {
-                    source: SourceRef {
-                        line: 5,
-                        code: "Rectangle(20, 10)".into(),
+            anchors: vec![anchor(
+                cadmark_core::sketch_lineage::SketchLineage::Resolved(
+                    cadmark_core::sketch_lineage::SketchSource {
+                        source: SourceRef {
+                            line: 5,
+                            code: "Rectangle(20, 10)".into(),
+                        },
+                        object: "Rectangle".into(),
                     },
-                    object: "Rectangle".into(),
-                },
-            ))],
+                ),
+            )],
         });
         assert!(
             drawn.contains("sketch: drawn by Rectangle at line 5"),
@@ -218,9 +220,11 @@ mod tests {
         // line from the surrounding code.
         let unreachable = render_comment(&GroundedComment {
             text: "widen this".into(),
-            anchors: vec![anchor(cadmark_core::sketch_lineage::SketchLineage::NoRoute(
-                cadmark_core::sketch_lineage::NoSketchRoute::CleanUpStep,
-            ))],
+            anchors: vec![anchor(
+                cadmark_core::sketch_lineage::SketchLineage::NoRoute(
+                    cadmark_core::sketch_lineage::NoSketchRoute::CleanUpStep,
+                ),
+            )],
         });
         assert!(
             unreachable.contains("sketch: no sketch route:"),

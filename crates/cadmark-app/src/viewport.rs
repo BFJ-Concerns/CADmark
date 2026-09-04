@@ -519,10 +519,7 @@ mod tests {
         };
         let mut in_flight = Some((120.0, 240.0));
         assert_eq!(
-            completed_pick_transition(
-                Some(CompletedPick::SketchHit(element.clone())),
-                &mut in_flight
-            ),
+            completed_pick_transition(Some(CompletedPick::SketchHit(element)), &mut in_flight),
             PickTransition::SketchHit(element, (120.0, 240.0))
         );
         assert_eq!(in_flight, None);
