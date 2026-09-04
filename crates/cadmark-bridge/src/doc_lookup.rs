@@ -333,7 +333,7 @@ mod tests {
         // word in a table or a neighbouring API name. The exhaustive mapping
         // above ties this list to the provenance instrumenter's operation
         // vocabulary: adding an operation requires a documentation anchor.
-        for operation in SemanticOperation::ALL {
+        for operation in SemanticOperation::ALL.iter().copied() {
             let (construct, source, anchor) = documentation_for(operation);
             assert!(
                 source.contents().contains(anchor),

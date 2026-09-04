@@ -31,54 +31,52 @@ pub enum ProvenanceRelation {
     ModifiedDescendant,
 }
 
-/// The user-authored operation responsible for topology.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SemanticOperation {
-    Box,
-    Cylinder,
-    Sphere,
-    Cone,
-    Torus,
-    Wedge,
-    Extrude,
-    Revolve,
-    Loft,
-    Sweep,
-    Thicken,
-    Shell,
-    Draft,
-    Split,
-    BooleanFuse,
-    BooleanCut,
-    BooleanCommon,
-    Fillet,
-    Chamfer,
+macro_rules! semantic_operation_set {
+    ($declare:ident) => {
+        $declare!(
+            Box,
+            Cylinder,
+            Sphere,
+            Cone,
+            Torus,
+            Wedge,
+            Extrude,
+            Revolve,
+            Loft,
+            Sweep,
+            Thicken,
+            Shell,
+            Draft,
+            Split,
+            BooleanFuse,
+            BooleanCut,
+            BooleanCommon,
+            Fillet,
+            Chamfer,
+        );
+    };
 }
 
-impl SemanticOperation {
-    /// Every operation the provenance instrumenter currently reports.
-    pub const ALL: [Self; 19] = [
-        Self::Box,
-        Self::Cylinder,
-        Self::Sphere,
-        Self::Cone,
-        Self::Torus,
-        Self::Wedge,
-        Self::Extrude,
-        Self::Revolve,
-        Self::Loft,
-        Self::Sweep,
-        Self::Thicken,
-        Self::Shell,
-        Self::Draft,
-        Self::Split,
-        Self::BooleanFuse,
-        Self::BooleanCut,
-        Self::BooleanCommon,
-        Self::Fillet,
-        Self::Chamfer,
-    ];
+macro_rules! declare_semantic_operation {
+    ($($operation:ident),+ $(,)?) => {
+        /// The user-authored operation responsible for topology.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum SemanticOperation {
+            $($operation,)+
+        }
 
+        impl SemanticOperation {
+            /// Every operation the provenance instrumenter currently reports.
+            /// Generated from the same operation set as the enum, so the two
+            /// cannot drift apart.
+            pub const ALL: &[Self] = &[$(Self::$operation,)+];
+        }
+    };
+}
+
+semantic_operation_set!(declare_semantic_operation);
+
+impl SemanticOperation {
     /// Plain-language name for people reading the chat pane or overlay.
     pub fn display_name(self) -> &'static str {
         match self {
