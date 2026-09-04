@@ -173,11 +173,22 @@ Export writes the file next to the part script. Multi-part models offer per-part
 
 Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-ui/src/toolbar.rs:562–610`.
 
+## Solid validity
+
+After each build, the status bar reports every produced part's validity. The message comes from `describe_validity`:
+
+- "Part 1 is closed and valid." — a printable solid
+- "Part 1 is NOT a closed valid solid; it will not print." — open or invalid geometry
+
+When exporting, an invalid part shows a non-blocking warning: "Cannot export: Part N is not a closed valid solid."
+
+Source: `crates/cadmark-app/src/validity.rs:33–53`, `crates/cadmark-app/src/app.rs:886–896`.
+
 ## Reference images
 
-Image files (PNG, JPEG, WebP) placed in a `references/` directory inside the project folder are sent to the AI with every turn when `accepts_images` is enabled. Their token budget is included in the context-occupancy display.
+PNG and JPEG files (extensions `.png`, `.jpg`, `.jpeg`) placed in a `references/` directory inside the project folder are sent to the AI with every turn when `accepts_images` is enabled. Other file types are ignored. Their token budget is included in the context-occupancy display.
 
-Source: `crates/cadmark-app/src/turn.rs:646–683`.
+Source: `crates/cadmark-app/src/turn.rs:646–689`.
 
 ## Keyboard shortcuts
 

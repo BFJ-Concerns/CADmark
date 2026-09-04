@@ -36,11 +36,12 @@ Source: `.cargo/config.toml`, `crates/cadmark-app/build.rs`, `crates/cadmark-ker
 ## Build and run
 
 ```
-cargo check          # type-check
-cargo test           # run all tests (kernel tests need the .venv)
-cargo run -- [dir]   # run with a project directory
+cargo check                         # type-check
+cargo test                          # run all tests (kernel tests need the .venv)
+cargo run --bin cadmark             # run — opens the start view
+cargo run --bin cadmark -- [dir]    # run with a project directory
 ```
 
-With no directory argument, CADmark opens the start view. A directory argument opens that project folder directly.
+The workspace has two binaries (`cadmark` in cadmark-app, `cadmark-kernel-worker` in cadmark-kernel) and no `default-run`, so `--bin cadmark` is required. With no directory argument, CADmark opens the start view. A directory argument opens that project folder directly.
 
-Source: `crates/cadmark-app/src/main.rs:34–64`, `crates/cadmark-app/src/launch.rs`.
+Source: `crates/cadmark-app/Cargo.toml:6–8`, `crates/cadmark-kernel/Cargo.toml:6–7`, `crates/cadmark-app/src/main.rs:34–64`, `crates/cadmark-app/src/launch.rs`.
