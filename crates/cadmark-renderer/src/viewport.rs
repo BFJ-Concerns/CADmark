@@ -330,6 +330,16 @@ mod tests {
         }
     }
 
+    /// A triangle filling one half of the clip square, so two of them
+    /// occupy disjoint screen regions and each can be looked for on its own.
+    fn triangle_in_half(x_min: f32, x_max: f32, depth: f32) -> TessellatedMesh {
+        let mut mesh = triangle(depth);
+        mesh.vertices[0].position = [x_min, -0.9, depth];
+        mesh.vertices[1].position = [x_max, -0.9, depth];
+        mesh.vertices[2].position = [(x_min + x_max) / 2.0, 0.9, depth];
+        mesh
+    }
+
     fn triangle_with_face(depth: f32, face_id: u32) -> TessellatedMesh {
         let mut mesh = triangle(depth);
         mesh.face_ids[0] = face_id;
@@ -506,6 +516,118 @@ mod tests {
         assert!(
             pixel[1] > 20,
             "far selected surface overwrote near surface: {pixel:?}"
+        );
+    }
+
+    #[test]
+    fn every_part_of_a_multi_part_scene_reaches_the_frame() {
+        let (device, queue) = gpu_device();
+        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8Unorm, 64, 64);
+        queue.write_buffer(
+            &pipelines.mesh_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&MeshUniforms {
+                view_proj: [
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ],
+                eye_pos: [0.0, 0.0, 2.0],
+                encode_srgb: 1,
+                key_light_dir: [0.0, 0.0, 1.0],
+                _pad0: 0.0,
+                fill_light_dir: [0.0, 0.0, 1.0],
+                _pad1: 0.0,
+                selected_id: 0,
+                hover_id: 0,
+                highlight_count: 0,
+                _pad3: 0,
+                marker_count: 0,
+                ghost: 0.0,
+                selected_part_id: 0,
+                hover_part_id: 0,
+                selected_colour: [0.0; 4],
+                hover_colour: [0.0; 4],
+            }),
+        );
+        // Two parts side by side: the left half is part zero's alone, the
+        // right half part one's, so a frame missing either is legible as a
+        // background pixel where that part's own triangle should be.
+        let left = upload_mesh(&device, &triangle_in_half(-0.9, -0.1, 0.5), PartId(0));
+        let right = upload_mesh(&device, &triangle_in_half(0.1, 0.9, 0.5), PartId(1));
+        let colour = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("multi_part_scene_colour"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let staging = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: 256,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        };
+        let left_staging = staging("multi_part_scene_left");
+        let right_staging = staging("multi_part_scene_right");
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("multi_part_scene"),
+        });
+        render_scene_into(
+            &mut encoder,
+            &pipelines,
+            &[left, right],
+            None,
+            wgpu::Color::BLACK,
+            &colour.create_view(&wgpu::TextureViewDescriptor::default()),
+        );
+        let mut sample = |x: u32, target: &wgpu::Buffer| {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &colour,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y: 40, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: target,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: None,
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        sample(16, &left_staging);
+        sample(48, &right_staging);
+        queue.submit([encoder.finish()]);
+
+        let lit = |pixel: [u8; 4]| pixel[0] as u32 + pixel[1] as u32 + pixel[2] as u32 > 30;
+        let left_pixel = read_pick_pixel(&device, &left_staging);
+        let right_pixel = read_pick_pixel(&device, &right_staging);
+        assert!(
+            lit(left_pixel),
+            "first part did not reach the frame: {left_pixel:?}"
+        );
+        assert!(
+            lit(right_pixel),
+            "a later part did not reach the frame: {right_pixel:?}"
         );
     }
 }
