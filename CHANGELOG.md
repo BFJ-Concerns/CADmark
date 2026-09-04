@@ -19,6 +19,8 @@ All notable changes to this project will be documented in this file.
   project, F5 rebuild, F fit view
 - Status bar shows the model's measurements, the current selection and
   the navigation controls
+- In-app readouts for a selected face's area, edge length or diameter, and
+  the minimum distance between two selected elements
 
 ### Changed
 - Coherent dark theme shared by every panel: one accent colour for

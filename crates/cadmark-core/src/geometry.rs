@@ -87,6 +87,8 @@ pub struct EdgeDescriptor {
     /// OCCT curve classification, e.g. "line", "circle", "bspline".
     pub curve_type: String,
     pub length: f64,
+    /// Circle radius when this is a circular edge; absent for other curves.
+    pub radius: Option<f64>,
     pub centre: [f64; 3],
 }
 
@@ -212,7 +214,7 @@ fn close(a: f64, b: f64) -> bool {
 }
 
 /// Format a measurement with as few decimals as convey it.
-fn compact(value: f64) -> String {
+pub fn compact(value: f64) -> String {
     if (value - value.round()).abs() < 5e-3 {
         format!("{}", value.round() as i64)
     } else {

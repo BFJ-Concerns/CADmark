@@ -27,7 +27,8 @@ from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
 from OCP.gp import gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID, TopAbs_VERTEX
-from OCP.TopExp import TopExp_Explorer
+from OCP.TopExp import TopExp, TopExp_Explorer
+from OCP.TopTools import TopTools_IndexedMapOfShape
 from OCP.TopoDS import TopoDS
 from build123d import import_brep
 
@@ -87,12 +88,16 @@ def measure_edges(shapes):
         props = GProp_GProps()
         BRepGProp.LinearProperties_s(edge, props)
         try:
-            curve_type = _curve_names.get(BRepAdaptor_Curve(edge).GetType(), 'other')
+            curve = BRepAdaptor_Curve(edge)
+            curve_type = _curve_names.get(curve.GetType(), 'other')
+            radius = curve.Circle().Radius() if curve_type == 'circle' else None
         except Exception:
             curve_type = 'degenerate'
+            radius = None
         edges.append({
             'curve_type': curve_type,
             'length': props.Mass(),
+            'radius': radius,
             'centre': _point(props.CentreOfMass()),
         })
     return edges
@@ -147,13 +152,11 @@ def minimum_distance(model_path, first_kind, first_index, second_kind, second_in
     kinds = {'face': TopAbs_FACE, 'edge': TopAbs_EDGE, 'vertex': TopAbs_VERTEX}
 
     def element(kind, index):
-        explorer = TopExp_Explorer(shape, kinds[kind])
-        for current in range(index + 1):
-            if not explorer.More():
-                raise IndexError(f'{kind} {index} is not in the retained model')
-            found = explorer.Current()
-            explorer.Next()
-        return found
+        indexed = TopTools_IndexedMapOfShape()
+        TopExp.MapShapes_s(shape, kinds[kind], indexed)
+        if index < 0 or index >= indexed.Extent():
+            raise IndexError(f'{kind} {index} is not in the retained model')
+        return indexed.FindKey(index + 1)
 
     extrema = BRepExtrema_DistShapeShape(
         element(first_kind, first_index), element(second_kind, second_index)
@@ -212,6 +215,7 @@ pub(crate) fn measure(
         edges.push(EdgeDescriptor {
             curve_type: edge.get_item("curve_type")?.extract()?,
             length: edge.get_item("length")?.extract()?,
+            radius: edge.get_item("radius")?.extract()?,
             centre: edge.get_item("centre")?.extract()?,
         });
     }
