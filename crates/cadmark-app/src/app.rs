@@ -632,7 +632,7 @@ impl CadmarkApp {
                     &summary,
                     &script_filename,
                 ) {
-                    Ok(version) => project.history.push(version),
+                    Ok(_) => project.reload_history(),
                     Err(e) => {
                         log::error!("Failed to record the design step: {e}");
                         self.status = Some(Status::error(format!(
@@ -855,7 +855,13 @@ impl CadmarkApp {
         let Some(dir) = self.project().map(|project| project.dir.clone()) else {
             return;
         };
-        match crate::git_ops::checkout_commit(&dir, &commit_hash) {
+        let restored = {
+            let Some(project) = self.project_mut() else {
+                return;
+            };
+            crate::git_ops::checkout_history_step(&project.dir, &mut project.history, &commit_hash)
+        };
+        match restored {
             Ok(()) => {
                 log::info!("Restored design step {commit_hash}");
                 let part = crate::git_ops::part_of_commit(&dir, &commit_hash);
@@ -888,8 +894,8 @@ impl CadmarkApp {
             return;
         };
         match crate::git_ops::create_snapshot(&project.dir, &name, project.part_file_name()) {
-            Ok(version) => {
-                project.history.push(version);
+            Ok(_) => {
+                project.reload_history();
                 self.status = Some(Status::info(format!(
                     "Saved version \u{201C}{name}\u{201D}"
                 )));

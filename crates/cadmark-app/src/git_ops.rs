@@ -8,7 +8,7 @@ use std::process::Command;
 
 use thiserror::Error;
 
-use cadmark_core::version::{Microversion, SnapshotInfo};
+use cadmark_core::version::{Microversion, SnapshotInfo, VersionHistory};
 
 #[derive(Error, Debug)]
 pub enum GitError {
@@ -145,20 +145,84 @@ pub fn checkout_commit(project_dir: &Path, commit_hash: &str) -> Result<(), GitE
     Ok(())
 }
 
+/// Restore a history step without discarding the lane that requested it.
+///
+/// Undo and redo advance `history` before checking out the selected commit.
+/// Rebuilding from a detached HEAD at that point would make the restored
+/// commit look like the lane tip, losing the forward steps needed for redo.
+/// A jump to a step outside the current lane still reloads from that step so
+/// subsequent navigation follows the selected lane.
+pub fn checkout_history_step(
+    project_dir: &Path,
+    history: &mut VersionHistory,
+    commit_hash: &str,
+) -> Result<(), GitError> {
+    checkout_commit(project_dir, commit_hash)?;
+
+    if history
+        .current()
+        .is_none_or(|current| current.commit_hash != commit_hash)
+    {
+        *history = VersionHistory::from_history(
+            list_microversions(project_dir, 100)?,
+            list_current_lane_microversions(project_dir, 100)?,
+        );
+    }
+
+    Ok(())
+}
+
 /// Return to the tip of the current branch (after undo navigation).
 pub fn checkout_branch_tip(project_dir: &Path, branch: &str) -> Result<(), GitError> {
     run_git(project_dir, &["checkout", branch])?;
     Ok(())
 }
 
-/// List recent microversions from git log, most recent first.
+/// List recent microversions from local branches carrying CADmark metadata.
 pub fn list_microversions(project_dir: &Path, count: usize) -> Result<Vec<Microversion>, GitError> {
+    let mut refs = vec!["HEAD".to_string()];
+    refs.extend(design_history_local_refs(project_dir)?);
+    list_microversions_from_refs(project_dir, count, &refs)
+}
+
+/// List the microversions on the lane currently checked out by the user.
+pub fn list_current_lane_microversions(
+    project_dir: &Path,
+    count: usize,
+) -> Result<Vec<Microversion>, GitError> {
+    list_microversions_from_refs(project_dir, count, &["HEAD".to_string()])
+}
+
+/// Return local branches whose CADmark-marked commits may contain design steps.
+///
+/// The marker filter in `list_microversions_from_refs` excludes commits CADmark
+/// does not own, while keeping design steps abandoned on the project's ordinary
+/// branch as well as those on CADmark-created edit alternatives.
+fn design_history_local_refs(project_dir: &Path) -> Result<Vec<String>, GitError> {
+    let output = run_git(
+        project_dir,
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
+    )?;
+    Ok(output.lines().map(str::to_owned).collect())
+}
+
+fn list_microversions_from_refs(
+    project_dir: &Path,
+    count: usize,
+    refs: &[String],
+) -> Result<Vec<Microversion>, GitError> {
     // Use null byte as record separator — it cannot appear in commit text,
     // unlike the old "---END---" delimiter which could collide with user input.
-    let log_output = run_git(
-        project_dir,
-        &["log", &format!("-{count}"), "--format=%H%n%s%n%aI%n%b%x00"],
-    )?;
+    let mut args = vec![
+        "log".to_string(),
+        format!("-{count}"),
+        "--fixed-strings".to_string(),
+        format!("--grep={METADATA_MARKER}"),
+        "--format=%H%n%s%n%aI%n%b%x00".to_string(),
+    ];
+    args.extend(refs.iter().cloned());
+    let arg_refs: Vec<_> = args.iter().map(String::as_str).collect();
+    let log_output = run_git(project_dir, &arg_refs)?;
 
     let mut versions = Vec::new();
 
@@ -181,6 +245,9 @@ pub fn list_microversions(project_dir: &Path, count: usize) -> Result<Vec<Microv
 
         // Parse structured metadata if present.
         let body = lines[3..].join("\n");
+        if !body.lines().any(|line| line.trim() == METADATA_MARKER) {
+            continue;
+        }
         let trigger_message = body
             .lines()
             .find(|l| l.starts_with("trigger: "))
@@ -371,6 +438,27 @@ mod tests {
     }
 
     #[test]
+    fn completed_turn_leaves_the_working_script_at_its_recorded_step() {
+        let dir = test_repo();
+        let script = "part.py";
+        let recorded_script = "box = Box(10, 10, 10)";
+        fs::write(dir.path().join(script), recorded_script).unwrap();
+
+        let step = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+
+        let committed_script = run_git(
+            dir.path(),
+            &["show", &format!("{}:{script}", step.commit_hash)],
+        )
+        .unwrap();
+        assert_eq!(committed_script.trim(), recorded_script);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(script)).unwrap(),
+            committed_script
+        );
+    }
+
+    #[test]
     fn a_step_records_which_part_of_the_folder_it_changed() {
         // One folder, one history, several parts: a step has to say which
         // part it belongs to or undo cannot reopen the right one.
@@ -393,6 +481,44 @@ mod tests {
     }
 
     #[test]
+    fn undo_and_redo_restore_the_recorded_script_and_keep_their_navigation_lane() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let first = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+        fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
+        let second = create_microversion(dir.path(), "Widen box", "make it wider", script).unwrap();
+
+        let mut history = VersionHistory::from_history(
+            list_microversions(dir.path(), 10).unwrap(),
+            list_current_lane_microversions(dir.path(), 10).unwrap(),
+        );
+        let undone = history.undo().unwrap().commit_hash.clone();
+        assert_eq!(undone, first.commit_hash);
+        checkout_history_step(dir.path(), &mut history, &undone).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(script)).unwrap(),
+            "box = Box(10, 10, 10)"
+        );
+        assert!(history.can_redo());
+        assert!(
+            history
+                .recent(10)
+                .iter()
+                .any(|version| version.commit_hash == second.commit_hash)
+        );
+
+        let redone = history.redo().unwrap().commit_hash.clone();
+        assert_eq!(redone, second.commit_hash);
+        checkout_history_step(dir.path(), &mut history, &redone).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(script)).unwrap(),
+            "box = Box(20, 20, 20)"
+        );
+        assert!(!history.can_redo());
+    }
+
+    #[test]
     fn create_snapshot() {
         let dir = test_repo();
         let script = "part.py";
@@ -404,6 +530,23 @@ mod tests {
 
         let versions = list_microversions(dir.path(), 10).unwrap();
         assert!(versions[0].snapshot.is_some());
+    }
+
+    #[test]
+    fn named_version_is_listed_by_its_name() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+
+        super::create_snapshot(dir.path(), "Before fillet", script).unwrap();
+
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        assert!(versions.iter().any(|version| {
+            version
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.name == "Before fillet")
+        }));
     }
 
     #[test]
@@ -455,6 +598,145 @@ mod tests {
             list_branches(dir.path()).unwrap().contains(&second_branch),
             "the second edit must be recorded on its own branch"
         );
+    }
+
+    #[test]
+    fn history_lists_steps_on_several_alternatives_from_one_undone_step() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let base = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+        let base_hash = run_git(dir.path(), &["rev-parse", &base.commit_hash]).unwrap();
+
+        let mut alternatives = Vec::new();
+        for (summary, script_source) in [
+            ("First alternative", "box = Box(20, 20, 20)"),
+            ("Second alternative", "box = Box(30, 30, 30)"),
+            ("Third alternative", "box = Box(40, 40, 40)"),
+        ] {
+            checkout_commit(dir.path(), &base.commit_hash).unwrap();
+            fs::write(dir.path().join(script), script_source).unwrap();
+            let alternative =
+                create_microversion(dir.path(), summary, "try another edit", script).unwrap();
+            let parent = run_git(
+                dir.path(),
+                &["rev-parse", &format!("{}^", alternative.commit_hash)],
+            )
+            .unwrap();
+            assert_eq!(
+                parent.trim(),
+                base_hash.trim(),
+                "{summary} must be a direct child of the undone base"
+            );
+            alternatives.push(alternative);
+        }
+
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        assert!(
+            versions
+                .iter()
+                .any(|version| version.commit_hash == base.commit_hash)
+        );
+        for alternative in alternatives {
+            assert!(
+                versions
+                    .iter()
+                    .any(|version| version.commit_hash == alternative.commit_hash),
+                "history omitted {}",
+                alternative.summary
+            );
+        }
+
+        checkout_commit(dir.path(), &base.commit_hash).unwrap();
+        let current_lane = list_current_lane_microversions(dir.path(), 10).unwrap();
+        assert_eq!(current_lane.len(), 1);
+        assert_eq!(current_lane[0].commit_hash, base.commit_hash);
+    }
+
+    #[test]
+    fn history_lists_steps_abandoned_on_the_project_branch_after_undo_then_edit() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let base = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+        fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
+        let abandoned =
+            create_microversion(dir.path(), "Widen box", "make it wider", script).unwrap();
+
+        checkout_commit(dir.path(), &base.commit_hash).unwrap();
+        fs::write(dir.path().join(script), "box = Box(30, 30, 30)").unwrap();
+        let alternative =
+            create_microversion(dir.path(), "Alternative box", "try another edit", script).unwrap();
+
+        let main_tip = run_git(dir.path(), &["rev-parse", "--short", "refs/heads/main"]).unwrap();
+        assert_eq!(main_tip.trim(), abandoned.commit_hash);
+        assert_eq!(
+            current_branch(dir.path()).unwrap(),
+            "cadmark-edit-".to_string() + &base.commit_hash + "-1"
+        );
+
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        for step in [&base, &abandoned, &alternative] {
+            assert!(
+                versions
+                    .iter()
+                    .any(|version| version.commit_hash == step.commit_hash),
+                "history omitted {}",
+                step.summary
+            );
+        }
+    }
+
+    #[test]
+    fn history_ignores_refs_cadmark_does_not_own() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        create_microversion(dir.path(), "Design step", "make a box", script).unwrap();
+
+        create_branch(dir.path(), "unrelated-work").unwrap();
+        fs::write(dir.path().join("notes.txt"), "not a design step").unwrap();
+        run_git(dir.path(), &["add", "notes.txt"]).unwrap();
+        run_git(dir.path(), &["commit", "-m", "Unrelated work"]).unwrap();
+        let unrelated = run_git(dir.path(), &["rev-parse", "HEAD"]).unwrap();
+        run_git(
+            dir.path(),
+            &["update-ref", "refs/remotes/origin/main", unrelated.trim()],
+        )
+        .unwrap();
+        switch_branch(dir.path(), "main").unwrap();
+        run_git(dir.path(), &["tag", "unrelated-tag", unrelated.trim()]).unwrap();
+        fs::write(dir.path().join("scratch.txt"), "stash content").unwrap();
+        run_git(
+            dir.path(),
+            &["stash", "push", "-u", "-m", "not a design step"],
+        )
+        .unwrap();
+
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].summary, "Design step");
+    }
+
+    #[test]
+    fn failed_step_recording_leaves_no_history_entry() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        create_microversion(dir.path(), "Existing step", "make a box", script).unwrap();
+        let history_before = list_microversions(dir.path(), 10).unwrap();
+
+        let result = create_microversion(
+            dir.path(),
+            "Missing script",
+            "make a box",
+            "does-not-exist.py",
+        );
+
+        assert!(result.is_err());
+        let history_after = list_microversions(dir.path(), 10).unwrap();
+        assert_eq!(history_after.len(), history_before.len());
+        assert_eq!(history_after[0].commit_hash, history_before[0].commit_hash);
     }
 
     #[test]
