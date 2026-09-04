@@ -811,6 +811,7 @@ mod tests {
     struct FakeExecutor {
         outcomes: Arc<Mutex<VecDeque<Result<(), WorkerError>>>>,
         executed: Arc<Mutex<Vec<String>>>,
+        block_restoration: bool,
     }
 
     impl FakeExecutor {
@@ -818,7 +819,16 @@ mod tests {
             Self {
                 outcomes: Arc::new(Mutex::new(outcomes.into_iter().collect())),
                 executed: Arc::new(Mutex::new(Vec::new())),
+                block_restoration: false,
             }
+        }
+
+        fn blocking_restoration(
+            outcomes: impl IntoIterator<Item = Result<(), WorkerError>>,
+        ) -> Self {
+            let mut executor = Self::new(outcomes);
+            executor.block_restoration = true;
+            executor
         }
 
         fn executed(&self) -> Vec<String> {
@@ -855,12 +865,12 @@ mod tests {
         ) -> Result<ExecutedModel, WorkerError> {
             let code = std::fs::read_to_string(script_path).unwrap();
             self.executed.lock().unwrap().push(code);
-            self.outcomes
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or(Ok(()))
-                .map(|()| sample_model())
+            let outcome = self.outcomes.lock().unwrap().pop_front().unwrap_or(Ok(()));
+            if self.block_restoration {
+                std::fs::remove_file(script_path).unwrap();
+                std::fs::create_dir(script_path).unwrap();
+            }
+            outcome.map(|()| sample_model())
         }
     }
 
@@ -1127,6 +1137,67 @@ mod tests {
         let outcome = harness.run(&model, chat("do it"), CancelFlag::new()).await;
         assert!(matches!(&outcome, TurnOutcome::Failed { error } if error.contains("SyntaxError")));
         assert_eq!(harness.on_disk().as_deref(), Some("ORIGINAL = 1"));
+    }
+
+    #[tokio::test]
+    async fn syntax_errors_and_tracebacks_are_shown_to_the_model_for_correction() {
+        let model = ScriptedModel::new([
+            run_script("syntax", "BROKEN =", "Syntax attempt"),
+            run_script("traceback", "missing_name()", "Runtime attempt"),
+            run_script("fixed", "GOOD = 1", "Fixed"),
+            text("Fixed both errors."),
+        ]);
+        let mut harness = Harness::with_script(
+            Some("ORIGINAL = 1"),
+            FakeExecutor::new([
+                Err(WorkerError::Script("SyntaxError: invalid syntax".into())),
+                Err(WorkerError::Script(
+                    "Traceback (most recent call last): NameError: missing_name".into(),
+                )),
+                Ok(()),
+            ]),
+        );
+
+        let outcome = harness
+            .run(&model, chat("make it work"), CancelFlag::new())
+            .await;
+
+        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+        assert_eq!(
+            harness.executor.executed(),
+            ["BROKEN =", "missing_name()", "GOOD = 1"]
+        );
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].items.iter().any(|item| matches!(
+            item,
+            ModelItem::ToolResult { call_id, output }
+                if call_id == "syntax" && output.contains("SyntaxError: invalid syntax")
+        )));
+        assert!(requests[2].items.iter().any(|item| matches!(
+            item,
+            ModelItem::ToolResult { call_id, output }
+                if call_id == "traceback" && output.contains("Traceback") && output.contains("missing_name")
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_failed_restoration_is_reported_in_the_turn_outcome() {
+        let model = ScriptedModel::new([
+            run_script("c1", "BAD = 1", "Try"),
+            text("I could not get this to work."),
+        ]);
+        let mut harness = Harness::with_script(
+            Some("ORIGINAL = 1"),
+            FakeExecutor::blocking_restoration([Err(WorkerError::Script("SyntaxError".into()))]),
+        );
+
+        let outcome = harness.run(&model, chat("do it"), CancelFlag::new()).await;
+
+        assert!(matches!(
+            outcome,
+            TurnOutcome::Failed { error }
+                if error.contains("SyntaxError") && error.contains("could not be restored")
+        ));
     }
 
     #[tokio::test]
