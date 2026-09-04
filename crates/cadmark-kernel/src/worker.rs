@@ -102,7 +102,8 @@ struct Process {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    scratch_dir: tempfile::TempDir,
+    /// Held so the directory outlives the process; removed on drop.
+    _scratch_dir: tempfile::TempDir,
 }
 
 /// The application's handle on script execution and export.
@@ -233,7 +234,7 @@ impl KernelWorker {
             child,
             stdin,
             stdout,
-            scratch_dir,
+            _scratch_dir: scratch_dir,
         };
         let ready = read_line_within(&mut process, START_TIMEOUT)?;
         if ready.trim() != READY_LINE {
@@ -335,15 +336,10 @@ fn kill(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// Read the worker's first line, killing a worker that hangs on start-up
+/// rather than waiting on it.
 fn read_line_within(process: &mut Process, timeout: Duration) -> Result<String, WorkerError> {
-    let limits = ExecutionLimits {
-        wall_clock: timeout,
-        memory_bytes: u64::MAX,
-    };
-    // The ready line is not JSON; read it through the same supervision so
-    // a worker that hangs on import is killed rather than waited on.
     let started = Instant::now();
-    let pid = process.child.id();
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         scope.spawn(|| {
@@ -354,20 +350,21 @@ fn read_line_within(process: &mut Process, timeout: Duration) -> Result<String, 
         loop {
             match rx.recv_timeout(SUPERVISION_INTERVAL) {
                 Ok(Ok(line)) => return Ok(line),
-                Ok(Err(error)) => return Err(WorkerError::Runtime(format!("lost the worker: {error}"))),
+                Ok(Err(error)) => {
+                    return Err(WorkerError::Runtime(format!("lost the worker: {error}")));
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(WorkerError::Runtime("the worker reader stopped".to_string()));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            if started.elapsed() >= limits.wall_clock {
+            if started.elapsed() >= timeout {
                 kill(&mut process.child);
                 return Err(WorkerError::Runtime(format!(
                     "the worker took longer than {} s to start",
-                    limits.wall_clock.as_secs()
+                    timeout.as_secs()
                 )));
             }
-            let _ = pid;
         }
     })
 }

@@ -918,8 +918,9 @@ _cadmark_bad_restore = _CadmarkBadRestore()
             ));
         });
         drop(_guard);
+        let scratch = tempfile::tempdir().unwrap();
         assert!(matches!(
-            crate::execution::execute_script_source("value = 1"),
+            crate::execution::execute_script_source("value = 1", scratch.path()),
             Err(crate::execution::ExecutionError::Provenance(
                 ProvenanceError::Poisoned
             ))

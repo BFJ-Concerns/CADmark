@@ -8,7 +8,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once};
 
-use cadmark_core::geometry::SolidValidity;
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::mesh::TessellatedMesh;
 use pyo3::prelude::*;
@@ -1145,7 +1144,7 @@ with BuildPart() as part:
             vertices: Vec::new(),
             indices: vec![0, 1, 2],
             face_ids: vec![1],
-            edges: vec![crate::tessellation::MeshEdge {
+            edges: vec![cadmark_core::mesh::MeshEdge {
                 points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
                 edge_id: 1,
             }],
