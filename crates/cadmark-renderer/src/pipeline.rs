@@ -471,7 +471,7 @@ impl RenderPipelines {
                 vertex: wgpu::VertexState {
                     module: &sketch_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[sketch_vertex_layout.clone()],
+                    buffers: std::slice::from_ref(&sketch_vertex_layout),
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -923,6 +923,109 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
     edge_vertices
 }
 
+/// A corner marker's half-width, as a fraction of the profile's extent, so
+/// corners read as dots at any size of sketch.
+const CORNER_MARKER_SCALE: f32 = 0.006;
+
+/// The profile's curves as a line list: each polyline becomes its
+/// segments, so a curve of any shape draws with one pipeline.
+pub fn sketch_curve_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
+    let mut vertices = Vec::new();
+    for curve in &profile.curves {
+        for window in curve.points.windows(2) {
+            for &position in window {
+                vertices.push(SketchVertex {
+                    position,
+                    tint: REGION_TINT,
+                });
+            }
+        }
+    }
+    vertices
+}
+
+/// The profile's enclosed regions and corner markers as one triangle
+/// list. Corners are quads lying in the sketch's own plane — the first
+/// point geometry CADmark draws, and it lives here rather than in the
+/// solid mesh because a solid has no points to show.
+pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
+    let mut vertices = Vec::new();
+    for region in &profile.regions {
+        for &index in &region.indices {
+            let Some(&position) = region.vertices.get(index as usize) else {
+                continue;
+            };
+            vertices.push(SketchVertex {
+                position,
+                tint: REGION_TINT,
+            });
+        }
+    }
+
+    let half_width = (profile.extent() * CORNER_MARKER_SCALE).max(f32::MIN_POSITIVE);
+    let across = normalise(profile.plane.x_axis);
+    let up = normalise(cross(profile.plane.normal, across));
+    for corner in &profile.corners {
+        let offset = |along: f32, sideways: f32| SketchVertex {
+            position: std::array::from_fn(|axis| {
+                corner.position[axis]
+                    + across[axis] * along * half_width
+                    + up[axis] * sideways * half_width
+            }),
+            tint: CORNER_TINT,
+        };
+        let quad = [
+            offset(-1.0, -1.0),
+            offset(1.0, -1.0),
+            offset(1.0, 1.0),
+            offset(-1.0, -1.0),
+            offset(1.0, 1.0),
+            offset(-1.0, 1.0),
+        ];
+        vertices.extend(quad);
+    }
+    vertices
+}
+
+/// Upload a sketch profile to GPU buffers.
+pub fn upload_sketch(device: &wgpu::Device, profile: &SketchProfile) -> GpuSketch {
+    use wgpu::util::DeviceExt;
+
+    let curve_vertices = sketch_curve_vertices(profile);
+    let fill_vertices = sketch_fill_vertices(profile);
+
+    GpuSketch {
+        curve_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sketch_curve_vertex_buffer"),
+            contents: bytemuck::cast_slice(&curve_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+        curve_vertex_count: curve_vertices.len() as u32,
+        fill_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sketch_fill_vertex_buffer"),
+            contents: bytemuck::cast_slice(&fill_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+        fill_vertex_count: fill_vertices.len() as u32,
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalise(vector: [f32; 3]) -> [f32; 3] {
+    let length = vector.iter().map(|c| c * c).sum::<f32>().sqrt();
+    if length < 1e-6 {
+        return [1.0, 0.0, 0.0];
+    }
+    vector.map(|component| component / length)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,107 +1220,4 @@ mod tests {
             "marker bindings and both draw pipelines must validate"
         );
     }
-}
-
-/// A corner marker's half-width, as a fraction of the profile's extent, so
-/// corners read as dots at any size of sketch.
-const CORNER_MARKER_SCALE: f32 = 0.006;
-
-/// The profile's curves as a line list: each polyline becomes its
-/// segments, so a curve of any shape draws with one pipeline.
-pub fn sketch_curve_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
-    let mut vertices = Vec::new();
-    for curve in &profile.curves {
-        for window in curve.points.windows(2) {
-            for &position in window {
-                vertices.push(SketchVertex {
-                    position,
-                    tint: REGION_TINT,
-                });
-            }
-        }
-    }
-    vertices
-}
-
-/// The profile's enclosed regions and corner markers as one triangle
-/// list. Corners are quads lying in the sketch's own plane — the first
-/// point geometry CADmark draws, and it lives here rather than in the
-/// solid mesh because a solid has no points to show.
-pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
-    let mut vertices = Vec::new();
-    for region in &profile.regions {
-        for &index in &region.indices {
-            let Some(&position) = region.vertices.get(index as usize) else {
-                continue;
-            };
-            vertices.push(SketchVertex {
-                position,
-                tint: REGION_TINT,
-            });
-        }
-    }
-
-    let half_width = (profile.extent() * CORNER_MARKER_SCALE).max(f32::MIN_POSITIVE);
-    let across = normalise(profile.plane.x_axis);
-    let up = normalise(cross(profile.plane.normal, across));
-    for corner in &profile.corners {
-        let offset = |along: f32, sideways: f32| SketchVertex {
-            position: std::array::from_fn(|axis| {
-                corner.position[axis]
-                    + across[axis] * along * half_width
-                    + up[axis] * sideways * half_width
-            }),
-            tint: CORNER_TINT,
-        };
-        let quad = [
-            offset(-1.0, -1.0),
-            offset(1.0, -1.0),
-            offset(1.0, 1.0),
-            offset(-1.0, -1.0),
-            offset(1.0, 1.0),
-            offset(-1.0, 1.0),
-        ];
-        vertices.extend(quad);
-    }
-    vertices
-}
-
-/// Upload a sketch profile to GPU buffers.
-pub fn upload_sketch(device: &wgpu::Device, profile: &SketchProfile) -> GpuSketch {
-    use wgpu::util::DeviceExt;
-
-    let curve_vertices = sketch_curve_vertices(profile);
-    let fill_vertices = sketch_fill_vertices(profile);
-
-    GpuSketch {
-        curve_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sketch_curve_vertex_buffer"),
-            contents: bytemuck::cast_slice(&curve_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        }),
-        curve_vertex_count: curve_vertices.len() as u32,
-        fill_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sketch_fill_vertex_buffer"),
-            contents: bytemuck::cast_slice(&fill_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        }),
-        fill_vertex_count: fill_vertices.len() as u32,
-    }
-}
-
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn normalise(vector: [f32; 3]) -> [f32; 3] {
-    let length = vector.iter().map(|c| c * c).sum::<f32>().sqrt();
-    if length < 1e-6 {
-        return [1.0, 0.0, 0.0];
-    }
-    vector.map(|component| component / length)
 }

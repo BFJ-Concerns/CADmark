@@ -270,7 +270,7 @@ fn parse_profile(output: &Bound<'_, PyAny>) -> Result<SketchProfile, Tessellatio
 }
 
 fn as_dict<'py>(value: &Bound<'py, PyAny>) -> Result<Bound<'py, PyDict>, TessellationError> {
-    value.downcast::<PyDict>().map(Clone::clone).map_err(|_| {
+    value.downcast::<PyDict>().cloned().map_err(|_| {
         TessellationError::NoShape("Sketch extraction produced a non-dict entry".into())
     })
 }
