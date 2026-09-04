@@ -163,6 +163,9 @@ pub struct CadmarkApp {
     code_visible: bool,
     /// Source line of the selected element, when its provenance is known.
     highlighted_line: Option<u32>,
+    /// The line the hovered candidate names, shown in place of the
+    /// selection's own line while the pointer rests on a candidate row.
+    candidate_line: Option<u32>,
     version_dialog: VersionDialog,
     part_dialog: PartNameDialog,
     settings_dialog: SettingsDialog,
@@ -239,6 +242,7 @@ impl CadmarkApp {
             code_panel: CodePanel::default(),
             code_visible: false,
             highlighted_line: None,
+            candidate_line: None,
             version_dialog: VersionDialog::default(),
             part_dialog: PartNameDialog::default(),
             settings_dialog: SettingsDialog::default(),
@@ -770,6 +774,8 @@ impl CadmarkApp {
         self.renderer.selected_id = 0;
         self.renderer.hover_id = 0;
         self.highlighted_line = None;
+        self.candidate_line = None;
+        self.renderer.highlight_ids.clear();
         self.overlay.close();
     }
 
@@ -867,6 +873,37 @@ impl CadmarkApp {
     fn open_externally(&mut self, path: &Path, what: &str) {
         if let Err(error) = open::that_detached(path) {
             self.status = Some(Status::error(format!("Could not open {what}: {error}")));
+        }
+    }
+
+    /// Show what the candidate under the pointer accounts for: its own
+    /// source line in the code panel, and the geometry the ledger
+    /// attributes to its operation lit in the viewport.
+    ///
+    /// Where two candidates were recorded against the same elements their
+    /// footprints coincide — the ledger drew no distinction there and this
+    /// invents none; the code panel's line is what tells them apart.
+    ///
+    /// The whole ledger footprint is sent, vertices included, even though
+    /// the renderer draws only faces and edges: vertices are not a drawable
+    /// element class anywhere in CADmark yet — the tessellation carries no
+    /// vertex positions and nothing can pick one — so their picking IDs
+    /// simply match nothing this frame. Filtering them here would make the
+    /// highlight set disagree with the ledger, and the set would then have
+    /// to be widened again the moment a point pass exists.
+    fn apply_candidate_hover(&mut self, ctx: &egui::Context) {
+        let hovered = self.overlay.hovered_candidate().cloned();
+        let (line, footprint) = match (&hovered, self.project.as_ref()) {
+            (Some(candidate), Some(project)) => (
+                Some(candidate.source.line),
+                candidate_highlight_ids(&project.ledger, candidate.operation_id),
+            ),
+            _ => (None, Vec::new()),
+        };
+        if self.candidate_line != line || self.renderer.highlight_ids != footprint {
+            self.candidate_line = line;
+            self.renderer.highlight_ids = footprint;
+            ctx.request_repaint();
         }
     }
 
@@ -1430,7 +1467,7 @@ impl CadmarkApp {
                     CodeView {
                         script_filename: project.part_file_name(),
                         source: project.script_source.as_deref(),
-                        highlighted_line: self.highlighted_line,
+                        highlighted_line: self.candidate_line.or(self.highlighted_line),
                         modified_on_disk: project.script_modified_on_disk,
                         controls_enabled: project.busy.is_none(),
                     },
@@ -1549,6 +1586,7 @@ impl CadmarkApp {
                 rect,
                 ViewportCallback {
                     mesh_uniforms: self.renderer.mesh_uniforms(aspect),
+                    highlight_ids: self.renderer.highlight_ids.clone(),
                     simple_uniforms: self.renderer.simple_uniforms(aspect),
                     pick_request,
                     hover_request,
@@ -1573,7 +1611,9 @@ impl CadmarkApp {
                 }
             }
 
-            match self.overlay.show(ui, rect) {
+            let action = self.overlay.show(ui, rect);
+            self.apply_candidate_hover(ui.ctx());
+            match action {
                 OverlayAction::Submit { text, anchors } => {
                     self.overlay.close();
                     self.send_spatial_comment(text, anchors);
@@ -1657,6 +1697,20 @@ fn standard_view(view: toolbar::StandardView) -> StandardView {
 }
 
 /// Construct the AI services from the user's settings, or say why not.
+/// The picking IDs of every element the ledger attributes to one
+/// candidate's operation — what the viewport lights up while the pointer
+/// rests on that candidate's row.
+///
+/// The footprint is taken whole. Vertices are carried even though no pass
+/// draws them, so the highlight set says what the ledger says rather than
+/// what the renderer currently happens to consume.
+fn candidate_highlight_ids(ledger: &cadmark_core::ledger::ProvenanceLedger, operation_id: u64) -> Vec<u32> {
+    cadmark_core::candidates::candidate_footprint(ledger, operation_id)
+        .iter()
+        .map(cadmark_renderer::picking::encode_picking_id)
+        .collect()
+}
+
 /// What answers the AI's render tool for one project: the viewport's
 /// offscreen renderer where there is a GPU to render with, and the
 /// stand-in that says so honestly where there is not.
@@ -1781,8 +1835,8 @@ mod tests {
     use super::{
         CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
         SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, measurement_pair, measurement_readout, record_tool_start,
-        turn_chat_message,
+        VersionDialog, ai_services, candidate_highlight_ids, measurement_pair,
+        measurement_readout, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -1932,6 +1986,7 @@ mod tests {
             code_panel: CodePanel::default(),
             code_visible: false,
             highlighted_line: None,
+            candidate_line: None,
             version_dialog: VersionDialog::default(),
             part_dialog: PartNameDialog::default(),
             settings_dialog: SettingsDialog::default(),
@@ -2289,4 +2344,87 @@ mod tests {
         assert_eq!(messages.len(), 2, "{messages:?}");
         assert!(matches!(messages[0].0, MessageKind::ToolCalls(_)));
     }
+
+    /// Two candidates recorded against the same elements, plus geometry
+    /// only one of them claims — the ordinary fillet-over-a-box shape.
+    fn coincident_ledger() -> cadmark_core::ledger::ProvenanceLedger {
+        use cadmark_core::ledger::{
+            ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation, SourceRef,
+        };
+        let entry = |line: u32, operation_id: u64| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation: SemanticOperation::Fillet,
+            operation_id,
+            relation: ProvenanceRelation::Modified,
+        };
+        let mut ledger = ProvenanceLedger::new();
+        // The shared edge: both candidates claim it.
+        ledger
+            .record_edge(
+                EdgeId(5),
+                LedgerValue::Ambiguous(vec![entry(2, 1), entry(9, 4)]),
+            )
+            .unwrap();
+        // A face only the box claims, so the two footprints differ here.
+        ledger
+            .record_face(FaceId(3), LedgerValue::Resolved(entry(2, 1)))
+            .unwrap();
+        ledger
+    }
+
+    #[test]
+    fn a_candidates_highlight_is_every_element_its_own_operation_claims() {
+        use cadmark_renderer::picking::encode_picking_id;
+        let ledger = coincident_ledger();
+
+        // The box line accounts for its own face and the shared edge.
+        assert_eq!(
+            candidate_highlight_ids(&ledger, 1),
+            vec![
+                encode_picking_id(&TopologyElement::Face(FaceId(3))),
+                encode_picking_id(&TopologyElement::Edge(EdgeId(5))),
+            ]
+        );
+        // The fillet line accounts for the shared edge alone.
+        assert_eq!(
+            candidate_highlight_ids(&ledger, 4),
+            vec![encode_picking_id(&TopologyElement::Edge(EdgeId(5)))]
+        );
+        // A line claiming nothing lights nothing, rather than everything.
+        assert!(candidate_highlight_ids(&ledger, 77).is_empty());
+    }
+
+    #[test]
+    fn coincident_candidates_are_reported_rather_than_given_a_manufactured_difference() {
+        use cadmark_core::ledger::{
+            LedgerValue as LV, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation,
+            SemanticOperation, SourceRef,
+        };
+        let entry = |line: u32, operation_id: u64| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation: SemanticOperation::Fillet,
+            operation_id,
+            relation: ProvenanceRelation::Modified,
+        };
+        // The ledger records both candidates against the same single edge
+        // and nothing else, so their footprints genuinely coincide.
+        let mut ledger = ProvenanceLedger::new();
+        ledger
+            .record_edge(EdgeId(5), LV::Ambiguous(vec![entry(2, 1), entry(9, 4)]))
+            .unwrap();
+
+        assert_eq!(
+            candidate_highlight_ids(&ledger, 1),
+            candidate_highlight_ids(&ledger, 4),
+            "the ledger draws no distinction here and the highlight must not invent one"
+        );
+        assert!(!candidate_highlight_ids(&ledger, 1).is_empty());
+    }
+
 }

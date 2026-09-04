@@ -5,7 +5,9 @@
 // Escape cancels. Clicking more geometry while the overlay is open adds
 // anchors, so one comment can point at several elements.
 
+use cadmark_core::candidates::order_candidates;
 use cadmark_core::geometry::{GeometryContext, ScreenPosition};
+use cadmark_core::ledger::{LedgerValue, ProvenanceEntry};
 
 use crate::theme;
 
@@ -25,6 +27,98 @@ fn context_summary(context: &GeometryContext) -> String {
     summary
 }
 
+/// What the candidate list says about its own order.
+///
+/// The ranked and unranked cases must read differently: an order the
+/// ledger did not determine, presented as though it had, is the guess the
+/// provenance design exists to refuse.
+fn candidate_heading(label: &str, count: usize, ranked: bool) -> String {
+    format!(
+        "{label} could have come from {count} lines. {}",
+        if ranked {
+            "Most likely first."
+        } else {
+            "CADmark cannot tell which is likeliest; these are in the order it recorded them."
+        }
+    )
+}
+
+/// What will actually be sent to the AI for this anchor, stated plainly so
+/// the user can see the consequence of choosing and of not choosing.
+fn sending_note(chosen: Option<&ProvenanceEntry>, count: usize) -> String {
+    match chosen {
+        Some(chosen) => format!("Sending line {} alone.", chosen.source.line),
+        None => format!("No line chosen: sending all {count} for the AI to decide."),
+    }
+}
+
+/// Offer every candidate source line of each ambiguous anchor, and record
+/// which one the pointer is over and which one the user chose.
+///
+/// Ordering comes from the ledger or not at all: where it cannot rank the
+/// candidates the list says so and stays in the order the ledger recorded,
+/// so an arbitrary order is never read as a likelihood.
+fn show_candidate_choices(
+    ui: &mut egui::Ui,
+    anchors: &mut [GeometryContext],
+    hovered_candidate: &mut Option<ProvenanceEntry>,
+) {
+    *hovered_candidate = None;
+    for context in anchors.iter_mut() {
+        let LedgerValue::Ambiguous(candidates) = context.provenance.clone() else {
+            continue;
+        };
+        let ordering = order_candidates(&candidates);
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(candidate_heading(
+                    &context.element.display_label(),
+                    candidates.len(),
+                    ordering.ranked,
+                ))
+                .small()
+                .color(theme::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+        for &index in &ordering.order {
+            let candidate = &candidates[index];
+            let is_chosen = context.chosen_candidate.as_ref() == Some(candidate);
+            let row = ui.selectable_label(
+                is_chosen,
+                egui::RichText::new(format!(
+                    "{}: `{}`",
+                    candidate.describe(),
+                    candidate.source.code
+                ))
+                .small(),
+            );
+            if row.hovered() {
+                *hovered_candidate = Some(candidate.clone());
+            }
+            if row.clicked() {
+                context.chosen_candidate = if is_chosen {
+                    None
+                } else {
+                    Some(candidate.clone())
+                };
+            }
+        }
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(sending_note(
+                    context.chosen_candidate.as_ref(),
+                    candidates.len(),
+                ))
+                .small()
+                .color(theme::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+    }
+}
+
 /// State for the spatial comment overlay.
 #[derive(Debug, Default)]
 pub enum OverlayState {
@@ -42,6 +136,9 @@ pub enum OverlayState {
         anchors: Vec<GeometryContext>,
         /// Whether the text field has been given focus since opening.
         focused: bool,
+        /// The candidate row the pointer is over, recomputed each frame so
+        /// the viewport and code panel can show what that line accounts for.
+        hovered_candidate: Option<ProvenanceEntry>,
     },
 }
 
@@ -68,6 +165,7 @@ impl OverlayState {
             text: String::new(),
             anchors: vec![context],
             focused: false,
+            hovered_candidate: None,
         };
     }
 
@@ -98,6 +196,18 @@ impl OverlayState {
         }
     }
 
+    /// The candidate line the pointer is resting on, if any. Hovering a
+    /// candidate is what shows the user which geometry that line accounts
+    /// for; the caller drives the highlights from this.
+    pub fn hovered_candidate(&self) -> Option<&ProvenanceEntry> {
+        match self {
+            Self::Active {
+                hovered_candidate, ..
+            } => hovered_candidate.as_ref(),
+            Self::Hidden => None,
+        }
+    }
+
     /// Close the overlay.
     pub fn close(&mut self) {
         *self = Self::Hidden;
@@ -117,6 +227,7 @@ impl OverlayState {
                 text,
                 anchors,
                 focused,
+                hovered_candidate,
             } => {
                 let mut action = OverlayAction::None;
                 let anchor_pos = egui::pos2(anchor.x, anchor.y);
@@ -192,6 +303,8 @@ impl OverlayState {
                                     )
                                     .wrap(),
                                 );
+
+                                show_candidate_choices(ui, anchors, hovered_candidate);
 
                                 let response = egui::Frame::new()
                                     .fill(theme::SUNKEN)
@@ -321,7 +434,7 @@ mod tests {
             identification,
             source_context: String::new(),
             neighbours: Vec::new(),
-        chosen_candidate: None,
+            chosen_candidate: None,
         };
 
         assert_eq!(
@@ -364,8 +477,213 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
-        chosen_candidate: None,
+            chosen_candidate: None,
         };
         assert!(context_summary(&context).starts_with("face 0: no source line"));
+    }
+
+    /// Lay the candidate rows out with the pointer at `pointer`, returning
+    /// which candidate the overlay published as hovered.
+    fn hover_at(
+        ctx: &egui::Context,
+        anchors: &mut [GeometryContext],
+        pointer: egui::Pos2,
+    ) -> Option<ProvenanceEntry> {
+        let mut hovered = None;
+        for _ in 0..2 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(pointer));
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    super::show_candidate_choices(ui, anchors, &mut hovered);
+                });
+            });
+        }
+        hovered
+    }
+
+    /// The first pointer y at which each candidate's row is hovered, so the
+    /// interaction tests do not depend on egui's exact row metrics.
+    fn row_positions(
+        ctx: &egui::Context,
+        anchors: &mut [GeometryContext],
+        candidates: &[ProvenanceEntry],
+    ) -> Vec<egui::Pos2> {
+        candidates
+            .iter()
+            .map(|candidate| {
+                (0..600)
+                    .map(|y| egui::pos2(20.0, y as f32))
+                    .find(|pointer| hover_at(ctx, anchors, *pointer).as_ref() == Some(candidate))
+                    .unwrap_or_else(|| {
+                        panic!("no row of the overlay publishes {candidate:?} on hover")
+                    })
+            })
+            .collect()
+    }
+
+    fn click_at(ctx: &egui::Context, anchors: &mut [GeometryContext], pointer: egui::Pos2) {
+        let mut hovered = None;
+        for pressed in [true, false] {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::PointerMoved(pointer));
+            input.events.push(egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    super::show_candidate_choices(ui, anchors, &mut hovered);
+                });
+            });
+        }
+    }
+
+    fn ambiguous_anchor() -> (GeometryContext, Vec<ProvenanceEntry>) {
+        let candidate =
+            |line: u32, operation_id: u64, relation: ProvenanceRelation| ProvenanceEntry {
+                source: SourceRef {
+                    line,
+                    code: format!("line {line}"),
+                },
+                operation: SemanticOperation::Box,
+                operation_id,
+                relation,
+            };
+        let candidates = vec![
+            candidate(2, 1, ProvenanceRelation::Generated),
+            candidate(7, 2, ProvenanceRelation::GeneratedDescendant),
+        ];
+        (
+            GeometryContext {
+                element: TopologyElement::Face(FaceId(2)),
+                provenance: LedgerValue::Ambiguous(candidates.clone()),
+                identification: Default::default(),
+                source_context: String::new(),
+                neighbours: Vec::new(),
+                chosen_candidate: None,
+            },
+            candidates,
+        )
+    }
+
+    #[test]
+    fn an_order_the_ledger_could_not_determine_is_offered_as_no_ranking() {
+        // Two candidates sharing a construction step: the ledger has
+        // nothing to rank on, and the heading must not imply it has.
+        let tied = [
+            ProvenanceEntry {
+                source: SourceRef {
+                    line: 4,
+                    code: "line 4".into(),
+                },
+                operation: SemanticOperation::Box,
+                operation_id: 3,
+                relation: ProvenanceRelation::Generated,
+            },
+            ProvenanceEntry {
+                source: SourceRef {
+                    line: 8,
+                    code: "line 8".into(),
+                },
+                operation: SemanticOperation::Box,
+                operation_id: 3,
+                relation: ProvenanceRelation::Modified,
+            },
+        ];
+        let ordering = cadmark_core::candidates::order_candidates(&tied);
+        let heading = super::candidate_heading("edge 5", tied.len(), ordering.ranked);
+        assert!(
+            heading.contains("cannot tell which is likeliest"),
+            "an undetermined order must reach the user as one: {heading}"
+        );
+        assert!(!heading.contains("Most likely first"));
+
+        // And the ranked case must say the opposite, or the sentence
+        // carries no information either way.
+        let (_, ranked_candidates) = ambiguous_anchor();
+        let ranked = cadmark_core::candidates::order_candidates(&ranked_candidates);
+        assert!(ranked.ranked);
+        let heading = super::candidate_heading("edge 5", ranked_candidates.len(), ranked.ranked);
+        assert!(heading.contains("Most likely first"), "{heading}");
+    }
+
+    #[test]
+    fn the_overlay_states_whether_one_line_or_every_line_will_be_sent() {
+        let (_, candidates) = ambiguous_anchor();
+        assert_eq!(
+            super::sending_note(None, candidates.len()),
+            "No line chosen: sending all 2 for the AI to decide."
+        );
+        assert_eq!(
+            super::sending_note(Some(&candidates[1]), candidates.len()),
+            "Sending line 7 alone."
+        );
+    }
+
+    #[test]
+    fn hovering_a_candidate_row_publishes_that_candidate_and_no_other() {
+        let ctx = egui::Context::default();
+        let (context, candidates) = ambiguous_anchor();
+        let mut anchors = vec![context];
+
+        let rows = row_positions(&ctx, &mut anchors, &candidates);
+
+        // Distinct rows, so the viewport and code panel can show one
+        // candidate's origin at a time rather than a merged set.
+        assert_ne!(rows[0], rows[1]);
+        assert_eq!(
+            hover_at(&ctx, &mut anchors, rows[0]).as_ref(),
+            Some(&candidates[0])
+        );
+        assert_eq!(
+            hover_at(&ctx, &mut anchors, rows[1]).as_ref(),
+            Some(&candidates[1])
+        );
+        assert_eq!(
+            hover_at(&ctx, &mut anchors, egui::pos2(20.0, 590.0)),
+            None,
+            "the pointer away from every row must publish no candidate"
+        );
+    }
+
+    #[test]
+    fn choosing_a_candidate_sets_the_anchor_choice_and_choosing_it_again_clears_it() {
+        let ctx = egui::Context::default();
+        let (context, candidates) = ambiguous_anchor();
+        let mut anchors = vec![context];
+
+        let rows = row_positions(&ctx, &mut anchors, &candidates);
+        assert_eq!(anchors[0].chosen_candidate, None);
+
+        click_at(&ctx, &mut anchors, rows[1]);
+        assert_eq!(
+            anchors[0].chosen_candidate.as_ref(),
+            Some(&candidates[1]),
+            "clicking a row must record it as the line to send alone"
+        );
+
+        click_at(&ctx, &mut anchors, rows[0]);
+        assert_eq!(anchors[0].chosen_candidate.as_ref(), Some(&candidates[0]));
+
+        click_at(&ctx, &mut anchors, rows[0]);
+        assert_eq!(
+            anchors[0].chosen_candidate, None,
+            "clicking the chosen row again must return to sending every candidate"
+        );
     }
 }
