@@ -711,6 +711,7 @@ dependencies = [
  "chrono",
  "egui",
  "log",
+ "serde_json",
 ]
 
 [[package]]

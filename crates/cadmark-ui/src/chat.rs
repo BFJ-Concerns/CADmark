@@ -1,19 +1,23 @@
 // Chat pane — the conversation, with each message shown for what it is.
 //
-// Four visual kinds: the user's chat (right-leaning card), spatial
-// comments (accent-tinted, with a chip naming the geometry and its source
-// line), the AI's replies (plain card), and notices from CADmark itself
-// (quiet, or red when something failed). Applied spatial comments are
-// dimmed and ticked.
+// The user's chat (right-leaning card), spatial comments (accent-tinted,
+// with a chip per anchor naming the element and its source line), the
+// AI's replies (plain card, growing as the turn streams), the tool calls
+// a turn made (one collapsed group, expandable to each call's input and
+// result), and notices from CADmark itself (quiet, or red when something
+// failed). While a turn runs, the pane shows what step it is on, how long
+// it has been running, when it last did something, and a Cancel button.
+
+use std::time::Instant;
 
 use cadmark_core::geometry::GeometryContext;
 use cadmark_core::ledger::LedgerValue;
-use cadmark_core::message::{Conversation, Message, MessageKind};
+use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
 use crate::theme;
 
-/// The short label beside a spatial comment: which element, and which line
-/// it came from when that is known.
+/// The short label beside a spatial comment's anchor: which element, and
+/// which line it came from when that is known.
 fn spatial_chip(context: &GeometryContext) -> String {
     let element = context.element.display_label();
     match &context.provenance {
@@ -30,14 +34,34 @@ fn spatial_chip(context: &GeometryContext) -> String {
     }
 }
 
-/// What the chat pane is waiting on, for the indicator under the messages.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What the pane is waiting on, for the indicator under the messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatActivity {
     Idle,
-    /// Waiting on the AI, then executing its code.
-    Generating,
+    /// An AI turn is running.
+    Turn(TurnStatus),
     /// Executing the script on disk.
     Building,
+}
+
+/// The running turn as the user watches it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnStatus {
+    /// What the turn is doing right now.
+    pub phase: String,
+    pub started: Instant,
+    /// When the turn last produced an event; a quiet stream shows as quiet.
+    pub last_event: Instant,
+}
+
+/// What the user did in the pane this frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    None,
+    /// The user submitted this text.
+    Send(String),
+    /// The user asked for the running turn to stop.
+    Cancel,
 }
 
 /// State for the chat pane UI.
@@ -45,7 +69,7 @@ pub enum ChatActivity {
 pub struct ChatPane {
     /// Current text in the input field.
     pub input_text: String,
-    /// What the worker is doing; input is held while it is busy.
+    /// What the worker is doing.
     pub activity: ChatActivity,
     /// Whether AI is configured. Without it the input explains why rather
     /// than sending a message nowhere.
@@ -79,12 +103,12 @@ impl ChatPane {
         self.focus_input = true;
     }
 
-    /// Render the chat pane. Returns Some(text) if the user submitted a message.
-    pub fn show(&mut self, ui: &mut egui::Ui, conversation: &Conversation) -> Option<String> {
+    /// Render the chat pane and report what the user did.
+    pub fn show(&mut self, ui: &mut egui::Ui, conversation: &Conversation) -> ChatAction {
         // The input sits in a bottom panel so it is laid out first and the
         // messages take whatever height remains: however tall the input
         // grows, the send row below it stays on screen.
-        let submitted = egui::TopBottomPanel::bottom("chat_input_panel")
+        let action = egui::TopBottomPanel::bottom("chat_input_panel")
             .frame(egui::Frame::NONE.inner_margin(egui::Margin {
                 left: 0,
                 right: 0,
@@ -99,7 +123,7 @@ impl ChatPane {
             .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| self.show_messages(ui, conversation));
 
-        submitted
+        action
     }
 
     fn show_messages(&mut self, ui: &mut egui::Ui, conversation: &Conversation) {
@@ -118,11 +142,9 @@ impl ChatPane {
                     show_message(ui, message, width);
                 }
 
-                match self.activity {
+                match &self.activity {
                     ChatActivity::Idle => {}
-                    ChatActivity::Generating => {
-                        activity_row(ui, "Thinking about the model\u{2026}")
-                    }
+                    ChatActivity::Turn(status) => activity_row(ui, &turn_status_line(status)),
                     ChatActivity::Building => activity_row(ui, "Building the model\u{2026}"),
                 }
                 if new_message {
@@ -133,15 +155,17 @@ impl ChatPane {
     }
 
     /// The input box and the send row under it. The box grows with its
-    /// text up to a cap, then scrolls inside itself.
-    fn show_input(&mut self, ui: &mut egui::Ui) -> Option<String> {
-        let mut submitted = None;
+    /// text up to a cap, then scrolls inside itself. Typing is never
+    /// blocked by a running turn: the text waits for the turn to end.
+    fn show_input(&mut self, ui: &mut egui::Ui) -> ChatAction {
+        let mut action = ChatAction::None;
+        let turn_running = matches!(self.activity, ChatActivity::Turn(_));
         let busy = self.activity != ChatActivity::Idle;
 
         let hint = if !self.ai_available {
-            "AI is not configured. Add a cadmark.json to chat."
-        } else if busy {
-            "Waiting for the current step to finish\u{2026}"
+            "AI is not configured. Open Settings to add a provider."
+        } else if turn_running {
+            "The AI is working; your next message waits for it\u{2026}"
         } else {
             "Describe what to build, or change\u{2026}"
         };
@@ -170,7 +194,7 @@ impl ChatPane {
                                 .hint_text(hint)
                                 .desired_rows(min_rows)
                                 .desired_width(f32::INFINITY)
-                                .interactive(can_send)
+                                .interactive(self.ai_available)
                                 .return_key(egui::KeyboardShortcut::new(
                                     egui::Modifiers::SHIFT,
                                     egui::Key::Enter,
@@ -181,7 +205,7 @@ impl ChatPane {
             })
             .inner;
 
-        if self.focus_input && can_send {
+        if self.focus_input && self.ai_available {
             response.request_focus();
             self.focus_input = false;
         }
@@ -197,20 +221,48 @@ impl ChatPane {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let has_text = !self.input_text.trim().is_empty();
+                if turn_running {
+                    if ui
+                        .add(egui::Button::new(egui::RichText::new("Cancel").color(theme::ERROR)))
+                        .on_hover_text("Stop the AI and put the model back as it was")
+                        .clicked()
+                    {
+                        action = ChatAction::Cancel;
+                    }
+                }
                 let send = ui.add_enabled(
                     can_send && has_text,
                     egui::Button::new(egui::RichText::new("Send").color(theme::TEXT_STRONG))
                         .fill(theme::ACCENT.gamma_multiply(0.55)),
                 );
                 if (send.clicked() || enter_sent) && can_send && has_text {
-                    submitted = Some(self.input_text.trim().to_string());
+                    action = ChatAction::Send(self.input_text.trim().to_string());
                     self.input_text.clear();
                     self.focus_input = true;
                 }
             });
         });
 
-        submitted
+        action
+    }
+}
+
+/// "looking up build123d docs · 1m 12s · last event 3s ago".
+fn turn_status_line(status: &TurnStatus) -> String {
+    let quiet = status.last_event.elapsed().as_secs();
+    let mut line = format!("{} · {}", status.phase, elapsed(status.started));
+    if quiet >= 5 {
+        line.push_str(&format!(" · quiet for {quiet}s"));
+    }
+    line
+}
+
+fn elapsed(since: Instant) -> String {
+    let seconds = since.elapsed().as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {:02}s", seconds / 60, seconds % 60)
     }
 }
 
@@ -234,8 +286,6 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
             let inner = card_inner(&frame);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                 frame.show(ui, |ui| {
-                    // The card sits to the right; its text still reads
-                    // from the left.
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.set_max_width(inner * 0.85);
                         ui.add(egui::Label::new(&message.text).wrap());
@@ -243,7 +293,7 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
                 });
             });
         }
-        MessageKind::SpatialComment { context, applied } => {
+        MessageKind::SpatialComment { anchors, applied } => {
             let tint = if *applied {
                 theme::SPATIAL.gamma_multiply(0.55)
             } else {
@@ -257,8 +307,10 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
                         ui.set_max_width(inner * 0.85);
                         ui.set_min_width(inner * 0.55);
                         ui.horizontal_wrapped(|ui| {
-                            theme::chip(ui, &spatial_chip(context), tint)
-                                .on_hover_text(context.provenance.describe());
+                            for anchor in anchors {
+                                theme::chip(ui, &spatial_chip(anchor), tint)
+                                    .on_hover_text(anchor.provenance.describe());
+                            }
                             if *applied {
                                 ui.label(
                                     egui::RichText::new("\u{2713} applied")
@@ -294,6 +346,7 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
                 ui.add(egui::Label::new(&message.text).wrap());
             });
         }
+        MessageKind::ToolCalls(activities) => show_tool_calls(ui, message, activities, width),
         MessageKind::Notice { is_error } => {
             let (tint, text_colour) = if *is_error {
                 (theme::ERROR, theme::TEXT)
@@ -325,14 +378,135 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
     }
 }
 
+/// A run of tool calls: one collapsed line naming what was done, opening
+/// to each call's input and result.
+fn show_tool_calls(ui: &mut egui::Ui, message: &Message, activities: &[ToolActivity], width: f32) {
+    let header = tool_group_label(activities);
+    egui::CollapsingHeader::new(
+        egui::RichText::new(header)
+            .small()
+            .color(theme::TEXT_MUTED),
+    )
+    .id_salt(message.id.0)
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.set_max_width(width);
+        for activity in activities {
+            let tint = if activity.failed {
+                theme::WARNING
+            } else {
+                theme::TEXT_MUTED
+            };
+            egui::CollapsingHeader::new(
+                egui::RichText::new(tool_call_label(activity))
+                    .small()
+                    .color(tint),
+            )
+            .id_salt((message.id.0, &activity.call_id))
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Input").small().strong().color(theme::TEXT_MUTED));
+                code_block(ui, &tool_input_text(activity));
+                ui.label(egui::RichText::new("Result").small().strong().color(theme::TEXT_MUTED));
+                code_block(
+                    ui,
+                    activity.output.as_deref().unwrap_or("(still running)"),
+                );
+            });
+        }
+    });
+}
+
+fn code_block(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(theme::SUNKEN)
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS))
+        .inner_margin(egui::Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(text).monospace().color(theme::TEXT)).wrap(),
+            );
+        });
+}
+
+/// "3 steps: looked up docs, ran the script ×2".
+fn tool_group_label(activities: &[ToolActivity]) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for activity in activities {
+        match counts.iter_mut().find(|(tool, _)| *tool == activity.tool) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((&activity.tool, 1)),
+        }
+    }
+    let parts: Vec<String> = counts
+        .into_iter()
+        .map(|(tool, count)| {
+            let verb = tool_verb(tool);
+            if count > 1 {
+                format!("{verb} \u{00d7}{count}")
+            } else {
+                verb.to_string()
+            }
+        })
+        .collect();
+    let steps = activities.len();
+    format!(
+        "{steps} step{}: {}",
+        if steps == 1 { "" } else { "s" },
+        parts.join(", ")
+    )
+}
+
+fn tool_call_label(activity: &ToolActivity) -> String {
+    let outcome = match (&activity.output, activity.failed) {
+        (None, _) => "running",
+        (Some(_), true) => "failed",
+        (Some(_), false) => "ok",
+    };
+    let took = match (activity.finished, activity.started) {
+        (Some(finished), started) => {
+            let ms = (finished - started).num_milliseconds().max(0);
+            if ms < 1000 {
+                format!("{ms} ms")
+            } else {
+                format!("{:.1} s", ms as f64 / 1000.0)
+            }
+        }
+        (None, _) => String::new(),
+    };
+    let mut label = format!("{} \u{2014} {outcome}", tool_verb(&activity.tool));
+    if !took.is_empty() {
+        label.push_str(&format!(" in {took}"));
+    }
+    label
+}
+
+fn tool_verb(tool: &str) -> &str {
+    match tool {
+        "run_script" => "ran the script",
+        "lookup_docs" => "looked up docs",
+        "render_view" => "looked at the render",
+        other => other,
+    }
+}
+
+/// The arguments as the user reads them: a script shows as its code, the
+/// rest as pretty JSON.
+fn tool_input_text(activity: &ToolActivity) -> String {
+    match activity.arguments.get("code").and_then(|code| code.as_str()) {
+        Some(code) => code.to_string(),
+        None => serde_json::to_string_pretty(&activity.arguments).unwrap_or_default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use cadmark_core::geometry::{EdgeId, FaceId, GeometryContext, TopologyElement};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
+    use cadmark_core::message::ToolActivity;
 
-    use super::spatial_chip;
+    use super::*;
 
     fn entry(line: u32) -> ProvenanceEntry {
         ProvenanceEntry {
@@ -366,5 +540,54 @@ mod tests {
             identification: Default::default(),
         };
         assert_eq!(spatial_chip(&untraced), "edge 2 · untraced");
+    }
+
+    fn activity(tool: &str, output: Option<&str>, failed: bool) -> ToolActivity {
+        let started = chrono::Utc::now();
+        ToolActivity {
+            call_id: format!("call-{tool}"),
+            tool: tool.into(),
+            arguments: serde_json::json!({"code": "X = 1"}),
+            output: output.map(str::to_string),
+            failed,
+            started,
+            finished: output.map(|_| started + chrono::Duration::milliseconds(1500)),
+        }
+    }
+
+    #[test]
+    fn a_tool_group_reads_as_a_count_of_what_was_done() {
+        let activities = vec![
+            activity("lookup_docs", Some("docs"), false),
+            activity("run_script", Some("boom"), true),
+            activity("run_script", Some("ok"), false),
+        ];
+        assert_eq!(
+            tool_group_label(&activities),
+            "3 steps: looked up docs, ran the script \u{00d7}2"
+        );
+        assert_eq!(tool_call_label(&activities[1]), "ran the script \u{2014} failed in 1.5 s");
+        assert_eq!(
+            tool_call_label(&activity("run_script", None, false)),
+            "ran the script \u{2014} running"
+        );
+        assert_eq!(tool_input_text(&activities[1]), "X = 1");
+    }
+
+    #[test]
+    fn the_status_line_names_the_phase_and_flags_a_quiet_stream() {
+        let now = Instant::now();
+        let busy = TurnStatus {
+            phase: "thinking".into(),
+            started: now,
+            last_event: now,
+        };
+        assert_eq!(turn_status_line(&busy), "thinking · 0s");
+        let quiet = TurnStatus {
+            phase: "thinking".into(),
+            started: now - std::time::Duration::from_secs(75),
+            last_event: now - std::time::Duration::from_secs(9),
+        };
+        assert_eq!(turn_status_line(&quiet), "thinking · 1m 15s · quiet for 9s");
     }
 }
