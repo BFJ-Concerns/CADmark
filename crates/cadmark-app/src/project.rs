@@ -20,7 +20,7 @@ use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
 use cadmark_renderer::camera::Bounds3;
 
 use crate::orchestrator::{OrchestratorCommand, OrchestratorResult, spawn_orchestrator};
-use crate::turn::TurnInput;
+use crate::turn::{RenderSource, TurnInput};
 
 /// The one script a project folder holds at present.
 pub const SCRIPT_FILENAME: &str = "part.py";
@@ -97,7 +97,12 @@ pub struct Project {
 impl Project {
     /// Open a folder: initialise its git repository, load its history and
     /// conversation, start a worker, and ask for the script to be built.
-    pub fn open(dir: PathBuf, ai: Result<AiServices, String>, limits: ExecutionLimits) -> Self {
+    pub fn open(
+        dir: PathBuf,
+        ai: Result<AiServices, String>,
+        limits: ExecutionLimits,
+        render: Box<dyn RenderSource>,
+    ) -> Self {
         let dir = dir.canonicalize().unwrap_or(dir);
 
         if let Err(e) = crate::git_ops::ensure_repo(&dir) {
@@ -124,7 +129,7 @@ impl Project {
             }
         };
         let (cmd_tx, result_rx) =
-            spawn_orchestrator(dir.clone(), SCRIPT_FILENAME.to_string(), ai, limits);
+            spawn_orchestrator(dir.clone(), SCRIPT_FILENAME.to_string(), ai, limits, render);
 
         let history = match crate::git_ops::list_microversions(&dir, 100) {
             Ok(versions) => VersionHistory::from_versions(versions),

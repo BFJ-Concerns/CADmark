@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- The AI can look at the model it just built: it renders the current
+  shape offscreen — shaded, with edges, framed to the model, at the
+  viewport's resolution — from any standard view or your current
+  camera, without disturbing what you see
+- A model that cannot read images is told plainly that the render
+  tool is unavailable, rather than left to infer its absence
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally

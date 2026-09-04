@@ -15,7 +15,7 @@ use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 
 use crate::turn::{
-    DocSource, NoRender, ScriptExecutor, TurnEvent, TurnInput, TurnOutcome, TurnRunner,
+    DocSource, RenderSource, ScriptExecutor, TurnEvent, TurnInput, TurnOutcome, TurnRunner,
 };
 
 /// Commands sent from the UI thread to the worker.
@@ -97,6 +97,10 @@ struct Orchestrator {
     /// The AI services, absent when no usable configuration was found. The
     /// model still loads and renders without them.
     ai: Result<AiServices, String>,
+    /// What answers the render tool. The viewport's offscreen renderer in
+    /// production; `NoRender` where the application has no GPU to render
+    /// with.
+    render: Box<dyn RenderSource>,
 }
 
 impl Orchestrator {
@@ -144,12 +148,11 @@ impl Orchestrator {
             }
         };
         let script_path = self.script_path();
-        let mut render = NoRender;
         let mut runner = TurnRunner {
             model: &ai.model,
             executor: &mut self.executor,
             docs: &ai.doc_lookup,
-            render: &mut render,
+            render: self.render.as_mut(),
             script_path,
             cancel,
         };
@@ -180,12 +183,14 @@ impl Orchestrator {
 /// Returns (sender, receiver) for the UI thread to use.
 ///
 /// `ai` is the AI configuration outcome; when it is an error the worker
-/// still executes scripts and answers a turn with the reason.
+/// still executes scripts and answers a turn with the reason. `render`
+/// answers the render tool from the UI thread's published scene.
 pub fn spawn_orchestrator(
     project_dir: PathBuf,
     script_filename: String,
     ai: Result<AiServices, String>,
     limits: ExecutionLimits,
+    render: Box<dyn RenderSource>,
 ) -> (
     mpsc::Sender<OrchestratorCommand>,
     mpsc::Receiver<OrchestratorResult>,
@@ -215,6 +220,7 @@ pub fn spawn_orchestrator(
                         limits,
                     },
                     ai,
+                    render,
                 };
 
                 while let Ok(command) = cmd_rx.recv() {

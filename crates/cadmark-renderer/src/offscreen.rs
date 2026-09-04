@@ -337,7 +337,13 @@ mod tests {
                 || pixel[1].abs_diff(background[1]) > 6
                 || pixel[2].abs_diff(background[2]) > 6
         };
-        let model_pixels = image.rgba.chunks_exact(4).filter(|p| is_model(p)).count();
+        let model_pixels = image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| is_model(p.as_slice()))
+            .count();
         let coverage = model_pixels as f32 / (width * height) as f32;
         assert!(
             coverage > 0.2,
@@ -348,8 +354,10 @@ mod tests {
         // from one another, and the wireframe adds darker edge pixels.
         let mut levels: Vec<u8> = image
             .rgba
-            .chunks_exact(4)
-            .filter(|p| is_model(p))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| is_model(p.as_slice()))
             .map(|p| p[0])
             .collect();
         levels.sort_unstable();
@@ -385,7 +393,9 @@ mod tests {
         assert!(
             image
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|pixel| pixel[2] > 250 && pixel[0] < 5),
             "an empty scene rendered something other than the clear colour"
         );

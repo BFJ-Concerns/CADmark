@@ -9,6 +9,7 @@ mod app;
 pub mod git_ops;
 pub mod orchestrator;
 mod project;
+mod render_source;
 pub mod turn;
 mod user_settings;
 mod viewport;

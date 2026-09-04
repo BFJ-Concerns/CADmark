@@ -27,7 +27,8 @@ use cadmark_ui::view_gizmo::GizmoAction;
 
 use crate::orchestrator::OrchestratorResult;
 use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
-use crate::turn::{TurnEvent, TurnInput, TurnOutcome, reference_images};
+use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
+use crate::turn::{NoRender, RenderSource, TurnEvent, TurnInput, TurnOutcome, reference_images};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::viewport::{
     PickTransition, ViewportCallback, ViewportResources, completed_pick_transition,
@@ -102,6 +103,9 @@ pub struct CadmarkApp {
     /// Whether a mesh has been uploaded to the GPU.
     has_mesh: bool,
     wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
+    /// What the worker thread renders for the AI: the mesh, camera and
+    /// viewport size this thread last showed.
+    scene: SceneHandle,
     /// Last outcome — shown on the viewport and in the status bar.
     status: Option<Status>,
     turn: Option<TurnRecord>,
@@ -131,10 +135,12 @@ impl CadmarkApp {
             rs.renderer.write().callback_resources.insert(resources);
         }
 
+        let scene = SceneHandle::new();
         let project = Project::open(
             project_dir,
             ai_services(&settings, settings_store.as_ref()),
             settings.limits,
+            render_source(&scene, wgpu_render_state.as_ref()),
         );
 
         let mut app = Self {
@@ -158,6 +164,7 @@ impl CadmarkApp {
             last_hover_probe: None,
             has_mesh: false,
             wgpu_render_state,
+            scene,
             status,
             turn: None,
         };
@@ -202,6 +209,7 @@ impl CadmarkApp {
             project_dir,
             ai_services(&self.settings, self.settings_store.as_ref()),
             self.settings.limits,
+            render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
         self.chat = ChatPane::new();
         self.chat.ai_available = self.project.ai_model.is_some();
@@ -537,7 +545,10 @@ impl CadmarkApp {
         self.has_mesh = true;
         // A new mesh under a resting cursor must be picked afresh.
         self.last_hover_probe = None;
-        if let Some(bounds) = self.project.install_model(model, source) {
+        let mesh = std::sync::Arc::new(model.mesh.clone());
+        let bounds = self.project.install_model(model, source);
+        self.scene.set_mesh(Some((mesh, bounds)));
+        if let Some(bounds) = bounds {
             self.pending_camera_bounds = Some(bounds);
         }
     }
@@ -555,6 +566,7 @@ impl CadmarkApp {
     fn clear_loaded_model(&mut self) {
         self.pending_camera_bounds = None;
         self.project.clear_model();
+        self.scene.set_mesh(None);
         self.has_mesh = false;
         self.pending_pick = None;
         self.pick_in_flight = None;
@@ -1058,6 +1070,10 @@ impl CadmarkApp {
             if let Some(bounds) = self.pending_camera_bounds.take() {
                 self.renderer.camera.frame_bounds(bounds, aspect);
             }
+            // What the AI is shown when it asks for a render: this
+            // thread's camera and viewport size, never its GPU target.
+            self.scene
+                .set_view(self.renderer.camera.clone(), viewport_size);
 
             let to_pixels = |local: egui::Vec2| ((local.x * ppp) as u32, (local.y * ppp) as u32);
             let pick_request = self
@@ -1184,6 +1200,25 @@ fn standard_view(view: toolbar::StandardView) -> StandardView {
 }
 
 /// Construct the AI services from the user's settings, or say why not.
+/// What answers the AI's render tool for one project: the viewport's
+/// offscreen renderer where there is a GPU to render with, and the
+/// stand-in that says so honestly where there is not.
+fn render_source(
+    scene: &SceneHandle,
+    render_state: Option<&eframe::egui_wgpu::RenderState>,
+) -> Box<dyn RenderSource> {
+    match render_state {
+        Some(state) => Box::new(ViewportRender::new(
+            scene.clone(),
+            RenderGpu {
+                device: state.device.clone(),
+                queue: state.queue.clone(),
+            },
+        )),
+        None => Box::new(NoRender),
+    }
+}
+
 fn ai_services(
     settings: &UserSettings,
     store: Option<&SettingsStore>,

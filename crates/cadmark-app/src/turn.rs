@@ -23,7 +23,7 @@ use cadmark_bridge::backend::{
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
 use cadmark_bridge::tools::{
     LOOKUP_DOCS, LookupDocsArgs, RENDER_VIEW, RUN_SCRIPT, RenderView, RenderViewArgs,
-    RunScriptArgs, tools_for,
+    RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::message::{Conversation, MessageKind};
@@ -127,7 +127,7 @@ pub struct TurnRunner<
     M: TurnModel + ?Sized,
     E: ScriptExecutor,
     D: DocSource + ?Sized,
-    R: RenderSource,
+    R: RenderSource + ?Sized,
 > {
     pub model: &'a M,
     pub executor: &'a mut E,
@@ -137,7 +137,7 @@ pub struct TurnRunner<
     pub cancel: CancelFlag,
 }
 
-impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderSource>
+impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderSource + ?Sized>
     TurnRunner<'_, M, E, D, R>
 {
     /// Run one turn. `conversation` is the history the model is shown;
@@ -156,6 +156,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             images: input.images.clone(),
         });
         let tools = tools_for(self.model.accepts_images());
+        let instructions = instructions_for(self.model.accepts_images());
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
@@ -166,7 +167,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             }
             emit(TurnEvent::Phase("thinking".to_string()));
             let request = ModelRequest {
-                instructions: SYSTEM_PROMPT.to_string(),
+                instructions: instructions.clone(),
                 items: items.clone(),
                 tools: tools.clone(),
             };
@@ -509,6 +510,15 @@ fn describe_tool(name: &str) -> &str {
 
 /// The view a render call named, for the caption; a call whose arguments
 /// did not parse never reaches here.
+/// The instructions one turn is run with: the system prompt, plus what
+/// the model is owed about any tool it is not being offered.
+fn instructions_for(accepts_images: bool) -> String {
+    match unavailable_tools_note(accepts_images) {
+        Some(note) => format!("{SYSTEM_PROMPT}\n\n{note}"),
+        None => SYSTEM_PROMPT.to_string(),
+    }
+}
+
 fn render_view_of(arguments: &serde_json::Value) -> RenderView {
     serde_json::from_value::<RenderViewArgs>(arguments.clone())
         .map(|args| args.view)
@@ -562,6 +572,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
     use cadmark_bridge::backend::{DeltaSink, ModelResponse};
     use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
     use cadmark_core::ledger::ProvenanceLedger;
@@ -1064,6 +1075,156 @@ mod tests {
             &second.items[3],
             ModelItem::User { text, images } if text.contains("top") && images.len() == 1
         ));
+    }
+
+    /// A unit cube standing in for a model: enough geometry to fill a
+    /// framed render, with the normals the shading pass needs.
+    fn cube_mesh() -> cadmark_core::mesh::TessellatedMesh {
+        use cadmark_core::mesh::{MeshEdge, MeshVertex};
+
+        let corners = [
+            [-0.5f32, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
+        ];
+        let faces: [([usize; 4], [f32; 3]); 6] = [
+            ([0, 3, 2, 1], [0.0, 0.0, -1.0]),
+            ([4, 5, 6, 7], [0.0, 0.0, 1.0]),
+            ([0, 1, 5, 4], [0.0, -1.0, 0.0]),
+            ([2, 3, 7, 6], [0.0, 1.0, 0.0]),
+            ([1, 2, 6, 5], [1.0, 0.0, 0.0]),
+            ([3, 0, 4, 7], [-1.0, 0.0, 0.0]),
+        ];
+
+        let mut mesh = cadmark_core::mesh::TessellatedMesh::default();
+        for (face_id, (quad, normal)) in faces.iter().enumerate() {
+            let base = mesh.vertices.len() as u32;
+            for &corner in quad {
+                mesh.vertices.push(MeshVertex {
+                    position: corners[corner],
+                    normal: *normal,
+                });
+            }
+            mesh.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            mesh.face_ids
+                .extend_from_slice(&[face_id as u32, face_id as u32]);
+        }
+        for (edge_id, (a, b)) in [(0, 1), (1, 2), (2, 3), (3, 0)].iter().enumerate() {
+            mesh.edges.push(MeshEdge {
+                points: vec![corners[*a], corners[*b]],
+                edge_id: edge_id as u32,
+            });
+        }
+        mesh
+    }
+
+    /// A device for the GPU-backed test, or `None` where no adapter is
+    /// available.
+    async fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await?;
+        adapter
+            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .await
+            .ok()
+    }
+
+    #[tokio::test]
+    async fn the_model_is_shown_a_real_render_of_what_is_on_screen() {
+        let Some((device, queue)) = gpu().await else {
+            eprintln!("no GPU adapter: skipping the production render test");
+            return;
+        };
+        let scene = SceneHandle::new();
+        scene.set_mesh(Some((
+            std::sync::Arc::new(cube_mesh()),
+            Some(cadmark_renderer::camera::Bounds3 {
+                min: [-0.5, -0.5, -0.5],
+                max: [0.5, 0.5, 0.5],
+            }),
+        )));
+        scene.set_view(cadmark_renderer::camera::Camera::default(), (800, 600));
+        let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
+
+        let render_call = Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: RENDER_VIEW.into(),
+                arguments: serde_json::json!({"view": "front"}),
+            }],
+        });
+        let mut model = ScriptedModel::new([render_call, text("Looks right.")]);
+        model.accepts_images = true;
+        let project = tempfile::tempdir().unwrap();
+        let mut executor = FakeExecutor::new([]);
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            script_path: project.path().join("part.py"),
+            cancel: CancelFlag::new(),
+        };
+        let outcome = runner
+            .run(&Conversation::new(), &chat("check it"), |_event| {})
+            .await;
+        assert_eq!(outcome, TurnOutcome::Answered);
+
+        let requests = model.requests.lock().unwrap();
+        let ModelItem::User { text, images } = &requests[1].items[3] else {
+            panic!("the render is shown as a user item");
+        };
+        assert!(text.contains("front"));
+        let image = images.first().expect("an image item, not an apology");
+        assert_eq!(image.media_type, "image/png");
+
+        // The pixels are the viewport's own, and the model is framed to
+        // fill them rather than sitting in a corner: neither is reachable
+        // from the stand-in source, which returns an error and no image.
+        let decoder = png::Decoder::new(std::io::Cursor::new(&image.bytes));
+        let mut reader = decoder.read_info().expect("PNG header");
+        let mut pixels = vec![0; reader.output_buffer_size().expect("PNG buffer size")];
+        let info = reader.next_frame(&mut pixels).expect("PNG data");
+        assert_eq!((info.width, info.height), (800, 600));
+        let total = (info.width * info.height) as f32;
+        let background = [36u8, 38, 43];
+        let covered = pixels[..info.buffer_size()]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| {
+                [p[0], p[1], p[2]]
+                    .iter()
+                    .zip(background)
+                    .any(|(got, base)| got.abs_diff(base) > 8)
+            })
+            .count() as f32;
+        assert!(
+            covered / total > 0.2,
+            "the model fills the frame, covered {:.3}",
+            covered / total
+        );
+    }
+
+    #[test]
+    fn a_text_only_model_is_told_the_render_tool_is_unavailable() {
+        let blind = instructions_for(false);
+        assert!(blind.starts_with(SYSTEM_PROMPT));
+        assert!(blind.contains(RENDER_VIEW) && blind.contains("unavailable"));
+        assert_eq!(instructions_for(true), SYSTEM_PROMPT);
     }
 
     #[test]
