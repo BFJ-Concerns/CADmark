@@ -730,6 +730,42 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
 mod tests {
     use super::*;
 
+    /// Compile a shader and report the byte size its `Uniforms` struct
+    /// occupies, which is what the uniform buffer must match.
+    fn uniform_struct_size(source: &str) -> u32 {
+        let module = naga::front::wgsl::parse_str(source).expect("shader must compile");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        );
+        validator.validate(&module).expect("shader must validate");
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("shader types must lay out");
+        let (handle, _) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("Uniforms"))
+            .expect("shader must declare Uniforms");
+        layouter[handle].size
+    }
+
+    #[test]
+    fn every_shader_binding_mesh_uniforms_declares_the_same_layout() {
+        // A field added on one side and not the other renders garbage
+        // silently, so the sizes are compared rather than trusted.
+        let expected = std::mem::size_of::<MeshUniforms>() as u32;
+        assert_eq!(
+            uniform_struct_size(include_str!("shaders/mesh.wgsl")),
+            expected
+        );
+        assert_eq!(
+            uniform_struct_size(include_str!("shaders/wireframe.wgsl")),
+            expected
+        );
+    }
+
     #[test]
     fn a_highlight_set_packs_into_the_uniform_rows_the_shaders_read() {
         let mut renderer = Renderer::new();
