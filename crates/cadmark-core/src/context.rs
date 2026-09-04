@@ -419,4 +419,38 @@ mod tests {
         assert!(context.source_context.contains("1 | with BuildPart():"));
         assert!(context.source_context.contains("2 |     Box(1, 1, 1)"));
     }
+
+    #[test]
+    fn a_resolved_context_takes_the_sketch_route_of_its_own_element() {
+        let mut lineage = SketchLineageLedger::new();
+        lineage.record_face(
+            FaceId(1),
+            SketchLineage::Resolved(crate::sketch_lineage::SketchSource {
+                source: SourceRef {
+                    line: 5,
+                    code: "Rectangle(20, 10)".to_string(),
+                },
+                object: "Rectangle".to_string(),
+            }),
+        );
+
+        let context = |element| GeometryContext {
+            sketch: SketchLineage::default(),
+            element,
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
+        };
+
+        let drawn = with_sketch_route(context(TopologyElement::Face(FaceId(1))), &lineage);
+        assert_eq!(
+            drawn.sketch.resolved().map(|source| source.source.line),
+            Some(5),
+        );
+        // A different element must not inherit the only route on record.
+        let other = with_sketch_route(context(TopologyElement::Face(FaceId(2))), &lineage);
+        assert_eq!(other.sketch.resolved(), None);
+        assert!(other.sketch.no_route().is_some());
+    }
 }

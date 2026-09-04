@@ -77,6 +77,8 @@ fn render_anchor(context: &GeometryContext) -> String {
                 .join(", "),
         );
     }
+    out.push_str("\n    sketch: ");
+    out.push_str(&context.sketch.describe());
     out.push_str("\n    surrounding code:\n");
     if context.source_context.trim().is_empty() {
         out.push_str("The executed script text is unavailable.");
@@ -182,6 +184,48 @@ mod tests {
         assert!(text.contains("lines 1-3:\n1 | from build123d import *"));
         assert!(text.contains("neighbours: edge 8"));
         assert!(text.ends_with("\nround this"));
+    }
+
+    #[test]
+    fn an_anchor_carries_its_sketch_route_or_says_there_is_none() {
+        let anchor = |sketch: cadmark_core::sketch_lineage::SketchLineage| GeometryContext {
+            sketch,
+            element: TopologyElement::Face(FaceId(0)),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: "1 | from build123d import *".into(),
+            neighbours: Vec::new(),
+        };
+
+        let drawn = render_comment(&GroundedComment {
+            text: "widen this".into(),
+            anchors: vec![anchor(cadmark_core::sketch_lineage::SketchLineage::Resolved(
+                cadmark_core::sketch_lineage::SketchSource {
+                    source: SourceRef {
+                        line: 5,
+                        code: "Rectangle(20, 10)".into(),
+                    },
+                    object: "Rectangle".into(),
+                },
+            ))],
+        });
+        assert!(
+            drawn.contains("sketch: drawn by Rectangle at line 5"),
+            "{drawn}",
+        );
+
+        // The model must be told the route is absent, not left to infer a
+        // line from the surrounding code.
+        let unreachable = render_comment(&GroundedComment {
+            text: "widen this".into(),
+            anchors: vec![anchor(cadmark_core::sketch_lineage::SketchLineage::NoRoute(
+                cadmark_core::sketch_lineage::NoSketchRoute::CleanUpStep,
+            ))],
+        });
+        assert!(
+            unreachable.contains("sketch: no sketch route:"),
+            "{unreachable}",
+        );
     }
 
     #[test]
