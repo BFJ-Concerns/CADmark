@@ -136,6 +136,7 @@ mod tests {
             text: "round this".into(),
             anchors: vec![
                 GeometryContext {
+                    sketch: Default::default(),
                     element: TopologyElement::Face(FaceId(3)),
                     provenance: LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
                     identification,
@@ -143,6 +144,7 @@ mod tests {
                     neighbours: vec![TopologyElement::Edge(EdgeId(1))],
                 },
                 GeometryContext {
+                    sketch: Default::default(),
                     element: TopologyElement::Edge(EdgeId(4)),
                     provenance: LedgerValue::Ambiguous(vec![
                         entry(2, SemanticOperation::Box),
@@ -156,6 +158,7 @@ mod tests {
                     ],
                 },
                 GeometryContext {
+                    sketch: Default::default(),
                     element: TopologyElement::Edge(EdgeId(9)),
                     provenance: LedgerValue::Untraced,
                     identification: Default::default(),
@@ -186,6 +189,7 @@ mod tests {
         let text = render_comment(&GroundedComment {
             text: "adjust this".into(),
             anchors: vec![GeometryContext {
+                sketch: Default::default(),
                 element: TopologyElement::Face(FaceId(0)),
                 provenance: LedgerValue::Untraced,
                 identification: Default::default(),

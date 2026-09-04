@@ -308,6 +308,7 @@ mod tests {
         let mut identification = std::collections::HashMap::new();
         identification.insert("surface".to_string(), "plane".to_string());
         let context = GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(2)),
             provenance: LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
@@ -333,6 +334,7 @@ mod tests {
     fn clicking_more_geometry_adds_anchors_and_clicking_again_removes_them() {
         use cadmark_core::geometry::{EdgeId, ScreenPosition};
         let anchor = |element: TopologyElement| GeometryContext {
+            sketch: Default::default(),
             element,
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -357,6 +359,7 @@ mod tests {
     #[test]
     fn overlay_summary_admits_an_untraced_source() {
         let context = GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(0)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),

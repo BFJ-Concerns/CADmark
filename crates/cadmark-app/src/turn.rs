@@ -1444,6 +1444,7 @@ mod tests {
         use cadmark_core::geometry::{EdgeId, FaceId, GeometryContext, TopologyElement};
         use cadmark_core::ledger::LedgerValue;
         let anchor = |element: TopologyElement| GeometryContext {
+            sketch: Default::default(),
             element,
             provenance: LedgerValue::Untraced,
             identification: Default::default(),

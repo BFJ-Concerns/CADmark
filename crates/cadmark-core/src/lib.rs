@@ -12,4 +12,5 @@ pub mod limits;
 pub mod mesh;
 pub mod message;
 pub mod pending_comment;
+pub mod sketch_lineage;
 pub mod version;

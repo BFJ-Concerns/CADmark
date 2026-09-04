@@ -24,6 +24,56 @@ impl TopologyElement {
     }
 }
 
+/// What a sketch object drew, as the user points at it: the curves
+/// themselves, the corners where they meet, and the regions they enclose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SketchElementKind {
+    Curve,
+    Corner,
+    Region,
+}
+
+impl SketchElementKind {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Curve => "curve",
+            Self::Corner => "corner",
+            Self::Region => "region",
+        }
+    }
+}
+
+/// An element of a sketch the user can select. Numbered per kind in the
+/// order the script drew them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SketchElement {
+    pub kind: SketchElementKind,
+    pub index: u32,
+}
+
+impl SketchElement {
+    /// Plain-language label such as "sketch curve 3".
+    pub fn display_label(&self) -> String {
+        format!("sketch {} {}", self.kind.display_name(), self.index)
+    }
+}
+
+/// What a click landed on: a piece of the solid, or a piece of a sketch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickedElement {
+    Solid(TopologyElement),
+    Sketch(SketchElement),
+}
+
+impl PickedElement {
+    pub fn display_label(&self) -> String {
+        match self {
+            Self::Solid(element) => element.display_label(),
+            Self::Sketch(element) => element.display_label(),
+        }
+    }
+}
+
 /// Unique identifier for a face in the rendered mesh.
 /// Assigned during tessellation and used for GPU picking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -77,6 +127,11 @@ pub struct GeometryContext {
     /// final topology rather than inferred from positions.
     #[serde(default)]
     pub neighbours: Vec<TopologyElement>,
+    /// The sketch curve this element descends from, where the kernel's own
+    /// history reached one, or the stated reason there is no route to a
+    /// sketch at all.
+    #[serde(default)]
+    pub sketch: crate::sketch_lineage::SketchLineage,
 }
 
 /// Measured geometry of one face in the final model, in model units (mm).

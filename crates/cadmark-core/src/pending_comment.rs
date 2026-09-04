@@ -148,6 +148,7 @@ mod tests {
 
     fn anchor(face: u32) -> GeometryContext {
         GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(face)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
