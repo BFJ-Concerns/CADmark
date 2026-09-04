@@ -155,10 +155,10 @@ pub fn checkout_branch_tip(project_dir: &Path, branch: &str) -> Result<(), GitEr
     Ok(())
 }
 
-/// List recent microversions from the current lane and CADmark-owned alternatives.
+/// List recent microversions from local branches carrying CADmark metadata.
 pub fn list_microversions(project_dir: &Path, count: usize) -> Result<Vec<Microversion>, GitError> {
     let mut refs = vec!["HEAD".to_string()];
-    refs.extend(design_history_alternative_refs(project_dir)?);
+    refs.extend(design_history_local_refs(project_dir)?);
     list_microversions_from_refs(project_dir, count, &refs)
 }
 
@@ -170,15 +170,15 @@ pub fn list_current_lane_microversions(
     list_microversions_from_refs(project_dir, count, &["HEAD".to_string()])
 }
 
-/// Return the local branch refs CADmark creates for edit-after-undo alternatives.
-fn design_history_alternative_refs(project_dir: &Path) -> Result<Vec<String>, GitError> {
+/// Return local branches whose CADmark-marked commits may contain design steps.
+///
+/// The marker filter in `list_microversions_from_refs` excludes commits CADmark
+/// does not own, while keeping design steps abandoned on the project's ordinary
+/// branch as well as those on CADmark-created edit alternatives.
+fn design_history_local_refs(project_dir: &Path) -> Result<Vec<String>, GitError> {
     let output = run_git(
         project_dir,
-        &[
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/heads/cadmark-edit-*",
-        ],
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
     )?;
     Ok(output.lines().map(str::to_owned).collect())
 }
@@ -193,6 +193,8 @@ fn list_microversions_from_refs(
     let mut args = vec![
         "log".to_string(),
         format!("-{count}"),
+        "--fixed-strings".to_string(),
+        format!("--grep={METADATA_MARKER}"),
         "--format=%H%n%s%n%aI%n%b%x00".to_string(),
     ];
     args.extend(refs.iter().cloned());
@@ -220,6 +222,9 @@ fn list_microversions_from_refs(
 
         // Parse structured metadata if present.
         let body = lines[3..].join("\n");
+        if !body.lines().any(|line| line.trim() == METADATA_MARKER) {
+            continue;
+        }
         let trigger_message = body
             .lines()
             .find(|l| l.starts_with("trigger: "))
@@ -567,6 +572,40 @@ mod tests {
         let current_lane = list_current_lane_microversions(dir.path(), 10).unwrap();
         assert_eq!(current_lane.len(), 1);
         assert_eq!(current_lane[0].commit_hash, base.commit_hash);
+    }
+
+    #[test]
+    fn history_lists_steps_abandoned_on_the_project_branch_after_undo_then_edit() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let base = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+        fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
+        let abandoned =
+            create_microversion(dir.path(), "Widen box", "make it wider", script).unwrap();
+
+        checkout_commit(dir.path(), &base.commit_hash).unwrap();
+        fs::write(dir.path().join(script), "box = Box(30, 30, 30)").unwrap();
+        let alternative =
+            create_microversion(dir.path(), "Alternative box", "try another edit", script).unwrap();
+
+        let main_tip = run_git(dir.path(), &["rev-parse", "--short", "refs/heads/main"]).unwrap();
+        assert_eq!(main_tip.trim(), abandoned.commit_hash);
+        assert_eq!(
+            current_branch(dir.path()).unwrap(),
+            "cadmark-edit-".to_string() + &base.commit_hash + "-1"
+        );
+
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        for step in [&base, &abandoned, &alternative] {
+            assert!(
+                versions
+                    .iter()
+                    .any(|version| version.commit_hash == step.commit_hash),
+                "history omitted {}",
+                step.summary
+            );
+        }
     }
 
     #[test]
