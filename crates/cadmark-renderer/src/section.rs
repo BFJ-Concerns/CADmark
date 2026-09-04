@@ -135,8 +135,8 @@ mod tests {
     /// Evaluate a plane equation the way the shaders do, so a test failure
     /// here is a failure on the GPU too.
     fn shader_keeps(equation: [f32; 4], point: [f32; 3]) -> bool {
-        !(equation[0] * point[0] + equation[1] * point[1] + equation[2] * point[2] + equation[3]
-            < 0.0)
+        equation[0] * point[0] + equation[1] * point[1] + equation[2] * point[2] + equation[3]
+            >= 0.0
     }
 
     #[test]
