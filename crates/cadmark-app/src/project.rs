@@ -41,7 +41,7 @@ pub struct LoadedModel {
 }
 
 /// What the worker thread is doing, for the status bar and chat.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Busy {
     /// An AI turn is running; the flag ends it early.
     Turn {
@@ -256,11 +256,12 @@ impl Project {
             descriptors: model.descriptors,
         });
         let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
+        let printable = model.is_printable();
         self.model = Some(LoadedModel {
             summary: model.summary,
             bounds,
             model: model.model,
-            printable: model.is_printable(),
+            printable,
         });
         self.script_source = Some(source);
         self.has_script = true;

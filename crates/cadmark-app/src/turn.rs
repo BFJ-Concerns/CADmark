@@ -26,7 +26,6 @@ use cadmark_bridge::tools::{
     RunScriptArgs, tools_for,
 };
 use cadmark_core::cancellation::CancelFlag;
-use cadmark_core::geometry::GeometryContext;
 use cadmark_core::message::{Conversation, MessageKind};
 use cadmark_kernel::protocol::ExecutedModel;
 use cadmark_kernel::worker::WorkerError;
@@ -870,7 +869,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_comment_anchor_reaches_the_model_and_the_last_good_script_wins() {
-        use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement};
+        use cadmark_core::geometry::{EdgeId, FaceId, GeometryContext, TopologyElement};
         use cadmark_core::ledger::LedgerValue;
         let anchor = |element: TopologyElement| GeometryContext {
             element,
