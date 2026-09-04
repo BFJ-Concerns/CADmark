@@ -314,6 +314,10 @@ fn pending_anchor_label(anchor: &PendingAnchor) -> String {
     }
 }
 
+fn pending_comment_text_id(id: PendingCommentId) -> egui::Id {
+    egui::Id::new(("pending_comment", id.0))
+}
+
 /// Render one editable unsent card. Returns true when the user removes it.
 fn show_pending_comment(ui: &mut egui::Ui, comment: &mut PendingComment, width: f32) -> bool {
     let colour = marker_colour(comment);
@@ -333,7 +337,7 @@ fn show_pending_comment(ui: &mut egui::Ui, comment: &mut PendingComment, width: 
                 });
                 ui.add(
                     egui::TextEdit::multiline(&mut comment.text)
-                        .id_salt(("pending_comment", comment.id.0))
+                        .id(pending_comment_text_id(comment.id))
                         .desired_rows(2)
                         .desired_width(f32::INFINITY),
                 );
@@ -626,7 +630,7 @@ mod tests {
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
-    use cadmark_core::message::ToolActivity;
+    use cadmark_core::message::{Conversation, ToolActivity};
 
     use super::*;
 
@@ -714,5 +718,58 @@ mod tests {
             last_event: now - std::time::Duration::from_secs(9),
         };
         assert_eq!(turn_status_line(&quiet), "thinking · 1m 15s · quiet for 9s");
+    }
+
+    #[test]
+    fn editing_a_surviving_card_through_its_text_edit_preserves_marker_pairing() {
+        let mut pending = PendingComments::default();
+        let first = pending.add("round this".into(), vec![untraced_face(1)]);
+        let removed = pending.add("remove this comment".into(), vec![untraced_face(2)]);
+        let third = pending.add("chamfer this".into(), vec![untraced_face(3)]);
+        pending.remove(removed).expect("the middle card exists");
+        let third_colour = pending.comments()[1].marker_colour();
+
+        let context = egui::Context::default();
+        context.memory_mut(|memory| memory.request_focus(pending_comment_text_id(third)));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events: vec![egui::Event::Text(" more".into())],
+            ..Default::default()
+        };
+        let mut pane = ChatPane::new();
+        pane.focus_input = false;
+        let conversation = Conversation::new();
+        let mut action = ChatAction::None;
+        let _ = context.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                action = pane.show(ui, &conversation, &mut pending);
+            });
+        });
+
+        assert_eq!(action, ChatAction::None);
+        assert_eq!(
+            pending
+                .comments()
+                .iter()
+                .map(|comment| (comment.id, comment.marker_number, comment.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(first, 1, "round this"), (third, 3, "chamfer this more")]
+        );
+        assert_eq!(
+            pending.comments()[1].marker_colour(),
+            third_colour,
+            "editing through the card must not replace its marker pairing"
+        );
+    }
+
+    fn untraced_face(face: u32) -> GeometryContext {
+        GeometryContext {
+            element: TopologyElement::Face(FaceId(face)),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+        }
     }
 }

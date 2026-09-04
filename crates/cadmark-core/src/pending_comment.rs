@@ -173,19 +173,6 @@ mod tests {
     }
 
     #[test]
-    fn editing_a_card_through_the_live_collection_keeps_other_cards_intact() {
-        let mut pending = PendingComments::default();
-        pending.add("round this".into(), vec![anchor(1)]);
-        pending.add("chamfer this".into(), vec![anchor(2)]);
-
-        pending.comments_mut()[0].text = "round this more".into();
-
-        assert_eq!(pending.comments()[0].text, "round this more");
-        assert_eq!(pending.comments()[1].text, "chamfer this");
-        assert_eq!(pending.comments()[1].marker_number, 2);
-    }
-
-    #[test]
     fn a_lost_anchor_keeps_its_card_but_prevents_submission() {
         let mut pending = PendingComments::default();
         let id = pending.add("round this".into(), vec![anchor(1)]);
