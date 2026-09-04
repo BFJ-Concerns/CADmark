@@ -29,9 +29,7 @@ use cadmark_ui::version_dialog::{VersionDialog, VersionDialogAction};
 use cadmark_ui::view_gizmo::GizmoAction;
 
 use crate::orchestrator::OrchestratorResult;
-use crate::project::{
-    Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL, reference_image_files, reference_images,
-};
+use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
 use crate::turn::{TurnEvent, TurnInput, TurnOutcome};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::viewport::{
@@ -298,7 +296,12 @@ impl CadmarkApp {
     /// Load reference images for a turn, making a text-only model's limit
     /// explicit in the chat rather than quietly sending an unsupported input.
     fn reference_images_for_turn(&mut self) -> Vec<cadmark_bridge::backend::ImageData> {
-        let images = reference_images(&self.project.dir);
+        let images: Vec<_> = self
+            .project
+            .reference_images
+            .iter()
+            .map(|image| image.data.clone())
+            .collect();
         if images.is_empty() || self.project.ai_accepts_images {
             return images;
         }
@@ -1005,7 +1008,7 @@ impl CadmarkApp {
     fn show_chat(&mut self, ctx: &egui::Context) {
         let mut action = ChatAction::None;
         let mut reference_action = ReferenceImagesAction::None;
-        let reference_images = reference_image_views(&self.project.dir);
+        let reference_images = reference_image_views(&self.project);
         egui::SidePanel::right("chat_panel")
             .resizable(true)
             .default_width(380.0)
@@ -1275,19 +1278,15 @@ fn ai_services(
     cadmark_bridge::build_ai_services(ai, credential).map_err(|error| error.to_string())
 }
 
-/// Load project-local files into the borrowed display model expected by the
-/// UI. The turn path reads the same directory independently as `ImageData`.
-fn reference_image_views(project_dir: &Path) -> Vec<ReferenceImageView> {
-    reference_image_files(project_dir)
-        .into_iter()
-        .filter_map(|path| {
-            let name = path.file_name()?.to_str()?.to_string();
-            let bytes = std::fs::read(path).ok()?;
-            Some(ReferenceImageView {
-                id: format!("{}:{name}", project_dir.display()),
-                name,
-                bytes,
-            })
+/// Borrow project-cached images for the UI without touching the filesystem.
+fn reference_image_views(project: &Project) -> Vec<ReferenceImageView<'_>> {
+    project
+        .reference_images
+        .iter()
+        .map(|image| ReferenceImageView {
+            id: format!("{}:{}", project.dir.display(), image.name),
+            name: &image.name,
+            bytes: &image.data.bytes,
         })
         .collect()
 }

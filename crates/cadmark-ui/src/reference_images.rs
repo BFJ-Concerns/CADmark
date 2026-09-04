@@ -5,12 +5,12 @@
 //! request, keeping egui separate from project storage.
 
 /// One image ready for a compact preview in the chat pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReferenceImageView {
+#[derive(Debug, Clone)]
+pub struct ReferenceImageView<'a> {
     /// Stable path-based identity for the texture cache.
     pub id: String,
-    pub name: String,
-    pub bytes: Vec<u8>,
+    pub name: &'a str,
+    pub bytes: &'a [u8],
 }
 
 /// What the user did in the reference-image panel.
@@ -31,7 +31,7 @@ impl ReferenceImagesPanel {
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
-        images: &[ReferenceImageView],
+        images: &[ReferenceImageView<'_>],
     ) -> ReferenceImagesAction {
         let mut action = ReferenceImagesAction::None;
         ui.horizontal(|ui| {
@@ -59,7 +59,7 @@ impl ReferenceImagesPanel {
                                     egui::Image::new(&texture)
                                         .fit_to_exact_size(egui::vec2(64.0, 64.0)),
                                 )
-                                .on_hover_text(&image.name);
+                                .on_hover_text(image.name);
                             } else {
                                 ui.label(
                                     egui::RichText::new("Image could not be previewed")
@@ -68,7 +68,7 @@ impl ReferenceImagesPanel {
                                 );
                             }
                             ui.label(
-                                egui::RichText::new(&image.name)
+                                egui::RichText::new(image.name)
                                     .small()
                                     .color(crate::theme::TEXT_MUTED),
                             );
@@ -82,19 +82,51 @@ impl ReferenceImagesPanel {
     fn preview(
         &mut self,
         ui: &egui::Ui,
-        image: &ReferenceImageView,
+        image: &ReferenceImageView<'_>,
     ) -> Option<egui::TextureHandle> {
         if let Some(texture) = self.previews.get(&image.id) {
             return Some(texture.clone());
         }
-        let decoded = image::load_from_memory(&image.bytes).ok()?.to_rgba8();
-        let size = [decoded.width() as usize, decoded.height() as usize];
+        let thumbnail = decode_thumbnail(image.bytes)?;
         let texture = ui.ctx().load_texture(
             format!("cadmark-reference-image/{}", image.id),
-            egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw()),
+            thumbnail,
             egui::TextureOptions::LINEAR,
         );
         self.previews.insert(image.id.clone(), texture.clone());
         Some(texture)
+    }
+}
+
+/// Decode at most the preview's texture budget; egui only ever receives this
+/// compact image, not the original photograph's full-resolution pixels.
+fn decode_thumbnail(bytes: &[u8]) -> Option<egui::ColorImage> {
+    const THUMBNAIL_EDGE: u32 = 96;
+    let thumbnail = image::load_from_memory(bytes)
+        .ok()?
+        .thumbnail(THUMBNAIL_EDGE, THUMBNAIL_EDGE)
+        .to_rgba8();
+    let size = [thumbnail.width() as usize, thumbnail.height() as usize];
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        thumbnail.as_raw(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    #[test]
+    fn thumbnails_are_bounded_before_texture_upload() {
+        let source = image::RgbaImage::from_pixel(384, 192, image::Rgba([0, 128, 255, 255]));
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+
+        let thumbnail = super::decode_thumbnail(bytes.get_ref()).unwrap();
+
+        assert_eq!(thumbnail.size, [96, 48]);
     }
 }
