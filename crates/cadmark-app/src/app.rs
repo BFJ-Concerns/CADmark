@@ -14,7 +14,7 @@ use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
     GeometryContext, GeometryDescriptors, MinimumDistance, ScreenPosition, SelectionState,
-    TopologyElement,
+    SketchElement, TopologyElement,
 };
 use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
 use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
@@ -935,9 +935,12 @@ impl CadmarkApp {
             &project.ledger,
             project.identification.as_ref(),
         ) {
-            Ok(context) => cadmark_core::context::with_source_context(
-                context,
-                project.script_source.as_deref(),
+            Ok(context) => cadmark_core::context::with_sketch_route(
+                cadmark_core::context::with_source_context(
+                    context,
+                    project.script_source.as_deref(),
+                ),
+                &project.sketch_lineage,
             ),
             Err(error) => {
                 self.clear_selection();
@@ -971,6 +974,22 @@ impl CadmarkApp {
         }
     }
 
+    /// Handle a click on a drawn sketch element: point the code panel at
+    /// the line that drew it, or say why no line can be named.
+    fn handle_sketch_pick_result(&mut self, element: SketchElement) {
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
+        let lineage = project.sketch_lineage.lookup_element(&element);
+        log::info!("Selected {}: {}", element.display_label(), lineage.describe());
+        self.highlighted_line = lineage.resolved().map(|source| source.source.line);
+        self.status = Some(Status::info(format!(
+            "{} — {}",
+            element.display_label(),
+            lineage.describe()
+        )));
+    }
+
     /// Consume the pick and hover results the last frame's readbacks
     /// produced.
     fn consume_pick_result(&mut self) {
@@ -998,6 +1017,9 @@ impl CadmarkApp {
             }
             PickTransition::Hit(element, screen_pos) => {
                 self.handle_pick_result(element, screen_pos)
+            }
+            PickTransition::SketchHit(element, _screen_pos) => {
+                self.handle_sketch_pick_result(element)
             }
             PickTransition::ReadbackFailed => {
                 self.status = Some(Status::error("Selection failed: GPU pick readback failed"));

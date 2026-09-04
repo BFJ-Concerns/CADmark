@@ -13,6 +13,7 @@ use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, Null
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity, TopologyElement};
 use cadmark_core::ledger::ProvenanceLedger;
+use cadmark_core::sketch_lineage::SketchLineageLedger;
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::{Conversation, Message};
 use cadmark_core::version::VersionHistory;
@@ -82,6 +83,9 @@ pub struct Project {
     pub busy: Option<Busy>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: ProvenanceLedger,
+    /// Which sketch curve drew each element, or the stated reason none can
+    /// be named. Rebuilt with the ledger, never persisted.
+    pub sketch_lineage: SketchLineageLedger,
     /// Identification strategy for geometry context, rebuilt from the
     /// measured geometry of each executed model.
     pub identification: Box<dyn IdentificationStrategy>,
@@ -167,6 +171,7 @@ impl Project {
             ai_model,
             busy: None,
             ledger: ProvenanceLedger::new(),
+            sketch_lineage: SketchLineageLedger::new(),
             identification: Box::new(NullIdentification),
             model: None,
             script_source: None,
@@ -383,6 +388,7 @@ impl Project {
         );
         let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
         self.ledger = model.ledger;
+        self.sketch_lineage = model.sketch_lineage;
         self.identification = Box::new(MeasuredIdentification {
             descriptors: model.descriptors.clone(),
         });
@@ -402,6 +408,7 @@ impl Project {
     /// Forget the model on screen so a failed reload shows nothing stale.
     pub fn clear_model(&mut self) {
         self.ledger.clear();
+        self.sketch_lineage = SketchLineageLedger::new();
         self.identification = Box::new(NullIdentification);
         self.model = None;
     }

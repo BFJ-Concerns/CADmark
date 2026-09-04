@@ -184,18 +184,18 @@ pub fn copy_pick_pixel(
 
 /// Decode a mapped pick pixel into the element under it, or `None` for
 /// the background.
-pub fn decode_pick_result(data: &[u8]) -> Option<cadmark_core::geometry::TopologyElement> {
+pub fn decode_pick_result(data: &[u8]) -> Option<cadmark_core::geometry::PickedElement> {
     if data.len() < 4 {
         return None;
     }
     let pixel = [data[0], data[1], data[2], data[3]];
-    picking::decode_picking_id(picking::colour_to_id(pixel))
+    picking::decode_pick(picking::colour_to_id(pixel))
 }
 
 #[cfg(test)]
 mod tests {
     use super::decode_pick_result;
-    use cadmark_core::geometry::{FaceId, TopologyElement};
+    use cadmark_core::geometry::{FaceId, PickedElement, SketchElement, SketchElementKind, TopologyElement};
 
     #[test]
     fn a_mapped_pixel_decodes_to_its_element_or_the_background() {
@@ -203,7 +203,19 @@ mod tests {
         assert_eq!(decode_pick_result(&[1, 0]), None);
         assert_eq!(
             decode_pick_result(&[4, 0, 0, 0, 9, 9]),
-            Some(TopologyElement::Face(FaceId(3)))
+            Some(PickedElement::Solid(TopologyElement::Face(FaceId(3))))
+        );
+    }
+
+    #[test]
+    fn a_sketch_pixel_decodes_to_the_sketch_element_it_encodes() {
+        // 300_001 = the first sketch curve.
+        assert_eq!(
+            decode_pick_result(&(300_001u32).to_le_bytes()),
+            Some(PickedElement::Sketch(SketchElement {
+                kind: SketchElementKind::Curve,
+                index: 0,
+            })),
         );
     }
 }
