@@ -901,6 +901,46 @@ with BuildPart() as part:
     }
 
     #[test]
+    fn execution_measures_final_topology_neighbours() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    Box(20, 10, 5)
+"#);
+        let result = result.unwrap();
+
+        assert!(result.descriptors.faces.iter().all(|face| {
+            face.neighbours.len() == 4
+                && face
+                    .neighbours
+                    .iter()
+                    .all(|neighbour| matches!(neighbour, TopologyElement::Edge(_)))
+        }));
+        assert!(result.descriptors.edges.iter().all(|edge| {
+            edge.neighbours.len() == 4
+                && edge
+                    .neighbours
+                    .iter()
+                    .filter(|neighbour| matches!(neighbour, TopologyElement::Face(_)))
+                    .count()
+                    == 2
+                && edge
+                    .neighbours
+                    .iter()
+                    .filter(|neighbour| matches!(neighbour, TopologyElement::Vertex(_)))
+                    .count()
+                    == 2
+        }));
+        assert!(result.descriptors.vertices.iter().all(|vertex| {
+            vertex.neighbours.len() == 3
+                && vertex
+                    .neighbours
+                    .iter()
+                    .all(|neighbour| matches!(neighbour, TopologyElement::Edge(_)))
+        }));
+    }
+
+    #[test]
     fn model_bounds_are_exact_for_curved_geometry() {
         let (_scratch, result) = run(r#"from build123d import *
 

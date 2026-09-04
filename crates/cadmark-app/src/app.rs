@@ -627,7 +627,10 @@ impl CadmarkApp {
             &self.project.ledger,
             self.project.identification.as_ref(),
         ) {
-            Ok(context) => context,
+            Ok(context) => cadmark_core::context::with_source_context(
+                context,
+                self.project.script_source.as_deref(),
+            ),
             Err(error) => {
                 self.clear_selection();
                 self.status = Some(Status::error(format!("Selection failed: {error}")));
