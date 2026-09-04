@@ -867,8 +867,9 @@ mod tests {
         .await;
         let client = client(&base_url, Some("fake-token"));
 
-        let mut deltas = Vec::new();
-        let mut sink = |delta: StreamDelta| deltas.push(delta);
+        let deltas = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&deltas);
+        let mut sink = move |delta: StreamDelta| recorded.lock().unwrap().push(delta);
         let request = ModelRequest {
             instructions: "system content".into(),
             items: vec![
@@ -900,7 +901,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.text, "distinctive");
         assert!(first.tool_calls.is_empty());
-        assert_eq!(deltas, [StreamDelta::Text("distinctive".into())]);
+        assert_eq!(*deltas.lock().unwrap(), [StreamDelta::Text("distinctive".into())]);
 
         let second = client
             .stream(request, CancelFlag::new(), &mut sink)
@@ -910,7 +911,10 @@ mod tests {
         assert_eq!(second.tool_calls.len(), 1);
         assert_eq!(second.tool_calls[0].name, "run_script");
         assert_eq!(second.tool_calls[0].arguments["code"], "x = 1");
-        assert!(matches!(deltas.last(), Some(StreamDelta::ToolCallStarted { name }) if name == "run_script"));
+        assert!(matches!(
+            deltas.lock().unwrap().last(),
+            Some(StreamDelta::ToolCallStarted { name }) if name == "run_script"
+        ));
 
         let records = records.lock().unwrap();
         let body = &records[0].body;

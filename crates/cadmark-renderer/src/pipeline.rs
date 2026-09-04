@@ -5,7 +5,6 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::camera::Camera;
 use crate::mesh::{EdgeVertex, GpuMesh, GpuVertex};
-use crate::picking::PickingPass;
 
 /// Configuration for the selection glow effect.
 #[derive(Debug, Clone)]
@@ -551,14 +550,12 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
     texture.create_view(&wgpu::TextureViewDescriptor::default())
 }
 
-/// The complete rendering state for the viewport.
+/// The viewport's per-frame state: the camera, the selection and hover
+/// IDs the shaders highlight, and the colour-space flag. GPU resources
+/// live with the paint callback that uses them.
 pub struct Renderer {
     pub camera: Camera,
-    pub picking: Option<PickingPass>,
-    pub pipelines: Option<RenderPipelines>,
     pub selection_style: SelectionStyle,
-    /// The currently loaded mesh, if any.
-    pub mesh: Option<GpuMesh>,
     /// Picking ID of the currently selected element (for the glow shader).
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
@@ -572,35 +569,10 @@ impl Renderer {
     pub fn new() -> Self {
         Self {
             camera: Camera::default(),
-            picking: None,
-            pipelines: None,
             selection_style: SelectionStyle::default(),
-            mesh: None,
             selected_id: 0,
             hover_id: 0,
             target_is_srgb: false,
-        }
-    }
-
-    /// Initialise GPU resources that depend on the wgpu device.
-    pub fn init_gpu(
-        &mut self,
-        device: &wgpu::Device,
-        surface_format: wgpu::TextureFormat,
-        width: u32,
-        height: u32,
-    ) {
-        self.picking = Some(PickingPass::new(device, width, height));
-        self.pipelines = Some(RenderPipelines::new(device, surface_format, width, height));
-    }
-
-    /// Handle viewport resize.
-    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if let Some(picking) = &mut self.picking {
-            picking.resize(device, width, height);
-        }
-        if let Some(pipelines) = &mut self.pipelines {
-            pipelines.resize(device, width, height);
         }
     }
 

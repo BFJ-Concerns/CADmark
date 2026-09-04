@@ -1,113 +1,53 @@
-// Viewport — eframe/wgpu integration for rendering into the egui viewport.
-//
-// Handles the wgpu render pass within eframe's paint callback,
-// issues the picking readback, and reports which element was hovered.
+// The viewport's render passes and pick readback, in one place. The
+// application's paint callback owns the GPU resources and the timing;
+// this module owns what each pass draws, so a new pass (a vertex-marker
+// pass, a section-plane pass) is added here and drawn from there.
 
 use crate::mesh::GpuMesh;
 use crate::picking::{self, PickingPass};
-use crate::pipeline::{MeshUniforms, RenderPipelines, SimpleUniforms};
+use crate::pipeline::RenderPipelines;
 
-/// State passed into the wgpu paint callback each frame.
-pub struct ViewportRenderState {
-    pub pipelines: Option<RenderPipelines>,
-    pub picking: Option<PickingPass>,
-    pub mesh: Option<GpuMesh>,
-    pub mesh_uniforms: MeshUniforms,
-    pub simple_uniforms: SimpleUniforms,
-    /// Screen-space coordinates to read back for picking (if a click occurred).
-    pub pick_request: Option<(u32, u32)>,
-}
-
-/// Encode a render pass for the main shaded mesh + wireframe overlay.
+/// Encode the shaded mesh and wireframe overlay into the offscreen colour
+/// target with depth. Runs every frame; with no mesh it only clears, so
+/// clearing the model leaves no stale render behind.
 pub fn render_scene(
     encoder: &mut wgpu::CommandEncoder,
-    surface_view: &wgpu::TextureView,
-    state: &ViewportRenderState,
+    pipelines: &RenderPipelines,
+    mesh: Option<&GpuMesh>,
+    clear_colour: wgpu::Color,
 ) {
-    let Some(pipelines) = &state.pipelines else {
-        return;
-    };
-    let Some(mesh) = &state.mesh else {
-        // No mesh loaded — clear to dark background.
-        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("clear_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: surface_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.118,
-                        g: 0.118,
-                        b: 0.137,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            ..Default::default()
-        });
-        return;
-    };
-
-    // Main shaded pass.
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("mesh_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: surface_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.118,
-                        g: 0.118,
-                        b: 0.137,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &pipelines.depth_texture,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("viewport_main_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &pipelines.viewport_colour_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(clear_colour),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &pipelines.depth_texture,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
             }),
-            ..Default::default()
-        });
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
 
-        pass.set_pipeline(&pipelines.mesh_pipeline);
-        pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
-        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-    }
+    let Some(mesh) = mesh else {
+        return;
+    };
 
-    // Wireframe overlay pass.
+    pass.set_pipeline(&pipelines.mesh_pipeline);
+    pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
+    pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+    pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+
     if mesh.edge_vertex_count > 0 {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("wireframe_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: surface_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &pipelines.depth_texture,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
-
         pass.set_pipeline(&pipelines.wireframe_pipeline);
         pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
@@ -115,18 +55,15 @@ pub fn render_scene(
     }
 }
 
-/// Encode the picking pass into the offscreen colour-ID texture.
-pub fn render_picking(encoder: &mut wgpu::CommandEncoder, state: &ViewportRenderState) {
-    let Some(pipelines) = &state.pipelines else {
-        return;
-    };
-    let Some(picking) = &state.picking else {
-        return;
-    };
-    let Some(mesh) = &state.mesh else {
-        return;
-    };
-
+/// Render every pickable element into the colour-ID texture: faces
+/// first, then edges drawn over them so a cursor on an edge picks the
+/// edge.
+pub fn render_picking(
+    encoder: &mut wgpu::CommandEncoder,
+    pipelines: &RenderPipelines,
+    picking: &PickingPass,
+    mesh: &GpuMesh,
+) {
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("picking_pass"),
@@ -134,9 +71,9 @@ pub fn render_picking(encoder: &mut wgpu::CommandEncoder, state: &ViewportRender
                 view: &picking.texture_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    // Every channel clears to zero: the texture is Rgba8Uint,
-                    // so an alpha of 1.0 would land as the byte 1 and decode
-                    // as a vertex rather than the background.
+                    // Every channel must clear to zero: the texture is
+                    // Rgba8Uint, so an alpha of 1.0 would land as the byte
+                    // 1 and decode as a vertex rather than the background.
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
                 },
@@ -188,17 +125,6 @@ pub fn render_picking(encoder: &mut wgpu::CommandEncoder, state: &ViewportRender
     }
 }
 
-/// Issue a copy from the picking texture to its own staging buffer for a
-/// single pixel.
-pub fn request_pick_readback(
-    encoder: &mut wgpu::CommandEncoder,
-    picking: &PickingPass,
-    x: u32,
-    y: u32,
-) {
-    copy_pick_pixel(encoder, picking, &picking.staging_buffer, x, y);
-}
-
 /// Copy one pixel of the picking texture into `staging`, which must be at
 /// least 256 bytes and mappable for reading.
 pub fn copy_pick_pixel(
@@ -236,14 +162,28 @@ pub fn copy_pick_pixel(
     );
 }
 
-/// Read back the picking result from the staging buffer.
-/// Must be called after the GPU has finished the copy (map the buffer first).
+/// Decode a mapped pick pixel into the element under it, or `None` for
+/// the background.
 pub fn decode_pick_result(data: &[u8]) -> Option<cadmark_core::geometry::TopologyElement> {
     if data.len() < 4 {
         return None;
     }
-
     let pixel = [data[0], data[1], data[2], data[3]];
-    let id = picking::colour_to_id(pixel);
-    picking::decode_picking_id(id)
+    picking::decode_picking_id(picking::colour_to_id(pixel))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_pick_result;
+    use cadmark_core::geometry::{FaceId, TopologyElement};
+
+    #[test]
+    fn a_mapped_pixel_decodes_to_its_element_or_the_background() {
+        assert_eq!(decode_pick_result(&[0, 0, 0, 0]), None);
+        assert_eq!(decode_pick_result(&[1, 0]), None);
+        assert_eq!(
+            decode_pick_result(&[4, 0, 0, 0, 9, 9]),
+            Some(TopologyElement::Face(FaceId(3)))
+        );
+    }
 }

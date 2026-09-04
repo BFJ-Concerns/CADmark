@@ -15,7 +15,6 @@
 // the caller restores the model it had.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use cadmark_bridge::SYSTEM_PROMPT;
 use cadmark_bridge::backend::{
@@ -466,16 +465,6 @@ fn describe_view(view: RenderView) -> &'static str {
         RenderView::Top => "top",
         RenderView::Bottom => "bottom",
         RenderView::Isometric => "isometric view",
-    }
-}
-
-/// Elapsed time since a moment, for the status line.
-pub fn elapsed_label(since: Instant) -> String {
-    let seconds = since.elapsed().as_secs();
-    if seconds < 60 {
-        format!("{seconds}s")
-    } else {
-        format!("{}m {:02}s", seconds / 60, seconds % 60)
     }
 }
 

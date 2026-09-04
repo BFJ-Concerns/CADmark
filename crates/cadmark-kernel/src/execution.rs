@@ -465,6 +465,8 @@ mod tests {
         contexts
     }
 
+    /// The contexts the bridge renders for the model round-trip through
+    /// the grounding text: every element's provenance reaches it.
     fn assert_bridge_consumers(result: &ExecutedModel) {
         let strategy = NullIdentification;
         let representative = [
@@ -474,14 +476,17 @@ mod tests {
         ];
         for element in representative {
             let context = resolve_context(&element, &result.ledger, &strategy).unwrap();
-            let expected = context.provenance.clone();
-            let request = cadmark_bridge::context::AiRequest::from_spatial_comment(
-                "source".into(),
-                "comment".into(),
-                context,
+            let label = element.display_label();
+            let rendered = cadmark_bridge::grounding::render_comment(
+                &cadmark_bridge::grounding::GroundedComment {
+                    text: "comment".into(),
+                    anchors: vec![context.clone()],
+                },
             );
-            let actual = request.geometry_context.unwrap().provenance;
-            assert_eq!(actual, expected);
+            assert!(rendered.contains(&label), "{rendered}");
+            if let Some(entry) = context.provenance.resolved() {
+                assert!(rendered.contains(&format!("line {}", entry.source.line)));
+            }
         }
     }
 
