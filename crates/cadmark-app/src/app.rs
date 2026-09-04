@@ -383,6 +383,7 @@ impl CadmarkApp {
             return;
         };
         let references = std::mem::take(&mut turn.references);
+        let highlight = highlight_survives(&outcome);
         let conversation = &mut self.project.conversation;
         match outcome {
             TurnOutcome::Completed {
@@ -447,9 +448,10 @@ impl CadmarkApp {
             }
         }
         // After the outcome, so the model the references belong to is the
-        // one on screen: completing a turn shows it, and failing or
-        // cancelling rebuilds the previous one and highlights nothing.
-        self.highlight_references(references);
+        // one on screen. A failed or cancelled turn keeps no reply and
+        // rebuilds the previous model, so its references belong to
+        // nothing on screen and the highlight is cleared instead.
+        self.highlight_references(if highlight { references } else { Vec::new() });
         self.project.save_conversation();
         self.chat.focus_input();
     }
@@ -1270,11 +1272,22 @@ impl eframe::App for CadmarkApp {
     }
 }
 
+/// Whether the references of a finished turn still describe what the
+/// user is looking at. A failed or cancelled turn keeps no reply and
+/// rebuilds the model it started from, so its references belong to
+/// nothing on screen and must not light anything up.
+fn highlight_survives(outcome: &TurnOutcome) -> bool {
+    matches!(
+        outcome,
+        TurnOutcome::Completed { .. } | TurnOutcome::Answered
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use cadmark_core::geometry::ModelSummary;
 
-    use super::turn_chat_message;
+    use super::{TurnOutcome, highlight_survives, turn_chat_message};
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -1285,6 +1298,15 @@ mod tests {
             edge_count: 0,
             vertex_count: 0,
         }
+    }
+
+    #[test]
+    fn only_a_turn_that_keeps_its_reply_keeps_its_highlight() {
+        assert!(highlight_survives(&TurnOutcome::Answered));
+        assert!(!highlight_survives(&TurnOutcome::Cancelled));
+        assert!(!highlight_survives(&TurnOutcome::Failed {
+            error: "the script did not run".to_string(),
+        }));
     }
 
     #[test]

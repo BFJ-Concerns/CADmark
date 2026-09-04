@@ -31,7 +31,7 @@ use cadmark_core::message::{Conversation, MessageKind};
 use cadmark_kernel::protocol::ExecutedModel;
 use cadmark_kernel::worker::WorkerError;
 
-use crate::geometry_reference::{self, ReferenceScope};
+use crate::geometry_reference::{self, ExecutionTag, ReferenceScope};
 
 /// What the user sent to start a turn: any chat text, the pending
 /// comments with their anchors, and the project's reference images.
@@ -162,7 +162,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             images: input.images.clone(),
         });
         let tools = tools_for(self.model.accepts_images());
-        let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
+        let mut last_good: Option<(String, Box<ExecutedModel>, String, ExecutionTag)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
         // Assigned by the only exit from the loop that reaches the reply;
@@ -242,8 +242,13 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                             model: model.clone(),
                             source: code.clone(),
                         });
-                        let output = describe_model(&model);
-                        last_good = Some((code, model, summary));
+                        // Each execution gets its own tag; the IDs it
+                        // assigns are only referenceable under that tag,
+                        // so an ID quoted from an earlier run of this
+                        // same turn resolves to nothing.
+                        let tag = geometry_reference::next_execution_tag();
+                        let output = describe_model(&model, &tag);
+                        last_good = Some((code, model, summary, tag));
                         last_failure = None;
                         (output, false)
                     }
@@ -286,7 +291,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         // an ID quoted from an earlier turn, resolves to nothing.
         let anchors = anchored_elements(input);
         let scope = match &last_good {
-            Some((_, model, _)) => ReferenceScope::Model(model),
+            Some((_, model, _, tag)) => ReferenceScope::Model { model, tag },
             None => ReferenceScope::Anchors(&anchors),
         };
         emit(TurnEvent::GeometryReferenced {
@@ -294,7 +299,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         });
 
         match last_good {
-            Some((code, model, summary)) => {
+            Some((code, model, summary, _)) => {
                 // A later attempt may have failed after the last success;
                 // the script on disk must be the one the model on screen
                 // came from.
@@ -497,7 +502,7 @@ fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
 }
 
 /// What the model reads after a successful execution.
-fn describe_model(model: &ExecutedModel) -> String {
+fn describe_model(model: &ExecutedModel, tag: &ExecutionTag) -> String {
     let mut text = format!(
         "Executed successfully. Model: {}.",
         model.summary.describe()
@@ -522,7 +527,7 @@ fn describe_model(model: &ExecutedModel) -> String {
     }
     // The inventory the reply's references are written from: the model can
     // only name an element whose ID it has been given.
-    text.push_str(&geometry_reference::describe_elements(model));
+    text.push_str(&geometry_reference::describe_elements(model, tag));
     text
 }
 
@@ -646,8 +651,20 @@ mod tests {
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<ModelResponse, BackendError>> + Send + 'a>,
         > {
+            // A real model copies the tag out of the inventory it was
+            // just handed; a scripted one writes `{tag}` and the double
+            // does the copying, so the tag under test is always the one
+            // the product advertised.
+            let tag = tag_offered_by(&request);
             self.requests.lock().unwrap().push(request);
-            let next = self.responses.lock().unwrap().pop_front();
+            let next = self.responses.lock().unwrap().pop_front().map(|response| {
+                response.map(|mut response| {
+                    if let Some(tag) = &tag {
+                        response.text = response.text.replace("{tag}", tag);
+                    }
+                    response
+                })
+            });
             Box::pin(async move {
                 if cancel.is_cancelled() {
                     return Err(BackendError::Cancelled);
@@ -659,6 +676,24 @@ mod tests {
                 Ok(response)
             })
         }
+    }
+
+    /// The execution tag the most recent tool result offered, as the
+    /// model would read it out of the inventory.
+    fn tag_offered_by(request: &ModelRequest) -> Option<String> {
+        request
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ModelItem::ToolResult { output, .. } => output
+                    .split("this run's tag @")
+                    .nth(1)
+                    .map(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric()).next()),
+                _ => None,
+            })
+            .flatten()
+            .map(str::to_string)
     }
 
     fn text(reply: &str) -> Result<ModelResponse, BackendError> {
@@ -1186,7 +1221,7 @@ mod tests {
     async fn a_reply_referring_to_one_edge_of_a_line_highlights_that_edge_alone() {
         let model = ScriptedModel::new([
             run_script("c1", "part = Box(1, 1, 1)", "Box"),
-            text("Rounded [edge 1]; the other edges of that line are untouched."),
+            text("Rounded [edge 1 @{tag}]; the other edges of that line are untouched."),
         ]);
         let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
 
@@ -1203,7 +1238,7 @@ mod tests {
     async fn a_reply_that_only_mentions_geometry_in_prose_highlights_nothing() {
         let model = ScriptedModel::new([
             run_script("c1", "part = Box(1, 1, 1)", "Box"),
-            text("I filleted the top edge of the box, near face 0."),
+            text("I filleted the top edge of the box, near face 0 (edge 1 @{tag})."),
         ]);
         let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
 
@@ -1218,7 +1253,7 @@ mod tests {
     async fn a_reference_to_an_element_the_model_does_not_have_highlights_nothing() {
         let model = ScriptedModel::new([
             run_script("c1", "part = Box(1, 1, 1)", "Box"),
-            text("Rounded [edge 40] and [vertex 0]."),
+            text("Rounded [edge 40 @{tag}] and [vertex 0 @{tag}] and [edge 1]."),
         ]);
         let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
 
@@ -1243,15 +1278,20 @@ mod tests {
 
         let output = harness.last_tool_output();
         assert!(output.contains("Executed successfully."), "{output}");
+        assert!(output.contains("]: created by box at line 2"), "{output}");
         assert!(
-            output.contains("[edge 1]: created by box at line 2"),
+            output.contains("]: created by fillet at line 3"),
             "{output}"
         );
-        assert!(
-            output.contains("[edge 4]: created by fillet at line 3"),
-            "{output}"
-        );
-        assert!(output.contains("[face 0]"), "{output}");
+        let tag = output
+            .split("this run's tag @")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric()).next())
+            .expect("the inventory names the run's tag");
+        assert!(output.contains(&format!("[edge 1 @{tag}]")), "{output}");
+        assert!(output.contains(&format!("[edge 4 @{tag}]")), "{output}");
+        assert!(output.contains(&format!("[face 0 @{tag}]")), "{output}");
+        assert!(!output.contains("[vertex "), "{output}");
     }
 
     #[tokio::test]
