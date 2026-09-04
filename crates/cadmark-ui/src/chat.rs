@@ -697,6 +697,7 @@ mod tests {
     #[test]
     fn chip_names_element_and_known_lines() {
         let resolved = GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(1)),
             provenance: LedgerValue::Resolved(entry(7)),
             identification: Default::default(),
@@ -705,6 +706,7 @@ mod tests {
         };
         assert_eq!(spatial_chip(&resolved), "face 1 · line 7");
         let ambiguous = GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Edge(EdgeId(2)),
             provenance: LedgerValue::Ambiguous(vec![entry(3), entry(9)]),
             identification: Default::default(),
@@ -713,6 +715,7 @@ mod tests {
         };
         assert_eq!(spatial_chip(&ambiguous), "edge 2 · lines 3/9");
         let untraced = GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Edge(EdgeId(2)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -830,6 +833,7 @@ mod tests {
 
     fn untraced_face(face: u32) -> GeometryContext {
         GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(face)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),

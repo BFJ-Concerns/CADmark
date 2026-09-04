@@ -8,6 +8,7 @@
 
 use crate::geometry::{GeometryContext, GeometryDescriptors, TopologyElement};
 use crate::ledger::ProvenanceLedger;
+use crate::sketch_lineage::{SketchLineage, SketchLineageLedger};
 
 /// The picked element is outside the ledger the current model was built
 /// from: a stale pick after a reload, or a picking-buffer fault.
@@ -131,7 +132,27 @@ pub fn resolve_context(
         identification,
         source_context: String::new(),
         neighbours,
+        sketch: SketchLineage::default(),
     })
+}
+
+/// Attach the element's sketch route to an already resolved context.
+///
+/// The route is whatever the execution's sketch lineage holds for this
+/// element — the drawn curve the kernel's history reached, or the stated
+/// reason it reached none. A context resolved without a sketch lineage
+/// keeps the same shape as one whose element has no sketch ancestor, so a
+/// consumer never has to tell "not asked" from "no route" by guessing.
+pub fn with_sketch_route(
+    mut context: GeometryContext,
+    lineage: &SketchLineageLedger,
+) -> GeometryContext {
+    context.sketch = match &context.element {
+        TopologyElement::Face(id) => lineage.lookup_face(*id),
+        TopologyElement::Edge(id) => lineage.lookup_edge(*id),
+        TopologyElement::Vertex(id) => lineage.lookup_vertex(*id),
+    };
+    context
 }
 
 /// Attach the executed script context to an already resolved element. The

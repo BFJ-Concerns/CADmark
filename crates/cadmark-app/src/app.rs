@@ -2115,6 +2115,7 @@ mod tests {
     #[test]
     fn exactly_two_comment_anchors_become_the_measurement_pair() {
         let anchor = |id| GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(id)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -2406,6 +2407,7 @@ mod tests {
 
     fn anchor(face: u32) -> GeometryContext {
         GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(face)),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),

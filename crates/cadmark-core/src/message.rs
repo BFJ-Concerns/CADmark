@@ -266,6 +266,7 @@ mod tests {
 
     fn sample_geometry_context() -> GeometryContext {
         GeometryContext {
+            sketch: Default::default(),
             element: TopologyElement::Face(FaceId(5)),
             provenance: LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
