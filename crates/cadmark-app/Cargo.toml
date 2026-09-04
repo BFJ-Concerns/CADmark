@@ -22,7 +22,7 @@ chrono = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 thiserror = { workspace = true }
-rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "wayland"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 open = "=5.4.2"
