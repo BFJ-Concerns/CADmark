@@ -89,6 +89,7 @@ impl OpenAiCompatibleClient {
         &self,
         instructions: &str,
         input: &str,
+        cancel: CancelFlag,
     ) -> Result<String, BackendError> {
         let request = ModelRequest {
             instructions: instructions.to_string(),
@@ -99,7 +100,7 @@ impl OpenAiCompatibleClient {
             tools: Vec::new(),
         };
         let mut sink = |_delta: StreamDelta| {};
-        let response = self.stream(request, CancelFlag::new(), &mut sink).await?;
+        let response = self.stream(request, cancel, &mut sink).await?;
         if response.text.trim().is_empty() {
             return Err(BackendError::ParseError(
                 "response has no assistant output text".to_string(),
@@ -114,7 +115,9 @@ impl OpenAiCompatibleClient {
     ) -> Result<(), BackendError> {
         let instructions = "Return exactly the requested sentinel and no other text.";
         let input = format!("Return exactly: {sentinel}");
-        let output = self.request_text(instructions, &input).await?;
+        let output = self
+            .request_text(instructions, &input, CancelFlag::new())
+            .await?;
         if output.trim() == sentinel {
             Ok(())
         } else {
@@ -982,7 +985,7 @@ mod tests {
         .await;
         let client = client(&base_url, Some(secret));
         let error = client
-            .request_text("instructions", "input")
+            .request_text("instructions", "input", CancelFlag::new())
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1019,10 +1022,13 @@ mod tests {
         .await;
         let client = client(&base_url, None);
         assert!(matches!(
-            client.request_text("i", "x").await,
+            client.request_text("i", "x", CancelFlag::new()).await,
             Err(BackendError::ParseError(_))
         ));
-        let failed = client.request_text("i", "x").await.unwrap_err();
+        let failed = client
+            .request_text("i", "x", CancelFlag::new())
+            .await
+            .unwrap_err();
         server.await.unwrap();
         assert!(matches!(failed, BackendError::RequestFailed(_)));
         assert!(failed.to_string().contains("overloaded"));
@@ -1067,7 +1073,9 @@ mod tests {
         drop(listener);
         let client = client(&format!("http://{address}/v1"), None);
         assert!(matches!(
-            client.request_text("instructions", "input").await,
+            client
+                .request_text("instructions", "input", CancelFlag::new())
+                .await,
             Err(BackendError::Unavailable(_))
         ));
     }

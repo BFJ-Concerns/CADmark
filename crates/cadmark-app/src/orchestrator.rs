@@ -82,9 +82,10 @@ impl DocSource for cadmark_bridge::doc_lookup::DocLookup {
     fn lookup(
         &self,
         query: &str,
+        cancel: CancelFlag,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + '_>> {
         let query = query.to_string();
-        Box::pin(async move { self.lookup(&query).await })
+        Box::pin(async move { self.lookup(&query, cancel).await })
     }
 }
 

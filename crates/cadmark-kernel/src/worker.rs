@@ -15,6 +15,8 @@
 // reaches the same place as the application's.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc;
@@ -106,14 +108,16 @@ struct Process {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
-    /// Held so the directory outlives the process; removed on drop.
-    _scratch_dir: tempfile::TempDir,
 }
 
 /// The application's handle on script execution and export.
 pub struct KernelWorker {
     launch: WorkerLaunch,
     process: Option<Process>,
+    /// Where kept models live. Owned here, not by the process: a model
+    /// kept by one process must survive that process being killed and
+    /// replaced, or the turn that kept it ends with a dangling file.
+    scratch_dir: Option<tempfile::TempDir>,
 }
 
 impl KernelWorker {
@@ -122,7 +126,21 @@ impl KernelWorker {
         Self {
             launch,
             process: None,
+            scratch_dir: None,
         }
+    }
+
+    fn scratch_dir(&mut self) -> Result<&Path, WorkerError> {
+        if self.scratch_dir.is_none() {
+            let dir = tempfile::Builder::new()
+                .prefix("cadmark-kernel-")
+                .tempdir()
+                .map_err(|error| {
+                    WorkerError::Runtime(format!("could not create scratch directory: {error}"))
+                })?;
+            self.scratch_dir = Some(dir);
+        }
+        Ok(self.scratch_dir.as_ref().expect("created above").path())
     }
 
     /// Execute the script at `script_path`, stopping it if it crosses
@@ -173,7 +191,8 @@ impl KernelWorker {
         cancel: &CancelFlag,
     ) -> Result<WorkerReply, WorkerError> {
         if self.process.is_none() {
-            self.process = Some(self.start()?);
+            let scratch_dir = self.scratch_dir()?.to_path_buf();
+            self.process = Some(self.start(&scratch_dir)?);
         }
         let process = self.process.as_mut().expect("process started above");
 
@@ -203,19 +222,13 @@ impl KernelWorker {
         }
     }
 
-    fn start(&self) -> Result<Process, WorkerError> {
-        let scratch_dir = tempfile::Builder::new()
-            .prefix("cadmark-kernel-")
-            .tempdir()
-            .map_err(|error| {
-                WorkerError::Runtime(format!("could not create scratch directory: {error}"))
-            })?;
+    fn start(&self, scratch_dir: &Path) -> Result<Process, WorkerError> {
         let mut command = Command::new(&self.launch.binary);
         command
             .arg("--project-dir")
             .arg(&self.launch.project_dir)
             .arg("--scratch-dir")
-            .arg(scratch_dir.path())
+            .arg(scratch_dir)
             // Relative paths in a script land in the project folder.
             .current_dir(&self.launch.project_dir)
             .stdin(Stdio::piped())
@@ -224,7 +237,10 @@ impl KernelWorker {
             // The child gets no environment at all: no credential, no
             // proxy, no shell state is reachable from executed code. What
             // it needs, it is told by argument.
-            .env_clear();
+            .env_clear()
+            // Its own process group, so a kill reaches any grandchild a
+            // script spawned that would otherwise hold the pipe open.
+            .process_group(0);
         if let Some(venv) = &self.launch.venv {
             command.arg("--venv").arg(venv);
         }
@@ -242,7 +258,6 @@ impl KernelWorker {
             child,
             stdin,
             stdout,
-            _scratch_dir: scratch_dir,
         };
         let ready = read_line_within(&mut process, START_TIMEOUT)?;
         if ready.trim() != READY_LINE {
@@ -354,7 +369,14 @@ fn supervise(
     })
 }
 
+/// Kill the worker and everything it spawned: the whole process group,
+/// so a script's subprocess cannot keep the reply pipe open after it.
 fn kill(child: &mut Child) {
+    // SAFETY: killpg on the child's own group ID, which start() created
+    // with process_group(0); nothing else on the system shares it.
+    unsafe {
+        libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -446,6 +468,22 @@ impl WorkerArgs {
 /// Run the worker: confine the process, start Python, report ready, then
 /// serve requests until stdin closes. Returns the process exit code.
 pub fn run_worker(args: WorkerArgs) -> i32 {
+    // The reply channel is a private duplicate of the inherited stdout;
+    // fd 1 itself is pointed at stderr before Python starts, so a
+    // script's print() goes where its logging goes and can never land
+    // in the protocol stream.
+    let mut replies = match claim_reply_channel() {
+        Ok(replies) => replies,
+        Err(error) => {
+            eprintln!("refused: could not claim the reply channel: {error}");
+            return 2;
+        }
+    };
+    let mut refuse = |reason: String| -> i32 {
+        let _ = writeln!(replies, "refused: {reason}");
+        2
+    };
+
     let venv = args.venv.clone().or_else(crate::execution::discover_venv);
     let policy = crate::sandbox::SandboxPolicy {
         project_dir: args.project_dir.clone(),
@@ -456,8 +494,7 @@ pub fn run_worker(args: WorkerArgs) -> i32 {
         Ok(confinement) => confinement,
         Err(error) => {
             // Fail closed: an unconfined worker never runs a script.
-            println!("refused: {error}");
-            return 2;
+            return refuse(error.to_string());
         }
     };
     log::info!(
@@ -466,16 +503,19 @@ pub fn run_worker(args: WorkerArgs) -> i32 {
     );
 
     crate::python_runtime::configure_python_home();
-    if let Some(venv) = &venv
-        && let Err(error) = crate::execution::activate_venv(venv)
-    {
-        println!("refused: could not activate the Python runtime: {error}");
+    match &venv {
+        Some(venv) => {
+            if let Err(error) = crate::execution::activate_venv(venv) {
+                return refuse(format!("could not activate the Python runtime: {error}"));
+            }
+        }
+        None => return refuse("no Python runtime (.venv) was found".to_string()),
+    }
+    if writeln!(replies, "{READY_LINE}").is_err() {
         return 2;
     }
-    println!("{READY_LINE}");
 
     let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let reply = match serde_json::from_str::<WorkerRequest>(&line) {
@@ -486,15 +526,33 @@ pub fn run_worker(args: WorkerArgs) -> i32 {
         };
         let mut encoded = serde_json::to_string(&reply).expect("replies serialise");
         encoded.push('\n');
-        if stdout
+        if replies
             .write_all(encoded.as_bytes())
-            .and_then(|()| stdout.flush())
+            .and_then(|()| replies.flush())
             .is_err()
         {
             break;
         }
     }
     0
+}
+
+/// Duplicate fd 1 into a private handle for the protocol and point fd 1
+/// at fd 2, so anything the script writes to stdout joins stderr.
+fn claim_reply_channel() -> std::io::Result<std::fs::File> {
+    // SAFETY: dup and dup2 on the process's own standard descriptors,
+    // before any thread or the interpreter exists; the returned
+    // descriptor is owned by the File from here on.
+    let private = unsafe { libc::dup(std::io::stdout().as_raw_fd()) };
+    if private < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let redirected =
+        unsafe { libc::dup2(std::io::stderr().as_raw_fd(), std::io::stdout().as_raw_fd()) };
+    if redirected < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { std::fs::File::from_raw_fd(private) })
 }
 
 /// The directories the Python runtime reads: the interpreter home the
@@ -548,9 +606,9 @@ fn classify(error: crate::execution::ExecutionError) -> WorkerFailure {
         | ExecutionError::Python(_)
         | ExecutionError::Tessellation(_)
         | ExecutionError::ScriptNotFound(_) => WorkerFailure::Script { message },
-        ExecutionError::ModelFile(_) | ExecutionError::Provenance(_) => {
-            WorkerFailure::Runtime { message }
-        }
+        ExecutionError::ModelFile(_)
+        | ExecutionError::Provenance(_)
+        | ExecutionError::RuntimeMissing(_) => WorkerFailure::Runtime { message },
     }
 }
 

@@ -4,6 +4,8 @@
 //! corpus bundled into the binary, so the modelling agent works from exact
 //! signatures rather than training-data recall.
 
+use cadmark_core::cancellation::CancelFlag;
+
 use crate::openai_compatible::OpenAiCompatibleClient;
 
 /// System prompt for the reference lookup consumer.
@@ -94,9 +96,13 @@ impl DocLookup {
     /// reads as the tool's output: extracted API references, the corpus's
     /// own "nothing relevant" sentence, or the reason the lookup failed —
     /// a failed lookup is information the model acts on, not a silent gap.
-    pub async fn lookup(&self, query: &str) -> String {
+    pub async fn lookup(&self, query: &str, cancel: CancelFlag) -> String {
         let prompt = Self::build_prompt(query);
-        match self.client.request_text(LOOKUP_PROMPT, &prompt).await {
+        match self
+            .client
+            .request_text(LOOKUP_PROMPT, &prompt, cancel)
+            .await
+        {
             Ok(text) if text.trim().is_empty() => NO_RESULT.to_string(),
             Ok(text) => {
                 log::debug!("Doc lookup returned {} bytes of API reference", text.len());
@@ -155,7 +161,9 @@ mod tests {
         }
         .build_client(None)
         .unwrap();
-        let answer = DocLookup::new(client).lookup("fillet").await;
+        let answer = DocLookup::new(client)
+            .lookup("fillet", CancelFlag::new())
+            .await;
         server.await.unwrap();
         assert!(answer.starts_with("Documentation lookup failed"));
         assert!(answer.contains("boom"));
