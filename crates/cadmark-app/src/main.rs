@@ -11,6 +11,7 @@ pub mod orchestrator;
 mod project;
 pub mod turn;
 mod user_settings;
+mod validity;
 mod viewport;
 
 fn surface_error_action(error: wgpu::SurfaceError) -> eframe::egui_wgpu::SurfaceErrorAction {
