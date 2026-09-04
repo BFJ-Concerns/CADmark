@@ -36,6 +36,10 @@ All notable changes to this project will be documented in this file.
   the minimum distance between two selected elements
 
 ### Changed
+- The AI names the sketch-or-solid route before it edits: when a change
+  could be made to a sketch profile or to the solid, the reply says which
+  one it is taking before the script runs, and what it said stays in the
+  chat above the tool calls
 - Coherent dark theme shared by every panel: one accent colour for
   selection in the viewport and spatial comments in chat, three text
   levels, card-based messages
