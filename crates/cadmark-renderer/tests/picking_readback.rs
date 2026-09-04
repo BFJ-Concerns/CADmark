@@ -18,6 +18,7 @@ use cadmark_renderer::camera::StandardView;
 use cadmark_renderer::mesh::GpuMesh;
 use cadmark_renderer::picking::{PickingPass, SelectionFilter};
 use cadmark_renderer::pipeline::{RenderPipelines, Renderer, upload_mesh};
+use cadmark_renderer::section::{Axis, SectionPlane};
 use cadmark_renderer::viewport::{copy_pick_pixel, decode_pick_result, render_picking};
 
 const WIDTH: u32 = 256;
@@ -380,6 +381,43 @@ fn a_disabled_kind_falls_through_on_every_part_not_just_the_first(gpu: &Gpu) {
     );
 }
 
+/// A vertex the section has cut away must take its marker with it: the
+/// marker pass is expanded in screen space, so nothing about the quad's
+/// own geometry clips it — only the discard keyed on the vertex's world
+/// position does. With the vertex gone, the click reaches the face behind.
+fn a_marker_on_a_clipped_vertex_is_neither_drawn_nor_pickable(gpu: &Gpu) {
+    let mut renderer = front_facing_renderer(0);
+    let view_proj = renderer.simple_uniforms((WIDTH, HEIGHT)).view_proj;
+    let on_marker = pixels_below(view_proj, [0.0, 0.0, 0.5], -3.0);
+
+    assert_eq!(
+        pick_at(gpu, &renderer, SelectionFilter::default(), on_marker),
+        Some(TopologyElement::Vertex(VertexId(0))),
+        "the marker must be pickable before the section is asked to cut it away"
+    );
+
+    // The backdrop face sits at y = `behind`; the model vertex sits at
+    // y = 0. A plane halfway between them keeps the face and cuts the
+    // vertex, whichever side of the geometry the camera put the face on.
+    let behind = scene(view_proj).0.vertices[0].position[1];
+    renderer.section = SectionPlane {
+        enabled: true,
+        axis: Axis::Y,
+        offset: behind / 2.0,
+        flipped: behind > 0.0,
+    };
+    assert!(
+        renderer.section.keeps([0.0, behind, 0.0]) && !renderer.section.keeps([0.0, 0.0, 0.5]),
+        "the section must keep the face and cut the vertex for this to prove anything"
+    );
+
+    assert_eq!(
+        pick_at(gpu, &renderer, SelectionFilter::default(), on_marker),
+        Some(TopologyElement::Face(FaceId(0))),
+        "a marker on a section-clipped vertex is still pickable: the user selects what they cannot see"
+    );
+}
+
 /// One named check and the function that runs it.
 type Check = (&'static str, fn(&Gpu));
 
@@ -393,11 +431,11 @@ fn main() {
 
     let gpu = software_adapter();
     println!(
-        "\nrunning 5 tests on software adapter: {}",
+        "\nrunning 6 tests on software adapter: {}",
         gpu.adapter_name
     );
 
-    let checks: [Check; 5] = [
+    let checks: [Check; 6] = [
         (
             "an_edge_is_picked_beside_the_line_itself_not_only_on_it",
             an_edge_is_picked_beside_the_line_itself_not_only_on_it,
@@ -417,6 +455,10 @@ fn main() {
         (
             "a_disabled_kind_falls_through_on_every_part_not_just_the_first",
             a_disabled_kind_falls_through_on_every_part_not_just_the_first,
+        ),
+        (
+            "a_marker_on_a_clipped_vertex_is_neither_drawn_nor_pickable",
+            a_marker_on_a_clipped_vertex_is_neither_drawn_nor_pickable,
         ),
     ];
 
