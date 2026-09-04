@@ -11,6 +11,7 @@ use cadmark_core::geometry::{
 };
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::mesh::TessellatedMesh;
+use cadmark_core::sketch::SketchProfile;
 use serde::{Deserialize, Serialize};
 
 /// A request the application sends to the worker.
@@ -39,29 +40,67 @@ pub enum WorkerRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelFile(pub PathBuf);
 
+/// A solid result: measured, checked for validity, and kept on disk so it
+/// can be exported and measured again without re-running the script.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SolidResult {
+    /// Whole-model measurements.
+    pub summary: ModelSummary,
+    /// One entry per solid in the model, in the kernel's traversal order.
+    pub validity: Vec<SolidValidity>,
+    /// The model, retained for export.
+    pub file: ModelFile,
+}
+
+/// What kind of result a script reached. A script that has drawn a profile
+/// and not yet made a solid of it has no volume to summarise, no solid to
+/// check, and nothing to export, so it carries none of those rather than
+/// zeroed stand-ins that would read as a degenerate solid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "form", rename_all = "snake_case")]
+pub enum ModelForm {
+    Solid(SolidResult),
+    Sketch(SketchProfile),
+}
+
 /// Everything the application keeps from a successful execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExecutedModel {
-    /// Tessellated geometry for the renderer.
+    /// Tessellated geometry for the renderer. A sketch-only result has no
+    /// triangles: its geometry is in the profile its form carries.
     pub mesh: TessellatedMesh,
     /// Construction-time provenance for every element of the mesh.
     pub ledger: ProvenanceLedger,
     /// Measured geometry of every element, in ledger order.
     pub descriptors: GeometryDescriptors,
-    /// Whole-model measurements.
-    pub summary: ModelSummary,
-    /// One entry per solid in the model, in the kernel's traversal order.
-    /// A model with no solid has an empty list.
-    pub validity: Vec<SolidValidity>,
-    /// The model, retained for export.
-    pub model: ModelFile,
+    /// The result itself, in the shape its kind actually has.
+    pub form: ModelForm,
 }
 
 impl ExecutedModel {
+    /// The solid this execution produced, or `None` when it reached only a
+    /// sketch.
+    pub fn solid(&self) -> Option<&SolidResult> {
+        match &self.form {
+            ModelForm::Solid(solid) => Some(solid),
+            ModelForm::Sketch(_) => None,
+        }
+    }
+
+    /// The profile this execution drew, when no solid came of it yet.
+    pub fn sketch(&self) -> Option<&SketchProfile> {
+        match &self.form {
+            ModelForm::Sketch(sketch) => Some(sketch),
+            ModelForm::Solid(_) => None,
+        }
+    }
+
     /// Whether every solid is closed and valid — what "print-ready" means
-    /// for the export gate.
+    /// for the export gate. A sketch is never printable.
     pub fn is_printable(&self) -> bool {
-        !self.validity.is_empty() && self.validity.iter().all(|solid| solid.is_printable())
+        self.solid().is_some_and(|solid| {
+            !solid.validity.is_empty() && solid.validity.iter().all(|solid| solid.is_printable())
+        })
     }
 }
 
@@ -121,19 +160,21 @@ mod tests {
             mesh: TessellatedMesh::default(),
             ledger,
             descriptors: GeometryDescriptors::default(),
-            summary: ModelSummary {
-                volume: 1.0,
-                bounds_min: [0.0; 3],
-                bounds_max: [1.0; 3],
-                face_count: 1,
-                edge_count: 0,
-                vertex_count: 0,
-            },
-            validity: vec![SolidValidity {
-                closed: true,
-                valid: true,
-            }],
-            model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+            form: ModelForm::Solid(SolidResult {
+                summary: ModelSummary {
+                    volume: 1.0,
+                    bounds_min: [0.0; 3],
+                    bounds_max: [1.0; 3],
+                    face_count: 1,
+                    edge_count: 0,
+                    vertex_count: 0,
+                },
+                validity: vec![SolidValidity {
+                    closed: true,
+                    valid: true,
+                }],
+                file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+            }),
         }));
         let line = serde_json::to_string(&reply).unwrap();
         assert!(!line.contains('\n'));
@@ -160,16 +201,18 @@ mod tests {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
             descriptors: GeometryDescriptors::default(),
-            summary: ModelSummary {
-                volume: 0.0,
-                bounds_min: [0.0; 3],
-                bounds_max: [0.0; 3],
-                face_count: 0,
-                edge_count: 0,
-                vertex_count: 0,
-            },
-            validity,
-            model: ModelFile(PathBuf::new()),
+            form: ModelForm::Solid(SolidResult {
+                summary: ModelSummary {
+                    volume: 0.0,
+                    bounds_min: [0.0; 3],
+                    bounds_max: [0.0; 3],
+                    face_count: 0,
+                    edge_count: 0,
+                    vertex_count: 0,
+                },
+                validity,
+                file: ModelFile(PathBuf::new()),
+            }),
         };
         let good = SolidValidity {
             closed: true,
@@ -182,5 +225,39 @@ mod tests {
         assert!(model(vec![good, good]).is_printable());
         assert!(!model(vec![good, open]).is_printable());
         assert!(!model(Vec::new()).is_printable());
+    }
+
+    #[test]
+    fn a_sketch_result_crosses_the_boundary_carrying_no_solid() {
+        use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchPlane, SketchProfile};
+
+        let executed = ExecutedModel {
+            mesh: TessellatedMesh::default(),
+            ledger: ProvenanceLedger::new(),
+            descriptors: GeometryDescriptors::default(),
+            form: ModelForm::Sketch(SketchProfile {
+                plane: SketchPlane::default(),
+                curves: vec![SketchCurve {
+                    curve_id: 0,
+                    points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+                }],
+                corners: vec![SketchCorner {
+                    corner_id: 0,
+                    position: [0.0; 3],
+                }],
+                regions: Vec::new(),
+            }),
+        };
+
+        // Nothing about a sketch may read as a solid: no export gate opens,
+        // and the solid accessor states its absence rather than a zero.
+        assert!(!executed.is_printable());
+        assert!(executed.solid().is_none());
+        assert_eq!(executed.sketch().map(|s| s.curves.len()), Some(1));
+
+        let reply = WorkerReply::Executed(Box::new(executed));
+        let line = serde_json::to_string(&reply).unwrap();
+        assert!(!line.contains('\n'));
+        assert_eq!(serde_json::from_str::<WorkerReply>(&line).unwrap(), reply);
     }
 }

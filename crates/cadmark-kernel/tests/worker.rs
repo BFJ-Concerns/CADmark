@@ -60,13 +60,22 @@ fn executes_a_script_and_exports_its_kept_model() {
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
     assert_eq!(model.ledger.face_count(), 6);
-    assert_eq!(model.summary.face_count, 6);
+    assert_eq!(model.solid().expect("a solid result").summary.face_count, 6);
     assert!(model.is_printable());
-    assert!(model.model.0.is_file(), "model kept at {:?}", model.model);
+    assert!(
+        model.solid().expect("a solid result").file.0.is_file(),
+        "model kept at {:?}",
+        model.solid().expect("a solid result").file
+    );
 
     let export = project.path().join("part.stl");
     worker
-        .export(&model.model, ExportFormat::Stl, &export, roomy())
+        .export(
+            &model.solid().expect("a solid result").file,
+            ExportFormat::Stl,
+            &export,
+            roomy(),
+        )
         .unwrap();
     assert!(std::fs::metadata(&export).unwrap().len() > 0);
 }
@@ -80,7 +89,7 @@ fn measures_the_known_gap_between_faces_through_the_worker() {
 
     let measurement = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Face(FaceId(0)),
             TopologyElement::Face(FaceId(7)),
             roomy(),
@@ -102,7 +111,7 @@ fn measures_picked_edge_ids_in_the_topology_map_order() {
 
     let edge_distance = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Edge(EdgeId(0)),
             TopologyElement::Edge(EdgeId(11)),
             roomy(),
@@ -115,7 +124,7 @@ fn measures_picked_edge_ids_in_the_topology_map_order() {
 
     let error = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Edge(EdgeId(20)),
             TopologyElement::Edge(EdgeId(0)),
             roomy(),
@@ -137,7 +146,7 @@ fn measures_picked_vertex_ids_in_the_topology_map_order() {
 
     let vertex_distance = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Vertex(VertexId(2)),
             TopologyElement::Vertex(VertexId(4)),
             roomy(),
@@ -204,7 +213,12 @@ fn a_model_kept_before_a_killed_worker_still_exports() {
     ));
     let export = project.path().join("kept.step");
     worker
-        .export(&model.model, ExportFormat::Step, &export, roomy())
+        .export(
+            &model.solid().expect("a solid result").file,
+            ExportFormat::Step,
+            &export,
+            roomy(),
+        )
         .unwrap();
     assert!(std::fs::metadata(&export).unwrap().len() > 0);
 }

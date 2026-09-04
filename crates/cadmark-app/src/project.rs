@@ -15,8 +15,9 @@ use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity, T
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::{Conversation, Message};
+use cadmark_core::sketch::SketchProfile;
 use cadmark_core::version::VersionHistory;
-use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
+use cadmark_kernel::protocol::{ExecutedModel, ModelForm, SolidResult};
 use cadmark_renderer::camera::Bounds3;
 
 use crate::orchestrator::{OrchestratorCommand, OrchestratorResult, spawn_orchestrator};
@@ -45,14 +46,40 @@ fn load_history(dir: &Path) -> VersionHistory {
 }
 
 /// The model on screen: what the application keeps from the last
-/// successful execution besides the mesh, which lives on the GPU.
+/// successful execution besides the mesh, which lives on the GPU. A
+/// design that has reached only a sketch is here too, and carries no
+/// summary, validity or exportable file, because it has none.
 pub struct LoadedModel {
-    pub summary: ModelSummary,
     pub descriptors: GeometryDescriptors,
     pub bounds: Option<Bounds3>,
-    pub model: ModelFile,
-    /// Per-solid kernel validity retained for status and the export gate.
-    pub validity: Vec<SolidValidity>,
+    pub form: ModelForm,
+}
+
+impl LoadedModel {
+    pub fn solid(&self) -> Option<&SolidResult> {
+        match &self.form {
+            ModelForm::Solid(solid) => Some(solid),
+            ModelForm::Sketch(_) => None,
+        }
+    }
+
+    pub fn sketch(&self) -> Option<&SketchProfile> {
+        match &self.form {
+            ModelForm::Sketch(sketch) => Some(sketch),
+            ModelForm::Solid(_) => None,
+        }
+    }
+
+    /// The solid's summary, or nothing for a sketch — there is no volume
+    /// or face count to state until the profile becomes a solid.
+    pub fn summary(&self) -> Option<&ModelSummary> {
+        self.solid().map(|solid| &solid.summary)
+    }
+
+    /// Per-solid kernel validity, empty for a sketch.
+    pub fn validity(&self) -> &[SolidValidity] {
+        self.solid().map_or(&[], |solid| solid.validity.as_slice())
+    }
 }
 
 /// What the worker thread is doing, for the status bar and chat.
@@ -340,14 +367,17 @@ impl Project {
     /// Write the current model next to the script.
     pub fn request_export(&mut self, format: ExportFormat) -> Result<PathBuf, String> {
         let model = self.model.as_ref().ok_or("no model to export")?;
-        let decision = export_decision(&model.validity);
+        let solid = model
+            .solid()
+            .ok_or("a sketch cannot be exported until the script makes it a solid")?;
+        let decision = export_decision(&solid.validity);
         if decision != ExportDecision::Ready {
             return Err(export_warning(&decision).expect("non-ready decision has warning"));
         }
         let stem = parts::part_display_name(self.part.file_name());
         let path = self.dir.join(format!("{stem}.{}", format.extension()));
         self.send(OrchestratorCommand::Export {
-            model: model.model.clone(),
+            model: solid.file.clone(),
             format,
             path: path.clone(),
         })?;
@@ -362,8 +392,11 @@ impl Project {
         second: TopologyElement,
     ) -> Result<(), String> {
         let model = self.model.as_ref().ok_or("no model to measure")?;
+        let solid = model
+            .solid()
+            .ok_or("a sketch has no solid to measure between")?;
         self.send(OrchestratorCommand::MinimumDistance {
-            model: model.model.clone(),
+            model: solid.file.clone(),
             first,
             second,
         })?;
@@ -393,17 +426,22 @@ impl Project {
             model.mesh.vertices.len(),
             model.ledger.len(),
         );
-        let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
+        // A sketch has no mesh, so its own points are what the camera
+        // frames.
+        let bounds = match &model.form {
+            ModelForm::Sketch(sketch) => Bounds3::from_positions(sketch.points()),
+            ModelForm::Solid(_) => {
+                Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position))
+            }
+        };
         self.ledger = model.ledger;
         self.identification = Box::new(MeasuredIdentification {
             descriptors: model.descriptors.clone(),
         });
         self.model = Some(LoadedModel {
-            summary: model.summary,
             descriptors: model.descriptors,
             bounds,
-            model: model.model,
-            validity: model.validity,
+            form: model.form,
         });
         self.script_source = Some(source);
         self.has_script = true;
@@ -504,6 +542,57 @@ fn fresh_conversation(dir: &Path, conversation: &mut Conversation) -> Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cadmark_kernel::protocol::ModelFile;
+
+    fn sketch_form() -> ModelForm {
+        ModelForm::Sketch(SketchProfile {
+            plane: cadmark_core::sketch::SketchPlane {
+                origin: [0.0; 3],
+                normal: [0.0, 0.0, 1.0],
+                x_axis: [1.0, 0.0, 0.0],
+            },
+            curves: Vec::new(),
+            corners: Vec::new(),
+            regions: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_sketch_on_screen_offers_no_solid_to_export_or_measure() {
+        let sketch = LoadedModel {
+            descriptors: GeometryDescriptors::default(),
+            bounds: None,
+            form: sketch_form(),
+        };
+        let solid = LoadedModel {
+            descriptors: GeometryDescriptors::default(),
+            bounds: None,
+            form: ModelForm::Solid(SolidResult {
+                summary: ModelSummary {
+                    volume: 1000.0,
+                    bounds_min: [0.0; 3],
+                    bounds_max: [10.0; 3],
+                    face_count: 6,
+                    edge_count: 12,
+                    vertex_count: 8,
+                },
+                validity: vec![SolidValidity {
+                    closed: true,
+                    valid: true,
+                }],
+                file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+            }),
+        };
+
+        assert!(sketch.solid().is_none());
+        assert!(sketch.sketch().is_some());
+        assert!(sketch.summary().is_none());
+        assert!(sketch.validity().is_empty());
+
+        assert!(solid.sketch().is_none());
+        assert_eq!(solid.summary().map(|summary| summary.face_count), Some(6));
+        assert_eq!(solid.validity().len(), 1);
+    }
 
     #[test]
     fn a_conversation_saved_in_the_project_is_there_when_it_reopens() {

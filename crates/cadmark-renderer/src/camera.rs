@@ -240,6 +240,22 @@ impl Camera {
         };
     }
 
+    /// Look squarely at a plane in orthographic projection, so a profile
+    /// drawn on it reads at true shape rather than in perspective. The
+    /// side faced is whichever of the plane's two the camera is already
+    /// nearer, so framing a sketch does not turn the view inside out.
+    pub fn view_plane_face_on(&mut self, normal: [f32; 3]) {
+        let normal = normalize(normal);
+        let towards_eye = sub(self.eye_position(), self.target);
+        let direction = if dot(normal, towards_eye) < 0.0 {
+            normal.map(|component| -component)
+        } else {
+            normal
+        };
+        self.look_from(direction);
+        self.projection = Projection::Orthographic;
+    }
+
     /// The camera's axes in world space. Looking straight down or up, where
     /// world up is no guide, the screen's up is the direction the eye would
     /// face from the same yaw at the horizon, so the top view has +Y up.
@@ -665,6 +681,34 @@ mod tests {
                 .enumerate()
                 .any(|(axis, coordinate)| *coordinate < bounds.min[axis]
                     || *coordinate > bounds.max[axis])
+        );
+    }
+
+    #[test]
+    fn facing_a_plane_looks_squarely_at_it_in_orthographic() {
+        let mut camera = Camera::default();
+        camera.view_plane_face_on([0.0, 1.0, 0.0]);
+
+        assert_eq!(camera.projection(), Projection::Orthographic);
+        // Looking along the plane's normal: the eye sits on the normal
+        // from the target, so the profile is seen at true shape.
+        let eye = camera.eye_position();
+        assert!(eye[0].abs() < 1e-4, "{eye:?}");
+        assert!(eye[2].abs() < 1e-4, "{eye:?}");
+        assert!(eye[1].abs() > 1.0, "{eye:?}");
+    }
+
+    #[test]
+    fn facing_a_plane_keeps_the_side_the_camera_is_already_on() {
+        let mut camera = Camera::default();
+        camera.look_from([-1.0, 0.0, 0.0]);
+        let before = camera.eye_position();
+        // The plane's stated normal points the other way; the view must
+        // not flip to the far side of the sketch.
+        camera.view_plane_face_on([1.0, 0.0, 0.0]);
+        assert!(
+            camera.eye_position()[0].signum() == before[0].signum(),
+            "the view flipped to the other side of the plane"
         );
     }
 }
