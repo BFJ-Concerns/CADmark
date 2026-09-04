@@ -176,11 +176,50 @@ pub struct DuplicateTopologyId {
 /// that generated or last modified it. When an element has been through
 /// multiple operations (e.g. a face created by a Box then modified by a
 /// Fillet), the most recent operation is stored.
+///
+/// Serialised as entry lists rather than maps: JSON object keys are
+/// strings, and the typed IDs do not round-trip as keys.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "LedgerEntries", into = "LedgerEntries")]
 pub struct ProvenanceLedger {
     faces: HashMap<FaceId, LedgerValue>,
     edges: HashMap<EdgeId, LedgerValue>,
     vertices: HashMap<VertexId, LedgerValue>,
+}
+
+/// The ledger's wire shape.
+#[derive(Serialize, Deserialize)]
+struct LedgerEntries {
+    faces: Vec<(FaceId, LedgerValue)>,
+    edges: Vec<(EdgeId, LedgerValue)>,
+    vertices: Vec<(VertexId, LedgerValue)>,
+}
+
+impl From<ProvenanceLedger> for LedgerEntries {
+    fn from(ledger: ProvenanceLedger) -> Self {
+        // Sorted so the same ledger always serialises the same way.
+        let mut faces: Vec<_> = ledger.faces.into_iter().collect();
+        faces.sort_by_key(|(id, _)| id.0);
+        let mut edges: Vec<_> = ledger.edges.into_iter().collect();
+        edges.sort_by_key(|(id, _)| id.0);
+        let mut vertices: Vec<_> = ledger.vertices.into_iter().collect();
+        vertices.sort_by_key(|(id, _)| id.0);
+        Self {
+            faces,
+            edges,
+            vertices,
+        }
+    }
+}
+
+impl From<LedgerEntries> for ProvenanceLedger {
+    fn from(entries: LedgerEntries) -> Self {
+        Self {
+            faces: entries.faces.into_iter().collect(),
+            edges: entries.edges.into_iter().collect(),
+            vertices: entries.vertices.into_iter().collect(),
+        }
+    }
 }
 
 impl ProvenanceLedger {
@@ -396,6 +435,25 @@ mod tests {
 
         ledger.clear();
         assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn a_ledger_round_trips_through_json() {
+        let mut ledger = ProvenanceLedger::new();
+        ledger
+            .record_face(
+                FaceId(3),
+                LedgerValue::Resolved(ProvenanceEntry {
+                    source: source(2, "Box(1, 1, 1)"),
+                    operation: SemanticOperation::Box,
+                    operation_id: 1,
+                    relation: ProvenanceRelation::Generated,
+                }),
+            )
+            .unwrap();
+        ledger.record_edge(EdgeId(0), LedgerValue::Untraced).unwrap();
+        let json = serde_json::to_string(&ledger).unwrap();
+        assert_eq!(serde_json::from_str::<ProvenanceLedger>(&json).unwrap(), ledger);
     }
 
     #[test]
