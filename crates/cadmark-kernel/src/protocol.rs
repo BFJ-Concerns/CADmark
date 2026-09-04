@@ -51,6 +51,35 @@ pub struct SolidResult {
     pub validity: Vec<SolidValidity>,
     /// The model, retained for export.
     pub file: ModelFile,
+    /// Every independently completed part the script produced, in source
+    /// binding order. `id` is stable for one execution and `name` preserves
+    /// the binding the script author can recognise.
+    pub parts: Vec<ExecutedPart>,
+}
+
+/// One independently selectable and exportable solid from an execution.
+/// All fields are plain data because this crosses the worker boundary.
+/// Face, edge and vertex numbering restarts within each part, so a part
+/// carries its own ledger and descriptor tables rather than sharing the
+/// model's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutedPart {
+    pub id: u32,
+    pub name: String,
+    pub mesh: TessellatedMesh,
+    pub ledger: ProvenanceLedger,
+    pub sketch_lineage: SketchLineageLedger,
+    pub descriptors: GeometryDescriptors,
+    pub summary: ModelSummary,
+    pub validity: Vec<SolidValidity>,
+    /// The part's own BREP retained in worker scratch for export.
+    pub file: ModelFile,
+}
+
+impl ExecutedPart {
+    pub fn is_printable(&self) -> bool {
+        solids_are_printable(&self.validity)
+    }
 }
 
 /// What kind of result a script reached. A script that has drawn a profile
@@ -102,10 +131,13 @@ impl ExecutedModel {
     /// Whether every solid is closed and valid — what "print-ready" means
     /// for the export gate. A sketch is never printable.
     pub fn is_printable(&self) -> bool {
-        self.solid().is_some_and(|solid| {
-            !solid.validity.is_empty() && solid.validity.iter().all(|solid| solid.is_printable())
-        })
+        self.solid()
+            .is_some_and(|solid| solids_are_printable(&solid.validity))
     }
+}
+
+fn solids_are_printable(validity: &[SolidValidity]) -> bool {
+    !validity.is_empty() && validity.iter().all(|solid| solid.is_printable())
 }
 
 /// Why the worker could not complete a request.
@@ -179,6 +211,7 @@ mod tests {
                     valid: true,
                 }],
                 file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+                parts: Vec::new(),
             }),
         }));
         let line = serde_json::to_string(&reply).unwrap();
@@ -218,6 +251,7 @@ mod tests {
                 },
                 validity,
                 file: ModelFile(PathBuf::new()),
+                parts: Vec::new(),
             }),
         };
         let good = SolidValidity {

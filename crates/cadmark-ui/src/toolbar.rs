@@ -110,10 +110,14 @@ pub enum ToolbarAction {
     Refresh,
     /// Frame the whole model in the viewport.
     FitView,
+    /// The next viewport click selects a completed part, not a face or edge.
+    PickPart,
     /// Show or hide the code panel.
     ToggleCode,
     /// Write the current model to a file in the given format.
     Export(ExportFormat),
+    ExportPart(u32, ExportFormat),
+    ExportAll(ExportFormat),
     /// Open the settings dialog.
     OpenSettings,
     /// Switch between perspective and orthographic projection.
@@ -163,6 +167,9 @@ pub struct ToolbarState<'a> {
     pub controls_enabled: bool,
     /// Fit-view and export need a loaded model.
     pub has_model: bool,
+    /// The parts the executed script defines, as picking ID, script binding
+    /// name, and whether the part is a closed valid solid.
+    pub model_parts: &'a [(u32, String, bool)],
     /// Whether the code panel is showing.
     pub code_visible: bool,
     /// Whether the viewport is orthographic.
@@ -447,6 +454,17 @@ pub fn show_toolbar(
             action = ToolbarAction::FitView;
         }
 
+        if ui
+            .add_enabled(
+                !state.model_parts.is_empty(),
+                egui::Button::new("Pick part"),
+            )
+            .on_hover_text("Select a whole part with the next viewport click")
+            .clicked()
+        {
+            action = ToolbarAction::PickPart;
+        }
+
         ui.menu_button("View \u{25BE}", |ui| {
             ui.set_min_width(180.0);
             let projection = if state.orthographic {
@@ -560,6 +578,32 @@ pub fn show_toolbar(
                     {
                         action = ToolbarAction::Export(format);
                         ui.close_menu();
+                    }
+                }
+                if state.model_parts.len() > 1 {
+                    ui.separator();
+                    for format in ExportFormat::ALL {
+                        if ui
+                            .button(format!("Export all parts as {}", format.label()))
+                            .clicked()
+                        {
+                            action = ToolbarAction::ExportAll(format);
+                            ui.close_menu();
+                        }
+                    }
+                    for (id, name, printable) in state.model_parts {
+                        ui.menu_button(
+                            format!("{name}{}", if *printable { "" } else { " (warning)" }),
+                            |ui| {
+                                for format in ExportFormat::ALL {
+                                    if ui.button(format!("Export as {}", format.label())).clicked()
+                                    {
+                                        action = ToolbarAction::ExportPart(*id, format);
+                                        ui.close_menu();
+                                    }
+                                }
+                            },
+                        );
                     }
                 }
             });

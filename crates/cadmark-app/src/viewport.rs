@@ -7,16 +7,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use cadmark_core::geometry::{PickedElement, SketchElement, TopologyElement};
-use cadmark_core::mesh::TessellatedMesh;
+use cadmark_core::geometry::PartId;
 use cadmark_core::sketch::SketchProfile;
+use cadmark_kernel::protocol::ExecutedPart;
 use cadmark_renderer::mesh::{GpuMesh, GpuSketch};
 use cadmark_renderer::picking::PickingPass;
 use cadmark_renderer::pipeline::{
     MeshUniforms, RenderPipelines, SimpleUniforms, ViewportMarker, upload_mesh, upload_sketch,
 };
 use cadmark_renderer::viewport::{
-    copy_pick_pixel, decode_pick_result, render_picking, render_scene,
+    copy_pick_pixel, decode_pick_result, render_part_picking, render_picking, render_scene,
 };
 
 /// GPU resources for the 3D viewport, stored in egui_wgpu's
@@ -24,7 +24,9 @@ use cadmark_renderer::viewport::{
 pub struct ViewportResources {
     pipelines: RenderPipelines,
     picking: PickingPass,
-    mesh: Option<GpuMesh>,
+    meshes: Vec<GpuMesh>,
+    /// Part whose local face and edge IDs topology picking reads.
+    active_part: Option<usize>,
     /// The sketch profile on screen, when the design has reached only a
     /// sketch. Nothing picks against it: sketch elements are not pick
     /// targets.
@@ -35,7 +37,7 @@ pub struct ViewportResources {
     submission_marker_source: wgpu::Buffer,
     submission_marker_staging: wgpu::Buffer,
     next_submission_token: u32,
-    retry_pick: Option<(u32, u32)>,
+    retry_pick: Option<((u32, u32), bool)>,
     /// Decoded pick result from the most recent readback, waiting
     /// for `update()` to consume it.
     pick_result: Option<CompletedPick>,
@@ -56,7 +58,8 @@ impl ViewportResources {
         Self {
             pipelines: RenderPipelines::new(device, format, w, h),
             picking: PickingPass::new(device, w, h),
-            mesh: None,
+            meshes: Vec::new(),
+            active_part: None,
             pick_attempt: None,
             submission_marker_source: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pick_submission_marker_source"),
@@ -79,9 +82,17 @@ impl ViewportResources {
         }
     }
 
-    /// Replace the mesh on the GPU.
-    pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: Option<&TessellatedMesh>) {
-        self.mesh = mesh.map(|mesh| upload_mesh(device, mesh));
+    /// Replace every independently rendered part on the GPU.
+    pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[ExecutedPart]) {
+        self.meshes = parts
+            .iter()
+            .map(|part| upload_mesh(device, &part.mesh, PartId(part.id)))
+            .collect();
+        self.active_part = parts.len().checked_sub(1);
+    }
+
+    pub fn set_active_part(&mut self, id: u32) {
+        self.active_part = self.meshes.get(id as usize).map(|_| id as usize);
     }
 
     /// Replace the sketch profile on the GPU.
@@ -109,9 +120,7 @@ impl ViewportResources {
 }
 
 pub enum CompletedPick {
-    Hit(TopologyElement),
-    /// A drawn sketch element under the cursor rather than solid topology.
-    SketchHit(SketchElement),
+    Hit(cadmark_core::geometry::PickedElement),
     Background,
     ReadbackFailed,
 }
@@ -191,28 +200,56 @@ impl HoverPick {
 struct PickAttempt {
     pixel: (u32, u32),
     submission_token: u32,
+    part_pick: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum PickSubmissionDecision {
     ReadPick,
-    Retry((u32, u32)),
+    Retry((u32, u32), bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickPass {
+    Topology,
+    Part,
 }
 
 fn pick_submission_decision(attempt: PickAttempt, marker_bytes: [u8; 4]) -> PickSubmissionDecision {
     if u32::from_le_bytes(marker_bytes) == attempt.submission_token {
         PickSubmissionDecision::ReadPick
     } else {
-        PickSubmissionDecision::Retry(attempt.pixel)
+        PickSubmissionDecision::Retry(attempt.pixel, attempt.part_pick)
     }
+}
+
+fn next_pick_request(
+    part_pick_request: Option<(u32, u32)>,
+    topology_pick_request: Option<(u32, u32)>,
+    retry_pick: Option<((u32, u32), bool)>,
+) -> Option<((u32, u32), PickPass)> {
+    part_pick_request
+        .map(|pixel| (pixel, PickPass::Part))
+        .or(topology_pick_request.map(|pixel| (pixel, PickPass::Topology)))
+        .or_else(|| {
+            retry_pick.map(|(pixel, part_pick)| {
+                (
+                    pixel,
+                    if part_pick {
+                        PickPass::Part
+                    } else {
+                        PickPass::Topology
+                    },
+                )
+            })
+        })
 }
 
 /// What a completed click readback means for the selection.
 #[derive(Debug, PartialEq)]
 pub enum PickTransition {
     Waiting,
-    Hit(TopologyElement, (f32, f32)),
-    SketchHit(SketchElement, (f32, f32)),
+    Hit(cadmark_core::geometry::PickedElement, (f32, f32)),
     Background,
     ReadbackFailed,
 }
@@ -228,10 +265,6 @@ pub fn completed_pick_transition(
         None => PickTransition::Waiting,
         Some(CompletedPick::Hit(element)) => match pick_in_flight.take() {
             Some(screen_pos) => PickTransition::Hit(element, screen_pos),
-            None => PickTransition::Background,
-        },
-        Some(CompletedPick::SketchHit(element)) => match pick_in_flight.take() {
-            Some(screen_pos) => PickTransition::SketchHit(element, screen_pos),
             None => PickTransition::Background,
         },
         Some(CompletedPick::Background) => {
@@ -259,6 +292,8 @@ pub struct ViewportCallback {
     /// Pixel coordinates within the viewport to read back for
     /// picking, if the user clicked this frame.
     pub pick_request: Option<(u32, u32)>,
+    /// A whole-part click uses its own picking pass and ID range.
+    pub part_pick_request: Option<(u32, u32)>,
     /// Pixel coordinates under the cursor, if it is over the viewport.
     pub hover_request: Option<(u32, u32)>,
     /// Viewport size in physical pixels (for resize detection).
@@ -308,12 +343,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                                 Ok(Ok(())) => {
                                     let data = slice.get_mapped_range();
                                     res.pick_result = Some(match decode_pick_result(&data) {
-                                        Some(PickedElement::Solid(element)) => {
-                                            CompletedPick::Hit(element)
-                                        }
-                                        Some(PickedElement::Sketch(element)) => {
-                                            CompletedPick::SketchHit(element)
-                                        }
+                                        Some(element) => CompletedPick::Hit(element),
                                         None => CompletedPick::Background,
                                     });
                                     drop(data);
@@ -324,13 +354,13 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                                 }
                             }
                         }
-                        PickSubmissionDecision::Retry(pixel) => {
+                        PickSubmissionDecision::Retry(pixel, part_pick) => {
                             log::debug!(
                                 "Pick submission was dropped; retrying at ({}, {})",
                                 pixel.0,
                                 pixel.1
                             );
-                            res.retry_pick = Some(pixel);
+                            res.retry_pick = Some((pixel, part_pick));
                         }
                     }
                 }
@@ -373,11 +403,21 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         );
 
         // ── Pick and hover readbacks ──
-        if let Some(mesh) = &res.mesh {
-            if self.pick_request.is_some() {
+        if !res.meshes.is_empty() {
+            let topology_meshes = res
+                .active_part
+                .and_then(|id| res.meshes.get(id))
+                .map(std::slice::from_ref)
+                .unwrap_or(&res.meshes);
+            if self.pick_request.is_some() || self.part_pick_request.is_some() {
                 res.retry_pick = None;
             }
-            if let Some((x, y)) = self.pick_request.or_else(|| res.retry_pick.take()) {
+            let requested = next_pick_request(
+                self.part_pick_request,
+                self.pick_request,
+                res.retry_pick.take(),
+            );
+            if let Some(((x, y), pass)) = requested {
                 // Submit picking independently. eframe acquires the surface
                 // after prepare(); an Outdated surface returns early and drops
                 // its shared encoder, but must not drop user selection work.
@@ -385,7 +425,22 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("pick_readback_encoder"),
                     });
-                render_picking(&mut pick_encoder, &res.pipelines, &res.picking, mesh);
+                if pass == PickPass::Part {
+                    render_part_picking(
+                        &mut pick_encoder,
+                        &res.pipelines,
+                        &res.picking,
+                        &res.meshes,
+                    );
+                } else {
+                    render_picking(
+                        &mut pick_encoder,
+                        &res.pipelines,
+                        &res.picking,
+                        &res.meshes,
+                        topology_meshes,
+                    );
+                }
 
                 let submission_token = res.next_submission_token;
                 res.next_submission_token = res.next_submission_token.wrapping_add(1).max(1);
@@ -412,6 +467,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                 res.pick_attempt = Some(PickAttempt {
                     pixel: (x, y),
                     submission_token,
+                    part_pick: pass == PickPass::Part,
                 });
             } else if let Some((x, y)) = self.hover_request
                 && res.hover.in_flight.is_none()
@@ -422,7 +478,13 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("hover_readback_encoder"),
                     });
-                render_picking(&mut hover_encoder, &res.pipelines, &res.picking, mesh);
+                render_picking(
+                    &mut hover_encoder,
+                    &res.pipelines,
+                    &res.picking,
+                    &res.meshes,
+                    topology_meshes,
+                );
                 copy_pick_pixel(&mut hover_encoder, &res.picking, &res.hover.staging, x, y);
                 queue.submit(std::iter::once(hover_encoder.finish()));
                 res.hover.begin_readback();
@@ -436,11 +498,9 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         render_scene(
             encoder,
             &res.pipelines,
-            res.mesh.as_ref(),
+            &res.meshes,
             res.sketch.as_ref(),
             self.clear_colour,
-            // The alpha already in the uniforms decides the pass: one source
-            // of truth for "the model is see-through this frame".
             self.mesh_uniforms.mesh_alpha < 1.0,
         );
 
@@ -489,7 +549,7 @@ pub fn viewport_clear_colour(target_is_srgb: bool) -> wgpu::Color {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::{FaceId, SketchElementKind, TopologyElement};
+    use cadmark_core::geometry::{FaceId, TopologyElement};
 
     use super::*;
 
@@ -498,6 +558,7 @@ mod tests {
         let attempt = PickAttempt {
             pixel: (438, 466),
             submission_token: 42,
+            part_pick: false,
         };
         assert_eq!(
             pick_submission_decision(attempt, 42_u32.to_le_bytes()),
@@ -510,10 +571,24 @@ mod tests {
         let attempt = PickAttempt {
             pixel: (438, 466),
             submission_token: 42,
+            part_pick: true,
         };
         assert_eq!(
             pick_submission_decision(attempt, 41_u32.to_le_bytes()),
-            PickSubmissionDecision::Retry((438, 466))
+            PickSubmissionDecision::Retry((438, 466), true)
+        );
+    }
+
+    #[test]
+    fn a_retried_part_pick_uses_the_part_picking_pass() {
+        let retry = PickSubmissionDecision::Retry((438, 466), true);
+        let PickSubmissionDecision::Retry(pixel, part_pick) = retry else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            next_pick_request(None, None, Some((pixel, part_pick))),
+            Some(((438, 466), PickPass::Part))
         );
     }
 
@@ -529,45 +604,14 @@ mod tests {
 
     #[test]
     fn completed_hit_consumes_and_returns_the_pick_anchor() {
-        let element = TopologyElement::Face(FaceId(3));
+        let element =
+            cadmark_core::geometry::PickedElement::Solid(TopologyElement::Face(FaceId(3)));
         let mut in_flight = Some((120.0, 240.0));
         assert_eq!(
             completed_pick_transition(Some(CompletedPick::Hit(element.clone())), &mut in_flight),
             PickTransition::Hit(element, (120.0, 240.0))
         );
         assert_eq!(in_flight, None);
-    }
-
-    #[test]
-    fn a_completed_sketch_hit_consumes_and_returns_the_pick_anchor() {
-        let element = SketchElement {
-            kind: SketchElementKind::Curve,
-            index: 2,
-        };
-        let mut in_flight = Some((120.0, 240.0));
-        assert_eq!(
-            completed_pick_transition(Some(CompletedPick::SketchHit(element)), &mut in_flight),
-            PickTransition::SketchHit(element, (120.0, 240.0))
-        );
-        assert_eq!(in_flight, None);
-    }
-
-    /// A sketch hit with no anchor is a stale readback, the same as a
-    /// solid one: it puts the selection down rather than opening an
-    /// overlay at a position nobody clicked.
-    #[test]
-    fn a_sketch_hit_without_an_anchor_falls_back_to_the_background() {
-        let mut in_flight = None;
-        assert_eq!(
-            completed_pick_transition(
-                Some(CompletedPick::SketchHit(SketchElement {
-                    kind: SketchElementKind::Region,
-                    index: 0,
-                })),
-                &mut in_flight
-            ),
-            PickTransition::Background
-        );
     }
 
     #[test]

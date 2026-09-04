@@ -3,9 +3,6 @@
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
-    // The same section plane the visible passes use. Clipped-away geometry
-    // must not answer a click: a face the user cannot see but can still
-    // select is a bug they would never diagnose.
     section_plane: vec4<f32>,
 }
 
@@ -20,12 +17,15 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) face_id: f32,
     @location(3) _padding: f32,
+    @location(4) part_id: f32,
+    @location(5) _part_padding: vec3<f32>,
 }
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) face_id: f32,
     @location(1) world_pos: vec3<f32>,
+    @location(2) part_id: f32,
 }
 
 struct EdgeVertexInput {
@@ -45,7 +45,17 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip_pos = uniforms.view_proj * vec4<f32>(in.position, 1.0);
     out.face_id = in.face_id;
     out.world_pos = in.position;
+    out.part_id = in.part_id;
     return out;
+}
+
+@fragment
+fn fs_part(in: VertexOutput) -> @location(0) vec4<u32> {
+    if !section_keeps(uniforms.section_plane, in.world_pos) {
+        discard;
+    }
+    let id = u32(in.part_id + 0.5);
+    return vec4<u32>(id & 0xFFu, (id >> 8u) & 0xFFu, (id >> 16u) & 0xFFu, (id >> 24u) & 0xFFu);
 }
 
 @vertex

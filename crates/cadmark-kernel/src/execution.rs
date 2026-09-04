@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
 
-use crate::protocol::{ExecutedModel, ModelFile, ModelForm, SolidResult};
+use crate::protocol::{ExecutedModel, ExecutedPart, ModelFile, ModelForm, SolidResult};
 
 #[derive(Error, Debug)]
 pub enum ExecutionError {
@@ -266,26 +266,44 @@ fn capture_result(
     scratch_dir: &Path,
 ) -> Result<ExecutedModel, ExecutionError> {
     match crate::tessellation::find_result_shape(globals)? {
-        crate::tessellation::ScriptResult::Solid(shape) => {
-            let (_raw, ledger, sketch_lineage) =
-                crate::provenance::finalise(py, session, &shape, source)?;
-            let mesh = crate::tessellation::tessellate_from_namespace(py, globals, &shape)?;
-            validate_tessellation_ids(&mesh, &ledger)?;
-            let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
-            let (descriptors, summary) =
-                crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
-            log::info!("Model measured: {}", summary.describe());
-            let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
-            let file = keep_model(py, &shape, scratch_dir)?;
-            Ok(ExecutedModel {
-                mesh,
-                ledger,
-                sketch_lineage,
-                descriptors,
-                form: ModelForm::Solid(SolidResult {
+        crate::tessellation::ScriptResult::Solids(shapes) => {
+            let mut parts = Vec::with_capacity(shapes.len());
+            for (id, (name, shape)) in shapes.into_iter().enumerate() {
+                let (_raw, ledger, sketch_lineage) =
+                    crate::provenance::finalise(py, session, &shape, source)?;
+                let mesh = crate::tessellation::tessellate_shape(py, globals, &shape)?;
+                validate_tessellation_ids(&mesh, &ledger)?;
+                let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
+                let (descriptors, summary) =
+                    crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
+                let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
+                let file = keep_model(py, &shape, scratch_dir)?;
+                log::info!("Part {name} measured: {}", summary.describe());
+                parts.push(ExecutedPart {
+                    id: id as u32,
+                    name,
+                    mesh,
+                    ledger,
+                    sketch_lineage,
+                    descriptors,
                     summary,
                     validity,
                     file,
+                });
+            }
+            // The whole-model view stays the last part, which is what a
+            // single-part script produced before parts were distinguished.
+            let whole = parts.last().expect("discovery returns at least one part");
+            Ok(ExecutedModel {
+                mesh: whole.mesh.clone(),
+                ledger: whole.ledger.clone(),
+                sketch_lineage: whole.sketch_lineage.clone(),
+                descriptors: whole.descriptors.clone(),
+                form: ModelForm::Solid(SolidResult {
+                    summary: whole.summary.clone(),
+                    validity: whole.validity.clone(),
+                    file: whole.file.clone(),
+                    parts: parts.clone(),
                 }),
             })
         }
@@ -295,7 +313,7 @@ fn capture_result(
             Ok(ExecutedModel {
                 mesh: TessellatedMesh::default(),
                 ledger: ProvenanceLedger::new(),
-                sketch_lineage: Default::default(),
+                sketch_lineage: cadmark_core::sketch_lineage::SketchLineageLedger::default(),
                 descriptors: cadmark_core::geometry::GeometryDescriptors::default(),
                 form: ModelForm::Sketch(profile),
             })
@@ -405,7 +423,7 @@ mod tests {
     use super::*;
     use cadmark_core::context::{NullIdentification, resolve_context};
     use cadmark_core::geometry::GeometryContext;
-    use cadmark_core::geometry::{EdgeId, FaceId, PickedElement, TopologyElement, VertexId};
+    use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
@@ -844,7 +862,7 @@ with BuildPart() as part:
             entry(context).operation == SemanticOperation::Fillet
                 && matches!(
                     context.element,
-                    PickedElement::Solid(TopologyElement::Face(_))
+                    cadmark_core::geometry::PickedElement::Solid(TopologyElement::Face(_))
                 )
                 && entry(context).relation == ProvenanceRelation::Generated
         }));
@@ -856,7 +874,7 @@ with BuildPart() as part:
             entry(context).operation == SemanticOperation::Fillet
                 && matches!(
                     context.element,
-                    PickedElement::Solid(TopologyElement::Edge(_))
+                    cadmark_core::geometry::PickedElement::Solid(TopologyElement::Edge(_))
                 )
                 && matches!(
                     entry(context).relation,
@@ -868,7 +886,7 @@ with BuildPart() as part:
             entry(context).operation == SemanticOperation::Fillet
                 && matches!(
                     context.element,
-                    PickedElement::Solid(TopologyElement::Vertex(_))
+                    cadmark_core::geometry::PickedElement::Solid(TopologyElement::Vertex(_))
                 )
                 && matches!(
                     entry(context).relation,
@@ -894,7 +912,7 @@ with BuildPart() as part:
             entry(context).operation == SemanticOperation::Chamfer
                 && matches!(
                     context.element,
-                    PickedElement::Solid(TopologyElement::Face(_))
+                    cadmark_core::geometry::PickedElement::Solid(TopologyElement::Face(_))
                 )
                 && entry(context).relation == ProvenanceRelation::Generated
         }));
@@ -906,7 +924,7 @@ with BuildPart() as part:
             entry(context).operation == SemanticOperation::Chamfer
                 && matches!(
                     context.element,
-                    PickedElement::Solid(TopologyElement::Edge(_))
+                    cadmark_core::geometry::PickedElement::Solid(TopologyElement::Edge(_))
                 )
                 && matches!(
                     entry(context).relation,
@@ -918,7 +936,7 @@ with BuildPart() as part:
             entry(context).operation == SemanticOperation::Chamfer
                 && matches!(
                     context.element,
-                    PickedElement::Solid(TopologyElement::Vertex(_))
+                    cadmark_core::geometry::PickedElement::Solid(TopologyElement::Vertex(_))
                 )
                 && matches!(
                     entry(context).relation,
@@ -1614,7 +1632,7 @@ with BuildPart() as part:
             entry(context).operation == SemanticOperation::Extrude
                 && matches!(
                     context.element,
-                    PickedElement::Solid(TopologyElement::Face(_))
+                    cadmark_core::geometry::PickedElement::Solid(TopologyElement::Face(_))
                 )
                 && entry(context).source.line == 12
         }));
@@ -1634,12 +1652,17 @@ with BuildPart() as part:
         let result = result.unwrap();
         for context in resolved_contexts(&result) {
             let expected_relation = match context.element {
-                PickedElement::Solid(TopologyElement::Face(_)) => ProvenanceRelation::Generated,
-                PickedElement::Solid(TopologyElement::Edge(_))
-                | PickedElement::Solid(TopologyElement::Vertex(_)) => {
+                cadmark_core::geometry::PickedElement::Solid(TopologyElement::Face(_)) => {
+                    ProvenanceRelation::Generated
+                }
+                cadmark_core::geometry::PickedElement::Solid(TopologyElement::Part(_))
+                | cadmark_core::geometry::PickedElement::Solid(TopologyElement::Edge(_))
+                | cadmark_core::geometry::PickedElement::Solid(TopologyElement::Vertex(_)) => {
                     ProvenanceRelation::GeneratedDescendant
                 }
-                PickedElement::Sketch(_) => unreachable!("solid provenance test resolved a sketch"),
+                cadmark_core::geometry::PickedElement::Sketch(_) => {
+                    unreachable!("solid provenance test resolved a sketch")
+                }
             };
             let provenance = entry(&context);
             assert_eq!(provenance.operation, SemanticOperation::Revolve);

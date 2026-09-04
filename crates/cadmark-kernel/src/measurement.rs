@@ -227,6 +227,8 @@ def measure(shape, session):
 pub enum MeasurementError {
     #[error("minimum-distance measurement failed: {0}")]
     Python(#[from] PyErr),
+    #[error("{0} is a whole part; measure between faces, edges or vertices")]
+    NotMeasurable(String),
 }
 
 /// Measure the finalised model. `session` is the provenance session whose
@@ -352,8 +354,8 @@ pub(crate) fn minimum_distance(
         let measure = namespace
             .get_item("minimum_distance")?
             .expect("measurement source defines minimum_distance()");
-        let (first_kind, first_index) = element_reference(first);
-        let (second_kind, second_index) = element_reference(second);
+        let (first_kind, first_index) = element_reference(first)?;
+        let (second_kind, second_index) = element_reference(second)?;
         let millimetres = measure
             .call1((
                 model.0.display().to_string(),
@@ -367,10 +369,14 @@ pub(crate) fn minimum_distance(
     })
 }
 
-fn element_reference(element: &TopologyElement) -> (&'static str, u32) {
+/// The traversal collection and index the measurement helper looks an element
+/// up by. A part names no such collection: distance between whole parts is a
+/// relationship between parts, which the commission places outside CADmark.
+fn element_reference(element: &TopologyElement) -> Result<(&'static str, u32), MeasurementError> {
     match element {
-        TopologyElement::Face(id) => ("face", id.0),
-        TopologyElement::Edge(id) => ("edge", id.0),
-        TopologyElement::Vertex(id) => ("vertex", id.0),
+        TopologyElement::Face(id) => Ok(("face", id.0)),
+        TopologyElement::Edge(id) => Ok(("edge", id.0)),
+        TopologyElement::Vertex(id) => Ok(("vertex", id.0)),
+        TopologyElement::Part(_) => Err(MeasurementError::NotMeasurable(element.display_label())),
     }
 }

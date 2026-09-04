@@ -933,6 +933,7 @@ mod tests {
                     valid: true,
                 }],
                 file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+                parts: Vec::new(),
             }),
         }
     }

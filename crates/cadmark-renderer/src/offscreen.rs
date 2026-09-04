@@ -113,7 +113,15 @@ impl OffscreenRenderer {
         uniforms: &MeshUniforms,
         clear_colour: wgpu::Color,
     ) -> Result<RenderedImage, OffscreenError> {
-        let gpu_mesh: Option<GpuMesh> = mesh.map(|mesh| crate::pipeline::upload_mesh(device, mesh));
+        // One mesh, uploaded as part zero: this path renders a framed
+        // picture, not a pickable scene, so no part distinction is read
+        // back from it.
+        let gpu_mesh: Vec<GpuMesh> = mesh
+            .map(|mesh| {
+                crate::pipeline::upload_mesh(device, mesh, cadmark_core::geometry::PartId(0))
+            })
+            .into_iter()
+            .collect();
         let gpu_sketch = sketch.map(|sketch| crate::pipeline::upload_sketch(device, sketch));
 
         queue.write_buffer(
@@ -128,7 +136,7 @@ impl OffscreenRenderer {
         render_scene_into(
             &mut encoder,
             &self.pipelines,
-            gpu_mesh.as_ref(),
+            &gpu_mesh,
             gpu_sketch.as_ref(),
             clear_colour,
             // The offscreen render is what the AI is shown, so it draws
