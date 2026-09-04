@@ -13,6 +13,9 @@ All notable changes to this project will be documented in this file.
   limit while retaining decisions and outstanding requests
 - Spatial comments now give the AI surrounding script context and the selected
   element's adjoining final-topology elements
+- Each AI request carries a curated library of worked build123d examples
+  for the operations it names, so the model sees what a good script for
+  that operation looks like as well as what the API does
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally
