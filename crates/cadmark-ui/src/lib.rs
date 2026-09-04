@@ -3,15 +3,12 @@
 // A shared theme, the toolbar, the chat pane with message type
 // distinction, the comment overlay positioned near selected geometry,
 // the view gizmo in the viewport corner, the read-only code panel, the
-// status bar, the start view shown before a project is chosen, the
-// part-naming prompt, the version-naming dialog, and the settings dialog.
+// status bar, the version-naming dialog, and the settings dialog.
 
 pub mod chat;
 pub mod code_panel;
 pub mod overlay;
-pub mod part_name_dialog;
 pub mod settings_dialog;
-pub mod start_view;
 pub mod status;
 pub mod theme;
 pub mod toolbar;

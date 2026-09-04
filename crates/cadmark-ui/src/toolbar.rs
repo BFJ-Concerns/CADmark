@@ -60,10 +60,6 @@ pub enum ToolbarAction {
     NameVersion,
     /// Choose another project folder.
     OpenProject,
-    /// Start a part with no name yet in the open project.
-    NewPart,
-    /// Open another part of the open project, by file name.
-    OpenPart(String),
     /// Archive the current chat and begin a blank conversation.
     NewConversation,
     /// Open one of the recently used project folders.
@@ -88,27 +84,13 @@ pub enum ToolbarAction {
     StandardView(StandardView),
 }
 
-/// One part the user can switch to, as the toolbar shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PartOption {
-    /// The script file inside the project folder.
-    pub file_name: String,
-    /// How the part is named for the user.
-    pub display: String,
-}
-
 /// What the toolbar may offer right now.
 #[derive(Debug, Clone)]
 pub struct ToolbarState<'a> {
     /// The open project folder.
     pub project_dir: &'a Path,
-    /// Name of the open part's script file inside the project.
+    /// Name of the script file inside the project.
     pub script_filename: &'a str,
-    /// How the open part is named for the user; "Untitled" until its
-    /// first save.
-    pub part_name: &'a str,
-    /// Every part the folder holds, in the order they are offered.
-    pub parts: &'a [PartOption],
     /// Whether the script exists on disk yet.
     pub has_script: bool,
     /// Recently opened project folders, most recent first, excluding the
@@ -224,43 +206,6 @@ pub fn show_toolbar(
                 }
                 if ui.button("Show folder in file manager").clicked() {
                     action = ToolbarAction::RevealProject;
-                    ui.close_menu();
-                }
-            });
-
-            // ── Part ───────────────────────────────────────────────
-            // A folder holds any number of parts; this is how the user
-            // moves between them without leaving the app.
-            let part_title = egui::RichText::new(format!("{} \u{25BE}", state.part_name))
-                .color(theme::TEXT_STRONG);
-            ui.menu_button(part_title, |ui| {
-                ui.set_min_width(220.0);
-                ui.label(
-                    egui::RichText::new("Parts in this folder")
-                        .small()
-                        .color(theme::TEXT_MUTED),
-                );
-                for part in state.parts {
-                    let open = part.file_name == state.script_filename;
-                    if ui.selectable_label(open, &part.display).clicked() && !open {
-                        action = ToolbarAction::OpenPart(part.file_name.clone());
-                        ui.close_menu();
-                    }
-                }
-                if state.parts.is_empty() {
-                    ui.label(
-                        egui::RichText::new("No parts yet")
-                            .small()
-                            .color(theme::TEXT_MUTED),
-                    );
-                }
-                ui.separator();
-                if ui
-                    .button("New part")
-                    .on_hover_text("Start another part in this folder; it is named when you save")
-                    .clicked()
-                {
-                    action = ToolbarAction::NewPart;
                     ui.close_menu();
                 }
             });

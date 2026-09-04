@@ -5,18 +5,6 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Start view on launch: recent projects, opening a project folder, and
-  creating a new one. Nothing is loaded until a project is chosen; a folder
-  named on the command line still opens directly. Chat stays available there:
-  a message typed before a project is open is sent as the first turn of the
-  project you then choose
-- A project folder holds any number of parts. The toolbar's part menu
-  switches between them and creates a new one; a new part is Untitled until
-  the first save asks for its name, which becomes its file name, after which
-  the same key names a version
-- Design steps record which part they changed, so undo reopens that part
-
-### Changed
 - New conversation control archives the current chat before starting a blank
   one, leaving the project script unchanged
 - Chat shows estimated model-context occupancy, including reserved reference
@@ -37,6 +25,12 @@ All notable changes to this project will be documented in this file.
   moments earlier in the same reply
 - A model that cannot read images is told plainly that the render
   tool is unavailable, rather than left to infer its absence
+- Ambiguous anchors offer their candidate source lines in the comment
+  overlay, most likely first where the ledger can rank them and plainly
+  unordered where it cannot; hovering a candidate highlights its own line
+  in the code panel and the geometry that line accounts for in the
+  viewport; choosing one sends that line alone to the AI, and choosing
+  none sends them all as before
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally
