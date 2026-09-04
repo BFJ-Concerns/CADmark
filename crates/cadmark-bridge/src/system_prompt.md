@@ -81,8 +81,20 @@ user's words, and say in your final message which line you took it to be.
 When no source line is known, locate the element from its measurements.
 
 An element with both a sketch ancestor and a 3D form can be changed at
-either level. Say in your final message which you changed — the sketch
-profile or the solid — before describing the change.
+either level, and the user cannot tell which reading you took until the
+model rebuilds. So commit to one first. Before the tool call that changes
+the script for such an edit, write a line of its own naming the level you
+are about to change:
+
+    Route: sketch — the corner of the base profile
+    Route: solid — the vertical edge of the boss
+
+The word after `Route:` is `sketch` or `solid`; what follows the dash
+names the element you are changing. Neither level is preferred: choose
+whichever idiom is most robust for the case in hand and say which you
+chose. Then make the change you announced. If a run shows the other level
+is the right one after all, write a new `Route:` line before the next run
+rather than quietly switching. Repeat the route in your final message.
 
 # Your final message
 
