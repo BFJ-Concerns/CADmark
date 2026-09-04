@@ -15,13 +15,14 @@ pub enum SketchRoute {
     Solid,
 }
 
-/// A route the model announced, with the element it named if it named one.
+/// A route the model announced, and the element it named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteAnnouncement {
     pub route: SketchRoute,
-    /// What the announcement said it was changing, absent when the line
-    /// carried only the level.
-    pub element: Option<String>,
+    /// What the announcement said it was changing. A level with no
+    /// element names no commitment anyone can check the change against,
+    /// so it is not an announcement at all.
+    pub element: String,
 }
 
 const MARKER: &str = "route:";
@@ -58,10 +59,7 @@ fn announcement_on_line(line: &str) -> Option<RouteAnnouncement> {
         _ => return None,
     };
     let element = tidy(element);
-    Some(RouteAnnouncement {
-        route,
-        element: (!element.is_empty()).then_some(element),
-    })
+    (!element.is_empty()).then_some(RouteAnnouncement { route, element })
 }
 
 #[cfg(test)]
@@ -74,21 +72,11 @@ mod tests {
             announced_route("Route: sketch — the corner of the base profile\n\nRounding it there.")
                 .expect("the line announces a route");
         assert_eq!(announcement.route, SketchRoute::Sketch);
-        assert_eq!(
-            announcement.element.as_deref(),
-            Some("the corner of the base profile")
-        );
+        assert_eq!(announcement.element, "the corner of the base profile");
 
         let solid = announced_route("Route: solid — the vertical edge of the boss")
             .expect("the line announces a route");
         assert_eq!(solid.route, SketchRoute::Solid);
-    }
-
-    #[test]
-    fn a_level_without_an_element_still_announces_a_route() {
-        let announcement = announced_route("Route: solid").expect("the line announces a route");
-        assert_eq!(announcement.route, SketchRoute::Solid);
-        assert_eq!(announcement.element, None);
     }
 
     #[test]
@@ -98,6 +86,9 @@ mod tests {
             "The route: sketch or solid, depending on the case.",
             "Reroute: sketch",
             "Route: both — the profile and the boss",
+            // A level alone commits to nothing checkable.
+            "Route: solid",
+            "Route: sketch —",
             "Route:",
             "",
         ] {
@@ -112,7 +103,7 @@ mod tests {
         )
         .expect("the later line announces a route");
         assert_eq!(announcement.route, SketchRoute::Solid);
-        assert_eq!(announcement.element.as_deref(), Some("the boss edge"));
+        assert_eq!(announcement.element, "the boss edge");
     }
 
     #[test]
@@ -123,11 +114,7 @@ mod tests {
         ] {
             let announcement = announced_route(text).expect("the line announces a route");
             assert_eq!(announcement.route, SketchRoute::Solid, "on {text:?}");
-            assert_eq!(
-                announcement.element.as_deref(),
-                Some("the vertical edge"),
-                "on {text:?}"
-            );
+            assert_eq!(announcement.element, "the vertical edge", "on {text:?}");
         }
     }
 }

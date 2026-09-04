@@ -89,8 +89,9 @@ are about to change:
     Route: sketch — the corner of the base profile
     Route: solid — the vertical edge of the boss
 
-The word after `Route:` is `sketch` or `solid`; what follows the dash
-names the element you are changing. Neither level is preferred: choose
+The word after `Route:` is `sketch` or `solid`, and what follows the dash
+names the element you are changing; name it every time — a level on its
+own commits to nothing. Neither level is preferred: choose
 whichever idiom is most robust for the case in hand and say which you
 chose. Then make the change you announced. If a run shows the other level
 is the right one after all, write a new `Route:` line before the next run
