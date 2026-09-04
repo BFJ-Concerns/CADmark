@@ -11,4 +11,5 @@ pub mod ledger;
 pub mod limits;
 pub mod mesh;
 pub mod message;
+pub mod pending_comment;
 pub mod version;

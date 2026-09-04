@@ -11,7 +11,9 @@ use cadmark_core::geometry::TopologyElement;
 use cadmark_core::mesh::TessellatedMesh;
 use cadmark_renderer::mesh::GpuMesh;
 use cadmark_renderer::picking::PickingPass;
-use cadmark_renderer::pipeline::{MeshUniforms, RenderPipelines, SimpleUniforms, upload_mesh};
+use cadmark_renderer::pipeline::{
+    MeshUniforms, RenderPipelines, SimpleUniforms, ViewportMarker, upload_mesh,
+};
 use cadmark_renderer::viewport::{
     copy_pick_pixel, decode_pick_result, render_picking, render_scene,
 };
@@ -231,6 +233,8 @@ pub fn completed_pick_transition(
 pub struct ViewportCallback {
     pub mesh_uniforms: MeshUniforms,
     pub simple_uniforms: SimpleUniforms,
+    /// Application-owned marker data; the renderer sees only topology IDs and colours.
+    pub markers: Vec<ViewportMarker>,
     /// Pixel coordinates within the viewport to read back for
     /// picking, if the user clicked this frame.
     pub pick_request: Option<(u32, u32)>,
@@ -326,6 +330,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             0,
             bytemuck::bytes_of(&self.mesh_uniforms),
         );
+        res.pipelines.set_markers(device, queue, &self.markers);
         queue.write_buffer(
             &res.pipelines.picking_uniform_buffer,
             0,

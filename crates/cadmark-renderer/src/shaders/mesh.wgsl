@@ -24,6 +24,14 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
+struct Marker {
+    element_id: u32,
+    _padding: vec3<u32>,
+    colour: vec4<f32>,
+}
+
+@group(0) @binding(1) var<storage, read> markers: array<Marker>;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -92,8 +100,16 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     let rim = pow(1.0 - facing, 3.0) * 0.18;
     colour += SKY_COLOUR * rim;
 
-    // Selection and hover tints.
+    // Application-provided markers come before transient selection and hover.
+    // They contain only topology IDs and colours, never conversation state.
     let fid = u32(in.face_id + 0.5);
+    for (var index = 0u; index < arrayLength(&markers); index++) {
+        if fid == markers[index].element_id && fid != 0u {
+            let marker = markers[index].colour;
+            colour = mix(colour, marker.rgb, marker.a);
+            break;
+        }
+    }
     if fid == uniforms.selected_id && uniforms.selected_id != 0u {
         colour = mix(colour, uniforms.selected_colour.rgb, uniforms.selected_colour.a);
     } else if fid == uniforms.hover_id && uniforms.hover_id != 0u {
