@@ -35,10 +35,12 @@ know is wrong.
 
 - Start with `from build123d import *`, and import anything else the part
   needs (OCP included); nothing is off limits.
-- The script's result is the 3D shape bound last at the top level: a
-  completed `BuildPart` (`with BuildPart() as part:`), or a `Part`,
-  `Solid`, or `Compound` from algebra mode or the direct API. A script
-  that has only reached a sketch is reported as not yet a solid.
+- A script can produce several independently selectable parts through every
+  distinct completed `BuildPart` and every distinct top-level `Part`, `Solid`,
+  or `Compound` binding. Aliases of one shape do not duplicate a part. To
+  build one part in stages, rebind the same name at each stage; Python then
+  leaves only the completed binding. A script that has only reached a sketch is
+  reported as not yet a solid.
 - Write **parametrically**. Every dimension, distance, angle, count, and
   radius a designer might adjust is a named variable in a parameter block
   at the top of the file, after the imports and before any geometry.

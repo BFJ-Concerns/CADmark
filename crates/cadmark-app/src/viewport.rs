@@ -7,15 +7,15 @@
 
 use std::sync::{Arc, Mutex};
 
-use cadmark_core::geometry::TopologyElement;
-use cadmark_core::mesh::TessellatedMesh;
+use cadmark_core::geometry::{PartId, TopologyElement};
+use cadmark_kernel::protocol::ExecutedPart;
 use cadmark_renderer::mesh::GpuMesh;
 use cadmark_renderer::picking::PickingPass;
 use cadmark_renderer::pipeline::{
     MeshUniforms, RenderPipelines, SimpleUniforms, ViewportMarker, upload_mesh,
 };
 use cadmark_renderer::viewport::{
-    copy_pick_pixel, decode_pick_result, render_picking, render_scene,
+    copy_pick_pixel, decode_pick_result, render_part_picking, render_picking, render_scene,
 };
 
 /// GPU resources for the 3D viewport, stored in egui_wgpu's
@@ -23,14 +23,16 @@ use cadmark_renderer::viewport::{
 pub struct ViewportResources {
     pipelines: RenderPipelines,
     picking: PickingPass,
-    mesh: Option<GpuMesh>,
+    meshes: Vec<GpuMesh>,
+    /// Part whose local face and edge IDs topology picking reads.
+    active_part: Option<usize>,
     /// Pick attempt submitted through the independent readback encoder. Its
     /// marker proves whether those commands completed before bytes are trusted.
     pick_attempt: Option<PickAttempt>,
     submission_marker_source: wgpu::Buffer,
     submission_marker_staging: wgpu::Buffer,
     next_submission_token: u32,
-    retry_pick: Option<(u32, u32)>,
+    retry_pick: Option<((u32, u32), bool)>,
     /// Decoded pick result from the most recent readback, waiting
     /// for `update()` to consume it.
     pick_result: Option<CompletedPick>,
@@ -51,7 +53,8 @@ impl ViewportResources {
         Self {
             pipelines: RenderPipelines::new(device, format, w, h),
             picking: PickingPass::new(device, w, h),
-            mesh: None,
+            meshes: Vec::new(),
+            active_part: None,
             pick_attempt: None,
             submission_marker_source: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pick_submission_marker_source"),
@@ -73,9 +76,17 @@ impl ViewportResources {
         }
     }
 
-    /// Replace the mesh on the GPU.
-    pub fn set_mesh(&mut self, device: &wgpu::Device, mesh: Option<&TessellatedMesh>) {
-        self.mesh = mesh.map(|mesh| upload_mesh(device, mesh));
+    /// Replace every independently rendered part on the GPU.
+    pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[ExecutedPart]) {
+        self.meshes = parts
+            .iter()
+            .map(|part| upload_mesh(device, &part.mesh, PartId(part.id)))
+            .collect();
+        self.active_part = parts.len().checked_sub(1);
+    }
+
+    pub fn set_active_part(&mut self, id: u32) {
+        self.active_part = self.meshes.get(id as usize).map(|_| id as usize);
     }
 
     /// Forget every pending pick: the model they were for is gone.
@@ -178,20 +189,49 @@ impl HoverPick {
 struct PickAttempt {
     pixel: (u32, u32),
     submission_token: u32,
+    part_pick: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum PickSubmissionDecision {
     ReadPick,
-    Retry((u32, u32)),
+    Retry((u32, u32), bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickPass {
+    Topology,
+    Part,
 }
 
 fn pick_submission_decision(attempt: PickAttempt, marker_bytes: [u8; 4]) -> PickSubmissionDecision {
     if u32::from_le_bytes(marker_bytes) == attempt.submission_token {
         PickSubmissionDecision::ReadPick
     } else {
-        PickSubmissionDecision::Retry(attempt.pixel)
+        PickSubmissionDecision::Retry(attempt.pixel, attempt.part_pick)
     }
+}
+
+fn next_pick_request(
+    part_pick_request: Option<(u32, u32)>,
+    topology_pick_request: Option<(u32, u32)>,
+    retry_pick: Option<((u32, u32), bool)>,
+) -> Option<((u32, u32), PickPass)> {
+    part_pick_request
+        .map(|pixel| (pixel, PickPass::Part))
+        .or(topology_pick_request.map(|pixel| (pixel, PickPass::Topology)))
+        .or_else(|| {
+            retry_pick.map(|(pixel, part_pick)| {
+                (
+                    pixel,
+                    if part_pick {
+                        PickPass::Part
+                    } else {
+                        PickPass::Topology
+                    },
+                )
+            })
+        })
 }
 
 /// What a completed click readback means for the selection.
@@ -241,6 +281,8 @@ pub struct ViewportCallback {
     /// Pixel coordinates within the viewport to read back for
     /// picking, if the user clicked this frame.
     pub pick_request: Option<(u32, u32)>,
+    /// A whole-part click uses its own picking pass and ID range.
+    pub part_pick_request: Option<(u32, u32)>,
     /// Pixel coordinates under the cursor, if it is over the viewport.
     pub hover_request: Option<(u32, u32)>,
     /// Viewport size in physical pixels (for resize detection).
@@ -301,13 +343,13 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                                 }
                             }
                         }
-                        PickSubmissionDecision::Retry(pixel) => {
+                        PickSubmissionDecision::Retry(pixel, part_pick) => {
                             log::debug!(
                                 "Pick submission was dropped; retrying at ({}, {})",
                                 pixel.0,
                                 pixel.1
                             );
-                            res.retry_pick = Some(pixel);
+                            res.retry_pick = Some((pixel, part_pick));
                         }
                     }
                 }
@@ -350,11 +392,21 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         );
 
         // ── Pick and hover readbacks ──
-        if let Some(mesh) = &res.mesh {
-            if self.pick_request.is_some() {
+        if !res.meshes.is_empty() {
+            let topology_meshes = res
+                .active_part
+                .and_then(|id| res.meshes.get(id))
+                .map(std::slice::from_ref)
+                .unwrap_or(&res.meshes);
+            if self.pick_request.is_some() || self.part_pick_request.is_some() {
                 res.retry_pick = None;
             }
-            if let Some((x, y)) = self.pick_request.or_else(|| res.retry_pick.take()) {
+            let requested = next_pick_request(
+                self.part_pick_request,
+                self.pick_request,
+                res.retry_pick.take(),
+            );
+            if let Some(((x, y), pass)) = requested {
                 // Submit picking independently. eframe acquires the surface
                 // after prepare(); an Outdated surface returns early and drops
                 // its shared encoder, but must not drop user selection work.
@@ -362,7 +414,22 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("pick_readback_encoder"),
                     });
-                render_picking(&mut pick_encoder, &res.pipelines, &res.picking, mesh);
+                if pass == PickPass::Part {
+                    render_part_picking(
+                        &mut pick_encoder,
+                        &res.pipelines,
+                        &res.picking,
+                        &res.meshes,
+                    );
+                } else {
+                    render_picking(
+                        &mut pick_encoder,
+                        &res.pipelines,
+                        &res.picking,
+                        &res.meshes,
+                        topology_meshes,
+                    );
+                }
 
                 let submission_token = res.next_submission_token;
                 res.next_submission_token = res.next_submission_token.wrapping_add(1).max(1);
@@ -389,6 +456,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                 res.pick_attempt = Some(PickAttempt {
                     pixel: (x, y),
                     submission_token,
+                    part_pick: pass == PickPass::Part,
                 });
             } else if let Some((x, y)) = self.hover_request
                 && res.hover.in_flight.is_none()
@@ -399,7 +467,13 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                         label: Some("hover_readback_encoder"),
                     });
-                render_picking(&mut hover_encoder, &res.pipelines, &res.picking, mesh);
+                render_picking(
+                    &mut hover_encoder,
+                    &res.pipelines,
+                    &res.picking,
+                    &res.meshes,
+                    topology_meshes,
+                );
                 copy_pick_pixel(&mut hover_encoder, &res.picking, &res.hover.staging, x, y);
                 queue.submit(std::iter::once(hover_encoder.finish()));
                 res.hover.begin_readback();
@@ -410,12 +484,7 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         // The egui paint callback's render pass has no depth attachment,
         // so the scene is rendered here with its own depth texture, then
         // blitted in paint().
-        render_scene(
-            encoder,
-            &res.pipelines,
-            res.mesh.as_ref(),
-            self.clear_colour,
-        );
+        render_scene(encoder, &res.pipelines, &res.meshes, self.clear_colour);
 
         Vec::new()
     }
@@ -471,6 +540,7 @@ mod tests {
         let attempt = PickAttempt {
             pixel: (438, 466),
             submission_token: 42,
+            part_pick: false,
         };
         assert_eq!(
             pick_submission_decision(attempt, 42_u32.to_le_bytes()),
@@ -483,10 +553,24 @@ mod tests {
         let attempt = PickAttempt {
             pixel: (438, 466),
             submission_token: 42,
+            part_pick: true,
         };
         assert_eq!(
             pick_submission_decision(attempt, 41_u32.to_le_bytes()),
-            PickSubmissionDecision::Retry((438, 466))
+            PickSubmissionDecision::Retry((438, 466), true)
+        );
+    }
+
+    #[test]
+    fn a_retried_part_pick_uses_the_part_picking_pass() {
+        let retry = PickSubmissionDecision::Retry((438, 466), true);
+        let PickSubmissionDecision::Retry(pixel, part_pick) = retry else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            next_pick_request(None, None, Some((pixel, part_pick))),
+            Some(((438, 466), PickPass::Part))
         );
     }
 

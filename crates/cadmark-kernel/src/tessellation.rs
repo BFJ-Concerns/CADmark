@@ -166,7 +166,7 @@ pub(crate) fn tessellate_shape(
     shape: &Bound<'_, PyAny>,
 ) -> Result<TessellatedMesh, TessellationError> {
     namespace
-        .set_item("_cadmark_result_shape", &shape)
+        .set_item("_cadmark_result_shape", shape)
         .map_err(TessellationError::Python)?;
 
     // Inject tessellation helper after extracting the user result so helper
@@ -548,7 +548,7 @@ class BuildSketch:
         Python::with_gil(|py| {
             let namespace = namespace_from(py, c"part = BuildPart(Part())");
             let (_, shape) = discover(&namespace).unwrap().pop().unwrap();
-            namespace.set_item("_cadmark_result_shape", &shape).unwrap();
+            namespace.set_item("_cadmark_result_shape", shape).unwrap();
             let err = py.run(TESSELLATE_CODE, Some(&namespace), None).unwrap_err();
             assert!(!err.to_string().contains("_cadmark_result_shape"));
 

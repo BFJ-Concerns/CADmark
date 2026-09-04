@@ -249,7 +249,7 @@ fn rebinding_one_name_keeps_one_part_with_the_base_volume() {
 
     assert_eq!(executed.parts.len(), 1);
     assert_eq!(executed.parts[0].name, "part");
-    assert!((executed.parts[0].summary.volume - 1858.628_330_588_459).abs() < 1e-6);
+    assert!((executed.parts[0].summary.volume - 1_858.628_330_588_459).abs() < 1e-6);
 }
 
 #[test]
