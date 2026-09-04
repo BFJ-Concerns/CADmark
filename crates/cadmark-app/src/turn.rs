@@ -863,6 +863,7 @@ mod tests {
         ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
+            sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
             summary: ModelSummary {
                 volume: 1000.0,

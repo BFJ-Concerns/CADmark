@@ -244,7 +244,7 @@ fn execute_script_source_named(
             );
 
             let shape = crate::tessellation::find_result_shape(&globals)?;
-            let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
+            let (_raw, ledger, sketch_lineage) = crate::provenance::finalise(py, &session, &shape, source)?;
             let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
             validate_tessellation_ids(&mesh, &ledger)?;
             let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
@@ -256,6 +256,7 @@ fn execute_script_source_named(
             Ok(ExecutedModel {
                 mesh,
                 ledger,
+                sketch_lineage,
                 descriptors,
                 summary,
                 validity,
@@ -499,7 +500,7 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                     )?;
                     builtins.call_method1("exec", (&code, &globals, &globals))?;
                     let shape = crate::tessellation::find_result_shape(&globals)?;
-                    let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
+                    let (_raw, ledger, sketch_lineage) = crate::provenance::finalise(py, &session, &shape, source)?;
                     let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
                     validate_tessellation_ids(&mesh, &ledger)?;
                     let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
@@ -536,6 +537,7 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                         ExecutedModel {
                             mesh,
                             ledger,
+                            sketch_lineage,
                             descriptors,
                             summary,
                             validity,

@@ -5,6 +5,7 @@ use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use cadmark_core::geometry::{EdgeId, FaceId, VertexId};
+use cadmark_core::sketch_lineage::SketchLineageLedger;
 use cadmark_core::ledger::{
     LedgerValue, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation,
     SourceRef,
@@ -124,11 +125,13 @@ pub(crate) fn finalise(
     session: &InstrumentationSession,
     shape: &Bound<'_, PyAny>,
     source: &str,
-) -> Result<(RawProvenance, ProvenanceLedger), ProvenanceError> {
+) -> Result<(RawProvenance, ProvenanceLedger, SketchLineageLedger), ProvenanceError> {
     let capture = session.inner.bind(py).call_method1("finalise", (shape,))?;
     let raw = parse_capture(&capture)?;
     let ledger = build_ledger(&raw, source)?;
-    Ok((raw, ledger))
+    let sketch_lineage =
+        crate::sketch_lineage::build_ledger(&capture, &raw.operations, source)?;
+    Ok((raw, ledger, sketch_lineage))
 }
 
 pub(crate) fn restore(
@@ -559,7 +562,7 @@ with BuildPart() as part:
                 .call_method1("exec", (&code, &namespace, &namespace))
                 .unwrap();
             let shape = crate::tessellation::find_result_shape(&namespace).unwrap();
-            let (raw, ledger) = finalise(py, &session, &shape, source).unwrap();
+            let (raw, ledger, _sketch_lineage) = finalise(py, &session, &shape, source).unwrap();
             restore(py, &session).unwrap();
 
             assert!(!raw.tombstones.is_empty());

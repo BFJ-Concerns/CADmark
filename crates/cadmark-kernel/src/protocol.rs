@@ -11,6 +11,7 @@ use cadmark_core::geometry::{
 };
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::mesh::TessellatedMesh;
+use cadmark_core::sketch_lineage::SketchLineageLedger;
 use serde::{Deserialize, Serialize};
 
 /// A request the application sends to the worker.
@@ -46,6 +47,9 @@ pub struct ExecutedModel {
     pub mesh: TessellatedMesh,
     /// Construction-time provenance for every element of the mesh.
     pub ledger: ProvenanceLedger,
+    /// Which sketch curve drew each element, or the stated reason none
+    /// can be named. Rebuilt with the ledger on every execution.
+    pub sketch_lineage: SketchLineageLedger,
     /// Measured geometry of every element, in ledger order.
     pub descriptors: GeometryDescriptors,
     /// Whole-model measurements.
@@ -120,6 +124,7 @@ mod tests {
         let reply = WorkerReply::Executed(Box::new(ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger,
+            sketch_lineage: SketchLineageLedger::new(),
             descriptors: GeometryDescriptors::default(),
             summary: ModelSummary {
                 volume: 1.0,
@@ -159,6 +164,7 @@ mod tests {
         let model = |validity: Vec<SolidValidity>| ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
+            sketch_lineage: SketchLineageLedger::new(),
             descriptors: GeometryDescriptors::default(),
             summary: ModelSummary {
                 volume: 0.0,
