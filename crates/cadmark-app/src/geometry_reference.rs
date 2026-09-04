@@ -3,11 +3,10 @@
 // up.
 //
 // The convention is one element per square bracket, written the way the
-// inventory names it — `[edge 12 @7c1e0a94b2d3f065]`, where the trailing tag
-// is the execution that assigned the ID. A bracket is what separates a
-// reference
-// from prose, so "the top edge" in a sentence names nothing and lights
-// nothing.
+// inventory names it — `[edge 12 @4433a8af1e4d60526cf13e2015a5d9bc]`,
+// where the trailing tag is the execution that assigned the ID. A
+// bracket is what separates a reference from prose, so "the top edge" in
+// a sentence names nothing and lights nothing.
 //
 // The tag is what makes a stale ID harmless. IDs are reassigned by every
 // execution, so `edge 1` of one run is unrelated to `edge 1` of the next.
@@ -43,6 +42,8 @@
 // the model asks for it. Detail is therefore deferred on a large model,
 // never withdrawn: every element of every model can be told from its
 // siblings and named individually, at the cost of one tool call.
+
+use sha2::{Digest, Sha256};
 
 use cadmark_bridge::tools::ElementKind;
 use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
@@ -109,32 +110,41 @@ pub fn execution_tag(model: &ExecutedModel) -> ExecutionTag {
     fingerprint.integer(summary.face_count as u64);
     fingerprint.integer(summary.edge_count as u64);
     fingerprint.integer(summary.vertex_count as u64);
-    ExecutionTag(format!("{:016x}", fingerprint.finish()))
+    ExecutionTag(fingerprint.finish())
 }
 
-/// FNV-1a over an execution's content. Written out here rather than
-/// taken from the standard library's hasher so the digest is fixed by
-/// this file alone: a tag means the same thing in every build, which is
-/// what lets one be re-derived instead of remembered.
-struct Fingerprint(u64);
+/// How much of the digest a tag carries: 128 bits, written as 32
+/// hexadecimal digits. Wide enough that two executions cannot arrive at
+/// one tag between them — not by chance, and not by a search either,
+/// since the digest beneath it is collision-resistant — and short enough
+/// that the model quotes it back without trouble.
+const TAG_BITS: usize = 128;
+
+/// SHA-256 over an execution's content, truncated to the tag's width.
+/// The digest has to be collision-resistant rather than merely fast: a
+/// tag is the identity a name is checked against, so two genuinely
+/// different executions sharing one would resolve a reference against
+/// geometry that never produced the element it names, and light the
+/// wrong thing silently. The algorithm is fixed by its specification
+/// rather than by a hasher the standard library may change, which is
+/// what lets a tag be re-derived instead of remembered.
+struct Fingerprint(Sha256);
 
 impl Fingerprint {
     fn new() -> Self {
-        Self(0xcbf2_9ce4_8422_2325)
+        Self(Sha256::new())
     }
 
     fn bytes(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.0 ^= u64::from(*byte);
-            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-        }
+        self.0.update(bytes);
     }
 
-    /// Terminated, so two neighbouring fields cannot run together into
-    /// the byte stream a different pair of fields would produce.
+    /// Length-prefixed, so two neighbouring fields cannot run together
+    /// into the byte stream a different pair of fields would produce —
+    /// including a text carrying the byte that would otherwise end it.
     fn text(&mut self, text: &str) {
+        self.integer(text.len() as u64);
         self.bytes(text.as_bytes());
-        self.bytes(&[0]);
     }
 
     fn integer(&mut self, value: u64) {
@@ -206,8 +216,12 @@ impl Fingerprint {
         }
     }
 
-    fn finish(self) -> u64 {
-        self.0
+    /// The tag's own text: the digest's leading bytes in hexadecimal.
+    fn finish(self) -> String {
+        self.0.finalize()[..TAG_BITS / 8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 }
 
@@ -721,7 +735,12 @@ mod tests {
         // lets a reference be verified against the geometry in hand
         // rather than against something remembered. A change here means
         // an ambient input has crept in.
-        assert_eq!(execution_tag(&model).to_string(), "1ca03ae3c7366fe0");
+        let tag = execution_tag(&model).to_string();
+        assert_eq!(tag, "4433a8af1e4d60526cf13e2015a5d9bc");
+        // The width the collision argument rests on: 128 digest bits, so
+        // no two executions of a session arrive at one tag between them.
+        assert_eq!(tag.len(), TAG_BITS / 4);
+        assert!(tag.chars().all(|character| character.is_ascii_hexdigit()));
 
         let mut moved = filleted_model();
         moved.descriptors.edges[0].centre = [1.0, 2.0, 3.0];
