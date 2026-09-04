@@ -413,16 +413,12 @@ class _CadmarkSession:
                         candidates.extend(self.lookup(input_shape))
                 self.register(output, candidates, replace=True)
 
-    def capture_active_semantic_relation(
-        self, result, source_line, operation, api_class, replace=False
-    ):
+    def capture_active_semantic_relation(self, result, source_line, operation, api_class):
         operation_id = self.new_operation(source_line, operation, api_class)
         candidate = {"operation_id": operation_id, "relation": "Modified"}
         for _kind, shapes in self.topology(result):
             for shape in shapes:
-                self.register(
-                    shape, [candidate], allow_partner=True, replace=replace
-                )
+                self.register(shape, [candidate], allow_partner=True, replace=True)
 
     def capture_history(self, builder, result, operation, api_class, allow_partner=False):
         operation_id = self.new_operation(
@@ -519,7 +515,6 @@ class _CadmarkSession:
                         source_line,
                         semantic_operation,
                         semantic_api_class,
-                        replace=True,
                     )
                     return
                 original_line = builder._cadmark_source_line
