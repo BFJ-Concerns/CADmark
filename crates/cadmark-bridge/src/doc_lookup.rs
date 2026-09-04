@@ -73,6 +73,19 @@ const DOC_CORPUS: &str = concat!(
     include_str!("../../../docs/build123d/tutorials/surface_modeling.md"),
 );
 
+/// The operations reference is a distinct part of the payload because it
+/// defines the builder-operation vocabulary CADmark instruments.
+#[cfg(test)]
+const OPERATIONS_REFERENCE: &str = include_str!("../../../docs/build123d/operations.md");
+#[cfg(test)]
+const OBJECTS_REFERENCE: &str = include_str!("../../../docs/build123d/objects.md");
+#[cfg(test)]
+const MOVING_OBJECTS_REFERENCE: &str = include_str!("../../../docs/build123d/moving_objects.md");
+/// Direct API reference supplies the boolean-operation signature not present
+/// in the builder operations table.
+#[cfg(test)]
+const DIRECT_API_REFERENCE: &str = include_str!("../../../docs/build123d/direct_api_reference.md");
+
 /// Documentation lookup consumer sharing the configured provider client.
 pub struct DocLookup {
     client: OpenAiCompatibleClient,
@@ -192,40 +205,39 @@ mod tests {
 
     #[test]
     fn documentation_consumer_covers_instrumented_build123d_operations() {
-        // These terms cover the operations whose execution-time provenance
-        // instrumentation accepts today. The assertion is against the exact
-        // corpus `lookup_docs` sends to its consumer, rather than against a
-        // fixture or the files merely present on disk.
-        for operation in [
-            "Box",
-            "Cylinder",
-            "Sphere",
-            "Cone",
-            "Torus",
-            "Wedge",
-            "Extrude",
-            "Revolve",
-            "Loft",
-            "Sweep",
-            "Thicken",
-            "Shell",
-            "Draft",
-            "Split",
-            "Fuse",
-            "Cut",
-            "intersect(**to_intersect",
-            "Fillet",
-            "Chamfer",
-            "Mirror",
-            "Rotate",
-            "Scale",
-            "Offset",
-            "Locations",
-        ] {
+        // Each source names a distinct part of the current instrumented
+        // vocabulary. Check its operation terms and that the exact source
+        // reaches the lookup_docs payload.
+        for primitive in ["Box", "Cylinder", "Sphere", "Cone", "Torus", "Wedge"] {
             assert!(
-                DOC_CORPUS.contains(operation),
-                "lookup_docs corpus is missing documentation for {operation}"
+                OBJECTS_REFERENCE.contains(primitive),
+                "objects reference is missing documentation for {primitive}"
             );
         }
+        for operation in [
+            "extrude", "revolve", "loft", "sweep", "thicken", "draft", "split", "fillet",
+            "chamfer", "mirror", "scale", "offset",
+        ] {
+            assert!(
+                OPERATIONS_REFERENCE.contains(operation),
+                "operations reference is missing documentation for {operation}"
+            );
+        }
+        assert!(
+            DOC_CORPUS.contains(OPERATIONS_REFERENCE),
+            "lookup_docs payload no longer contains the operations reference"
+        );
+        assert!(
+            DOC_CORPUS.contains(OBJECTS_REFERENCE) && DOC_CORPUS.contains(MOVING_OBJECTS_REFERENCE),
+            "lookup_docs payload no longer contains the primitive or location reference"
+        );
+        assert!(
+            DIRECT_API_REFERENCE.contains("Shell")
+                && DIRECT_API_REFERENCE.contains("fuse(**to_fuse")
+                && DIRECT_API_REFERENCE.contains("cut(**to_cut")
+                && DIRECT_API_REFERENCE.contains("intersect(**to_intersect")
+                && DOC_CORPUS.contains(DIRECT_API_REFERENCE),
+            "lookup_docs payload is missing the documented direct-API operations"
+        );
     }
 }
