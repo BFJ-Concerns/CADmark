@@ -4,7 +4,10 @@
 // provenance-resolution interface exposes no kernel-specific type. A
 // build that reintroduces any of these fails here before it ships.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+
+use cadmark_core::ledger::SemanticOperation;
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -78,30 +81,56 @@ const FORBIDDEN_OUTSIDE_THE_KERNEL: &[(&str, &str)] = &[
     ("cadmark_kernel::export", "reaches past the worker boundary"),
 ];
 
-/// Semantic operation variants belong to the kernel's provenance vocabulary.
-/// Other crates may carry an operation as data, but must not choose behaviour
-/// based on a particular operation.
-const SEMANTIC_OPERATION_VARIANTS: &[&str] = &[
-    "Box",
-    "Cylinder",
-    "Sphere",
-    "Cone",
-    "Torus",
-    "Wedge",
-    "Extrude",
-    "Revolve",
-    "Loft",
-    "Sweep",
-    "Thicken",
-    "Shell",
-    "Draft",
-    "Split",
-    "BooleanFuse",
-    "BooleanCut",
-    "BooleanCommon",
-    "Fillet",
-    "Chamfer",
-];
+/// Every operation is named through an exhaustive match so that extending the
+/// enum makes this boundary test fail to compile until its vocabulary is
+/// deliberately updated.
+fn semantic_operation_name(operation: SemanticOperation) -> &'static str {
+    match operation {
+        SemanticOperation::Box => "Box",
+        SemanticOperation::Cylinder => "Cylinder",
+        SemanticOperation::Sphere => "Sphere",
+        SemanticOperation::Cone => "Cone",
+        SemanticOperation::Torus => "Torus",
+        SemanticOperation::Wedge => "Wedge",
+        SemanticOperation::Extrude => "Extrude",
+        SemanticOperation::Revolve => "Revolve",
+        SemanticOperation::Loft => "Loft",
+        SemanticOperation::Sweep => "Sweep",
+        SemanticOperation::Thicken => "Thicken",
+        SemanticOperation::Shell => "Shell",
+        SemanticOperation::Draft => "Draft",
+        SemanticOperation::Split => "Split",
+        SemanticOperation::BooleanFuse => "BooleanFuse",
+        SemanticOperation::BooleanCut => "BooleanCut",
+        SemanticOperation::BooleanCommon => "BooleanCommon",
+        SemanticOperation::Fillet => "Fillet",
+        SemanticOperation::Chamfer => "Chamfer",
+    }
+}
+
+fn semantic_operation_names() -> Vec<String> {
+    let ledger =
+        std::fs::read_to_string(workspace_root().join("crates/cadmark-core/src/ledger.rs"))
+            .expect("semantic operation definition");
+    let mut in_enum = false;
+    code_only(&ledger)
+        .into_iter()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line == "pub enum SemanticOperation {" {
+                in_enum = true;
+                return None;
+            }
+            if in_enum && line == "}" {
+                in_enum = false;
+                return None;
+            }
+            in_enum
+                .then(|| line.strip_suffix(',').unwrap_or(line).to_owned())
+                .filter(|name| !name.is_empty())
+        })
+        .collect()
+}
 
 /// The file's code with comments and string literals removed: prose the
 /// model reads and prose in comments may name anything; code may not.
@@ -147,21 +176,97 @@ fn code_only(source: &str) -> Vec<String> {
     lines
 }
 
-/// Returns the operation variant when a line branches on it. This deliberately
-/// recognises Rust's direct enum branch forms, while allowing an operation to
-/// be stored or passed as data outside the kernel.
-fn operation_branch_on_line(code: &str) -> Option<&'static str> {
-    let is_branch = code.contains("=>")
-        || code.contains("matches!")
-        || ((code.contains("==") || code.contains("!=")) && code.contains("if"));
-    if !is_branch {
-        return None;
-    }
+fn contains_identifier(code: &str, identifier: &str) -> bool {
+    code.match_indices(identifier).any(|(start, _)| {
+        let before = code[..start].chars().next_back();
+        let after = code[start + identifier.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+            && !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+    })
+}
 
-    SEMANTIC_OPERATION_VARIANTS
-        .iter()
-        .copied()
-        .find(|variant| code.contains(&format!("SemanticOperation::{variant}")))
+/// Variants made available as bare names by a use declaration in this file.
+fn imported_operation_variants(code: &[String]) -> BTreeSet<String> {
+    let known = semantic_operation_names();
+    let mut imported = BTreeSet::new();
+    let source = code.join("\n");
+    let mut remaining = source.as_str();
+    while let Some(start) = remaining.find("SemanticOperation::{") {
+        let import = &remaining[start + "SemanticOperation::{".len()..];
+        let Some((names, _)) = import.split_once('}') else {
+            break;
+        };
+        if names.trim() == "*" {
+            imported.extend(known.iter().cloned());
+        } else {
+            for name in names.split(',').map(str::trim) {
+                let name = name.split_whitespace().next().unwrap_or_default();
+                if known.iter().any(|known_name| known_name == name) {
+                    imported.insert(name.to_owned());
+                }
+            }
+        }
+        remaining = &import[import.find('}').expect("closing import brace") + 1..];
+    }
+    imported
+}
+
+fn operation_in_pattern(
+    pattern: &str,
+    imported: &BTreeSet<String>,
+    permit_self: bool,
+) -> Option<String> {
+    semantic_operation_names().into_iter().find(|variant| {
+        pattern.contains(&format!("SemanticOperation::{variant}"))
+            || (!permit_self && pattern.contains(&format!("Self::{variant}")))
+            || (imported.contains(variant) && contains_identifier(pattern, variant))
+    })
+}
+
+/// Returns the operation variant when a line branches on it. Match arms only
+/// inspect the pattern before `=>`, so constructing an operation as a match
+/// arm's value remains allowed. `Self::` is permitted only inside the enum's
+/// inherent implementation, where it defines the vocabulary itself.
+fn operation_branch_on_line(
+    code: &str,
+    imported: &BTreeSet<String>,
+    permit_self: bool,
+) -> Option<String> {
+    if let Some((pattern, _)) = code.split_once("=>") {
+        return operation_in_pattern(pattern, imported, permit_self);
+    }
+    if code.contains("matches!") {
+        return operation_in_pattern(code, imported, permit_self);
+    }
+    let Some((_, condition)) = code.split_once("if") else {
+        return None;
+    };
+    let condition = condition.split('{').next().unwrap_or(condition);
+    if condition.contains("==") || condition.contains("!=") {
+        operation_in_pattern(condition, imported, permit_self)
+    } else {
+        None
+    }
+}
+
+fn semantic_operation_impl_lines(code: &[String]) -> BTreeSet<usize> {
+    let mut lines = BTreeSet::new();
+    let mut depth = 0usize;
+    let mut semantic_impl_depth = None;
+    for (number, line) in code.iter().enumerate() {
+        if line.contains("impl SemanticOperation") && line.contains('{') {
+            semantic_impl_depth = Some(depth + 1);
+        }
+        if semantic_impl_depth.is_some() {
+            lines.insert(number);
+        }
+        depth += line.matches('{').count();
+        depth = depth.saturating_sub(line.matches('}').count());
+        if semantic_impl_depth.is_some_and(|impl_depth| depth < impl_depth) {
+            semantic_impl_depth = None;
+        }
+    }
+    lines
 }
 
 #[test]
@@ -197,8 +302,13 @@ fn no_crate_outside_the_kernel_branches_on_a_semantic_operation() {
     for file in sources_outside_the_kernel() {
         let text = std::fs::read_to_string(&file).unwrap();
         let original: Vec<&str> = text.lines().collect();
-        for (number, code) in code_only(&text).iter().enumerate() {
-            if let Some(operation) = operation_branch_on_line(code) {
+        let code = code_only(&text);
+        let imported = imported_operation_variants(&code);
+        let semantic_impl_lines = semantic_operation_impl_lines(&code);
+        for (number, line) in code.iter().enumerate() {
+            if let Some(operation) =
+                operation_branch_on_line(line, &imported, semantic_impl_lines.contains(&number))
+            {
                 violations.push(format!(
                     "{}:{}: branches on kernel-specific operation {operation}: {}",
                     file.strip_prefix(workspace_root()).unwrap().display(),
@@ -239,27 +349,73 @@ fn only_code_is_inspected() {
 
 #[test]
 fn operation_branch_detection_allows_data_and_rejects_branches() {
+    let no_imports = BTreeSet::new();
+    let imported = imported_operation_variants(&code_only(
+        "use cadmark_core::ledger::SemanticOperation::{\n    Chamfer, Fillet,\n};",
+    ));
     assert_eq!(
-        operation_branch_on_line("let operation = SemanticOperation::Fillet;"),
+        operation_branch_on_line(
+            "let operation = SemanticOperation::Fillet;",
+            &no_imports,
+            false
+        ),
         None
     );
     assert_eq!(
-        operation_branch_on_line("SemanticOperation::Fillet => render(),"),
-        Some("Fillet")
+        operation_branch_on_line("SemanticOperation::Fillet => render(),", &no_imports, false),
+        Some("Fillet".to_owned())
     );
     assert_eq!(
-        operation_branch_on_line("if operation == SemanticOperation::Fillet {"),
-        Some("Fillet")
+        operation_branch_on_line(
+            "if operation == SemanticOperation::Fillet {",
+            &no_imports,
+            false
+        ),
+        Some("Fillet".to_owned())
     );
     assert_eq!(
-        operation_branch_on_line("matches!(operation, SemanticOperation::Fillet)"),
-        Some("Fillet")
+        operation_branch_on_line(
+            "matches!(operation, SemanticOperation::Fillet)",
+            &no_imports,
+            false
+        ),
+        Some("Fillet".to_owned())
     );
     assert_eq!(
-        operation_branch_on_line(&code_only(r#"if name == "Fillet" {"#).join("\n")),
+        operation_branch_on_line("Fillet => render(),", &imported, false),
+        Some("Fillet".to_owned())
+    );
+    assert_eq!(
+        operation_branch_on_line("Self::Fillet => render(),", &no_imports, false),
+        Some("Fillet".to_owned())
+    );
+    assert_eq!(
+        operation_branch_on_line("Self::Fillet => render(),", &no_imports, true),
+        None,
+        "only the enum's own implementation may branch through Self"
+    );
+    assert_eq!(
+        operation_branch_on_line("0 => SemanticOperation::Fillet,", &no_imports, false),
+        None,
+        "constructing an operation as a match arm value is not an operation branch"
+    );
+    assert_eq!(
+        operation_branch_on_line(
+            &code_only(r#"if name == "Fillet" {"#).join("\n"),
+            &no_imports,
+            false
+        ),
         None,
         "string-literal branches are intentionally outside code_only's boundary"
     );
+}
+
+#[test]
+fn semantic_operation_vocabulary_cannot_drift_silently() {
+    let names = semantic_operation_names();
+    assert_eq!(semantic_operation_name(SemanticOperation::Fillet), "Fillet");
+    assert!(names.contains(&"Fillet".to_owned()));
+    assert!(names.contains(&"Chamfer".to_owned()));
 }
 
 #[test]
