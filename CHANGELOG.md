@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Start view on launch: recent projects, opening a project folder, and
+  creating a new one. Nothing is loaded until a project is chosen; a folder
+  named on the command line still opens directly. Chat stays available there:
+  a message typed before a project is open is sent as the first turn of the
+  project you then choose
+- A project folder holds any number of parts. The toolbar's part menu
+  switches between them and creates a new one; a new part is Untitled until
+  the first save asks for its name, which becomes its file name, after which
+  the same key names a version
+- Design steps record which part they changed, so undo reopens that part
+
+### Changed
 - New conversation control archives the current chat before starting a blank
   one, leaving the project script unchanged
 - Chat shows estimated model-context occupancy, including reserved reference
