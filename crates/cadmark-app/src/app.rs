@@ -1613,7 +1613,7 @@ mod tests {
         };
         let first = anchor(1);
         let second = anchor(4);
-        assert_eq!(measurement_pair(&[first.clone()]), None);
+        assert_eq!(measurement_pair(std::slice::from_ref(&first)), None);
         assert_eq!(
             measurement_pair(&[first.clone(), second.clone()]),
             Some((first.element.clone(), second.element.clone()))
