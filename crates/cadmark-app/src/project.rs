@@ -174,13 +174,19 @@ impl Project {
         }
     }
 
-    /// Start an AI turn. The conversation already holds the user's
-    /// messages for it; the worker is shown the history up to now.
-    pub fn start_turn(&mut self, input: TurnInput) -> Result<CancelFlag, String> {
+    /// Start an AI turn. `history` is the conversation as it stood before
+    /// this turn's own messages were recorded: the worker shows the model
+    /// that history and then the turn's input, so the request is not
+    /// shown twice.
+    pub fn start_turn(
+        &mut self,
+        input: TurnInput,
+        history: Conversation,
+    ) -> Result<CancelFlag, String> {
         let cancel = CancelFlag::new();
         self.send(OrchestratorCommand::Turn {
             input,
-            conversation: self.conversation.clone(),
+            conversation: history,
             cancel: cancel.clone(),
         })?;
         let now = Instant::now();

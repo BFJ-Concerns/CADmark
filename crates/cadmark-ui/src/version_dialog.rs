@@ -1,7 +1,8 @@
 // Version-naming dialog — mark the current model as a named version.
 //
 // A named version is a design step the user chose to label, so it stands
-// out in the history and can be returned to by name.
+// out in the history and can be returned to by name. A floating window,
+// not a modal: the viewport and chat stay live while it is open (C39).
 
 use crate::theme;
 
@@ -44,7 +45,13 @@ impl VersionDialog {
         }
         let mut action = VersionDialogAction::None;
 
-        let modal = egui::Modal::new(egui::Id::new("name_version_dialog"))
+        let mut open = true;
+        egui::Window::new("Name this version")
+            .id(egui::Id::new("name_version_dialog"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme::RAISED)
@@ -52,12 +59,6 @@ impl VersionDialog {
             )
             .show(ctx, |ui| {
                 ui.set_width(340.0);
-                ui.label(
-                    egui::RichText::new("Name this version")
-                        .heading()
-                        .color(theme::TEXT_STRONG),
-                );
-                ui.add_space(2.0);
                 ui.label(
                     egui::RichText::new(
                         "A named version is a design step you can find again by name, \
@@ -104,7 +105,7 @@ impl VersionDialog {
                 });
             });
 
-        if modal.should_close() {
+        if !open {
             action = VersionDialogAction::Cancel;
         }
         if action != VersionDialogAction::None {
