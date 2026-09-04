@@ -21,6 +21,12 @@ All notable changes to this project will be documented in this file.
   the first save asks for its name, which becomes its file name, after which
   the same key names a version
 - Design steps record which part they changed, so undo reopens that part
+- A design that has reached only a sketch renders: its curves, corners and
+  enclosed regions draw face-on to the sketch's plane in an orthographic
+  view, with any solid already on screen ghosted behind them. A sketch-only
+  script is a successful build rather than an error, and the status line,
+  the chat and the AI's render all report it as a profile that is not yet a
+  solid and so cannot be exported or measured
 
 ### Changed
 - New conversation control archives the current chat before starting a blank

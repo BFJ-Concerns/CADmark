@@ -14,11 +14,15 @@ struct Uniforms {
     highlight_count: u32,
     _pad3: u32,
     marker_count: u32,
-    _pad4: u32,
+    ghost: f32,
     _pad5: vec2<u32>,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }
+
+// What a ghosted solid's edges fade towards — the viewport background,
+// display-encoded like the rest of this shader's output.
+const GHOST_COLOUR: vec3<f32> = vec3<f32>(0.157, 0.165, 0.188);
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
@@ -71,21 +75,22 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    let ghost = clamp(uniforms.ghost, 0.0, 1.0);
     let eid = u32(in.edge_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if eid == markers[index].element_id && eid != 0u {
-            return vec4<f32>(markers[index].colour.rgb, 1.0);
+            return vec4<f32>(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), 1.0);
         }
     }
     if eid == uniforms.selected_id && uniforms.selected_id != 0u {
-        return vec4<f32>(uniforms.selected_colour.rgb, 1.0);
+        return vec4<f32>(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), 1.0);
     }
     if eid == uniforms.hover_id && uniforms.hover_id != 0u {
-        return vec4<f32>(uniforms.hover_colour.rgb, 1.0);
+        return vec4<f32>(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), 1.0);
     }
     if in_highlight(eid) {
         return vec4<f32>(uniforms.hover_colour.rgb, 1.0);
     }
     // Dark edges, already display-encoded.
-    return vec4<f32>(0.10, 0.10, 0.12, 1.0);
+    return vec4<f32>(mix(vec3<f32>(0.10, 0.10, 0.12), GHOST_COLOUR, ghost), 1.0);
 }

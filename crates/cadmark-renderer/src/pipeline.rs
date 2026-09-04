@@ -3,8 +3,12 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use cadmark_core::sketch::SketchProfile;
+
 use crate::camera::Camera;
-use crate::mesh::{EdgeVertex, GpuMesh, GpuVertex};
+use crate::mesh::{
+    CORNER_TINT, EdgeVertex, GpuMesh, GpuSketch, GpuVertex, REGION_TINT, SketchVertex,
+};
 
 /// One application-owned viewport marker. The renderer receives topology IDs
 /// and colours only; it does not know why an element is marked.
@@ -61,7 +65,9 @@ pub struct MeshUniforms {
     pub _pad3: u32,
     /// Number of live entries at the front of the marker storage buffer.
     pub marker_count: u32,
-    pub _pad4: u32,
+    /// How far the solid fades towards the background: 0 draws it
+    /// normally, 1 leaves only a trace of it behind a sketch profile.
+    pub ghost: f32,
     pub _pad5: [u32; 2],
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
@@ -98,6 +104,13 @@ pub struct RenderPipelines {
 
     /// Wireframe overlay; reads `mesh_uniform_buffer` through `mesh_bind_group`.
     pub wireframe_pipeline: wgpu::RenderPipeline,
+
+    /// Sketch profile curves as lines, and its regions and corner markers
+    /// as triangles. Both read `mesh_uniform_buffer` through
+    /// `mesh_bind_group` and ignore depth, so the profile draws in front
+    /// of any solid behind it.
+    pub sketch_curve_pipeline: wgpu::RenderPipeline,
+    pub sketch_fill_pipeline: wgpu::RenderPipeline,
 
     /// Bind group layout for the picking passes (single uniform buffer at
     /// binding 0, vertex-stage visibility).
@@ -429,6 +442,103 @@ impl RenderPipelines {
             cache: None,
         });
 
+        // -- Sketch profile pipelines --
+        let sketch_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sketch_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/sketch.wgsl").into()),
+        });
+
+        let sketch_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("sketch_pipeline_layout"),
+                bind_group_layouts: &[&mesh_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
+        let sketch_vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<SketchVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x3, // position
+                1 => Float32,   // tint
+            ],
+        };
+
+        // Always passing the depth test, and writing none, is what puts the
+        // profile in front: a solid the sketch will become no longer hides
+        // the sketch that describes it.
+        let sketch_depth = wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: Default::default(),
+            bias: Default::default(),
+        };
+
+        let sketch_curve_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sketch_curve_pipeline"),
+                layout: Some(&sketch_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &sketch_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: std::slice::from_ref(&sketch_vertex_layout),
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sketch_shader,
+                    entry_point: Some("fs_curve"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(sketch_depth.clone()),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        let sketch_fill_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sketch_fill_pipeline"),
+            layout: Some(&sketch_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sketch_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[sketch_vertex_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sketch_shader,
+                entry_point: Some("fs_fill"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    // Regions wash their area, so the ghosted solid behind
+                    // them stays visible.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // A profile is drawn from both sides: the plane it sits on
+                // may face away from the camera.
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(sketch_depth),
+            multisample: Default::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let depth_texture = create_depth_texture(device, width, height);
 
         // -- Offscreen viewport colour target --
@@ -531,6 +641,8 @@ impl RenderPipelines {
             picking_bind_group,
             edge_picking_pipeline,
             wireframe_pipeline,
+            sketch_curve_pipeline,
+            sketch_fill_pipeline,
             simple_bind_group_layout,
             depth_texture,
             viewport_colour_view,
@@ -626,7 +738,14 @@ pub struct Renderer {
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
+    /// Whether the solid is faded back behind a sketch profile.
+    pub ghost_solid: bool,
 }
+
+/// How far a ghosted solid fades towards the background. Enough that the
+/// sketch reads as the live geometry, not so far that the solid it will
+/// become is lost.
+pub const GHOST_STRENGTH: f32 = 0.90;
 
 impl Renderer {
     pub fn new() -> Self {
@@ -638,6 +757,7 @@ impl Renderer {
             highlight_ids: Vec::new(),
             markers: Vec::new(),
             target_is_srgb: false,
+            ghost_solid: false,
         }
     }
 
@@ -662,7 +782,11 @@ impl Renderer {
             highlight_count: self.highlight_ids.len() as u32,
             _pad3: 0,
             marker_count: self.markers.len().try_into().unwrap_or(u32::MAX),
-            _pad4: 0,
+            ghost: if self.ghost_solid {
+                GHOST_STRENGTH
+            } else {
+                0.0
+            },
             _pad5: [0; 2],
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
@@ -886,9 +1010,113 @@ impl RenderPipelines {
     }
 }
 
+/// A corner marker's half-width, as a fraction of the profile's extent, so
+/// corners read as dots at any size of sketch.
+const CORNER_MARKER_SCALE: f32 = 0.006;
+
+/// The profile's curves as a line list: each polyline becomes its
+/// segments, so a curve of any shape draws with one pipeline.
+pub fn sketch_curve_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
+    let mut vertices = Vec::new();
+    for curve in &profile.curves {
+        for window in curve.points.windows(2) {
+            for &position in window {
+                vertices.push(SketchVertex {
+                    position,
+                    tint: REGION_TINT,
+                });
+            }
+        }
+    }
+    vertices
+}
+
+/// The profile's enclosed regions and corner markers as one triangle
+/// list. Corners are quads lying in the sketch's own plane — the first
+/// point geometry CADmark draws, and it lives here rather than in the
+/// solid mesh because a solid has no points to show.
+pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
+    let mut vertices = Vec::new();
+    for region in &profile.regions {
+        for &index in &region.indices {
+            let Some(&position) = region.vertices.get(index as usize) else {
+                continue;
+            };
+            vertices.push(SketchVertex {
+                position,
+                tint: REGION_TINT,
+            });
+        }
+    }
+
+    let half_width = (profile.extent() * CORNER_MARKER_SCALE).max(f32::MIN_POSITIVE);
+    let across = normalise(profile.plane.x_axis);
+    let up = normalise(cross(profile.plane.normal, across));
+    for corner in &profile.corners {
+        let offset = |along: f32, sideways: f32| SketchVertex {
+            position: std::array::from_fn(|axis| {
+                corner.position[axis]
+                    + across[axis] * along * half_width
+                    + up[axis] * sideways * half_width
+            }),
+            tint: CORNER_TINT,
+        };
+        let quad = [
+            offset(-1.0, -1.0),
+            offset(1.0, -1.0),
+            offset(1.0, 1.0),
+            offset(-1.0, -1.0),
+            offset(1.0, 1.0),
+            offset(-1.0, 1.0),
+        ];
+        vertices.extend(quad);
+    }
+    vertices
+}
+
+/// Upload a sketch profile to GPU buffers.
+pub fn upload_sketch(device: &wgpu::Device, profile: &SketchProfile) -> GpuSketch {
+    use wgpu::util::DeviceExt;
+
+    let curve_vertices = sketch_curve_vertices(profile);
+    let fill_vertices = sketch_fill_vertices(profile);
+
+    GpuSketch {
+        curve_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sketch_curve_vertex_buffer"),
+            contents: bytemuck::cast_slice(&curve_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+        curve_vertex_count: curve_vertices.len() as u32,
+        fill_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("sketch_fill_vertex_buffer"),
+            contents: bytemuck::cast_slice(&fill_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        }),
+        fill_vertex_count: fill_vertices.len() as u32,
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn normalise(vector: [f32; 3]) -> [f32; 3] {
+    let length = vector.iter().map(|c| c * c).sum::<f32>().sqrt();
+    if length < 1e-6 {
+        return [1.0, 0.0, 0.0];
+    }
+    vector.map(|component| component / length)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wgpu::util::DeviceExt;
 
     /// Compile a shader and report its `Uniforms` struct as the field names
     /// and byte offsets the GPU will actually read, which is what the uniform
@@ -970,7 +1198,7 @@ mod tests {
                 "marker_count",
                 std::mem::offset_of!(MeshUniforms, marker_count),
             ),
-            ("_pad4", std::mem::offset_of!(MeshUniforms, _pad4)),
+            ("ghost", std::mem::offset_of!(MeshUniforms, ghost)),
             ("_pad5", std::mem::offset_of!(MeshUniforms, _pad5)),
             (
                 "selected_colour",
@@ -1013,6 +1241,67 @@ mod tests {
         assert_eq!(grown_highlight_capacity(512, 9_000), 16_384);
     }
 
+    fn triangle_profile() -> SketchProfile {
+        use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchRegion};
+
+        SketchProfile {
+            plane: Default::default(),
+            curves: vec![SketchCurve {
+                curve_id: 0,
+                // Three points, so two segments, so four line vertices.
+                points: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 3.0, 0.0]],
+            }],
+            corners: vec![SketchCorner {
+                corner_id: 0,
+                position: [4.0, 0.0, 0.0],
+            }],
+            regions: vec![SketchRegion {
+                region_id: 0,
+                vertices: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 3.0, 0.0]],
+                indices: vec![0, 1, 2],
+            }],
+        }
+    }
+
+    #[test]
+    fn sketch_curves_become_line_segments() {
+        let vertices = sketch_curve_vertices(&triangle_profile());
+        assert_eq!(vertices.len(), 4);
+        assert_eq!(vertices[0].position, [0.0, 0.0, 0.0]);
+        assert_eq!(vertices[1].position, [4.0, 0.0, 0.0]);
+        assert_eq!(vertices[2].position, [4.0, 0.0, 0.0]);
+        assert_eq!(vertices[3].position, [4.0, 3.0, 0.0]);
+    }
+
+    #[test]
+    fn sketch_corners_become_markers_lying_in_the_sketch_plane() {
+        let profile = triangle_profile();
+        let vertices = sketch_fill_vertices(&profile);
+        // The region's three vertices, then the corner marker's two
+        // triangles.
+        assert_eq!(vertices.len(), 3 + 6);
+        assert!(
+            vertices[..3]
+                .iter()
+                .all(|vertex| vertex.tint == REGION_TINT)
+        );
+
+        let marker = &vertices[3..];
+        assert!(marker.iter().all(|vertex| vertex.tint == CORNER_TINT));
+        // The marker is a small square around its corner, flat on the
+        // plane the sketch was drawn on.
+        let half_width = profile.extent() * CORNER_MARKER_SCALE;
+        for vertex in marker {
+            assert!(
+                (vertex.position[2]).abs() < 1e-6,
+                "{vertex:?} left the plane"
+            );
+            assert!((vertex.position[0] - 4.0).abs() - half_width < 1e-6);
+            assert!(vertex.position[1].abs() - half_width < 1e-6);
+        }
+        assert!(half_width > 0.0, "a marker with no size draws nothing");
+    }
+
     #[test]
     fn edge_vertices_use_picking_edge_ids() {
         let mesh = cadmark_core::mesh::TessellatedMesh {
@@ -1034,5 +1323,110 @@ mod tests {
         assert_eq!(edge_vertices.len(), 2);
         assert_eq!(edge_vertices[0].edge_id, encoded);
         assert_eq!(edge_vertices[1].edge_id, encoded);
+    }
+    #[test]
+    fn marker_uniforms_name_only_live_entries() {
+        let mut renderer = Renderer::new();
+        renderer.markers = vec![
+            ViewportMarker {
+                element_id: 4,
+                colour: [0.8, 0.2, 0.1, 0.7],
+            },
+            ViewportMarker {
+                element_id: 9,
+                colour: [0.1, 0.5, 0.9, 0.7],
+            },
+        ];
+
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(uniforms.marker_count, 2);
+
+        renderer.markers.pop();
+        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 1);
+
+        renderer.markers.clear();
+        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 0);
+    }
+
+    #[test]
+    fn pipeline_accepts_marker_layout_with_initially_cleared_markers() {
+        let instance = wgpu::Instance::default();
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: true,
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options))
+            .or_else(|| {
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: false,
+                    ..options
+                }))
+            })
+            .expect("a wgpu adapter is required for renderer verification");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("renderer-pipeline-test"),
+                ..Default::default()
+            },
+            None,
+        ))
+        .expect("software adapter device is available");
+        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
+
+        let mesh = GpuMesh {
+            vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-mesh-vertices"),
+                contents: bytemuck::cast_slice(&[GpuVertex {
+                    position: [0.0; 3],
+                    normal: [0.0, 0.0, 1.0],
+                    face_id: 1.0,
+                    _padding: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-mesh-indices"),
+                contents: bytemuck::cast_slice(&[0u32, 0, 0]),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+            index_count: 3,
+            edge_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-edge-vertices"),
+                contents: bytemuck::cast_slice(&[
+                    EdgeVertex {
+                        position: [0.0; 3],
+                        edge_id: 1.0,
+                    },
+                    EdgeVertex {
+                        position: [0.0; 3],
+                        edge_id: 1.0,
+                    },
+                ]),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            edge_vertex_count: 2,
+        };
+        let renderer = Renderer::new();
+        queue.write_buffer(
+            &pipelines.mesh_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&renderer.mesh_uniforms(1.0)),
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        crate::viewport::render_scene(
+            &mut encoder,
+            &pipelines,
+            Some(&mesh),
+            None,
+            wgpu::Color::BLACK,
+        );
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+        assert!(
+            pollster::block_on(device.pop_error_scope()).is_none(),
+            "marker bindings and both draw pipelines must validate"
+        );
     }
 }
