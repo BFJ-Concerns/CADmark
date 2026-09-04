@@ -1245,10 +1245,10 @@ impl eframe::App for CadmarkApp {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use cadmark_bridge::backend::{ModelItem, ModelRequest, TurnModel};
     use cadmark_core::geometry::{ModelSummary, SelectionState};
@@ -1261,6 +1261,7 @@ mod tests {
         turn_chat_message,
     };
 
+    #[derive(Debug)]
     struct RecordedProviderRequest {
         path: String,
         authenticated: bool,
@@ -1275,15 +1276,32 @@ mod tests {
         body: serde_json::Value,
     ) -> (
         String,
-        Arc<Mutex<Option<RecordedProviderRequest>>>,
-        thread::JoinHandle<()>,
+        thread::JoinHandle<Result<RecordedProviderRequest, String>>,
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
-        let recorded = Arc::new(Mutex::new(None));
-        let server_recorded = Arc::clone(&recorded);
         let handle = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return Err(
+                                "recording provider did not receive a request within two seconds"
+                                    .into(),
+                            );
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "recording provider could not accept a request: {error}"
+                        ));
+                    }
+                }
+            };
             let mut bytes = Vec::new();
             let header_end = loop {
                 let mut chunk = [0_u8; 4096];
@@ -1310,7 +1328,7 @@ mod tests {
                 assert!(read > 0);
                 bytes.extend_from_slice(&chunk[..read]);
             }
-            *server_recorded.lock().unwrap() = Some(RecordedProviderRequest {
+            let recorded = RecordedProviderRequest {
                 path: headers
                     .lines()
                     .next()
@@ -1324,15 +1342,16 @@ mod tests {
                 }),
                 body: serde_json::from_slice(&bytes[header_end..header_end + content_length])
                     .unwrap(),
-            });
+            };
             let body = body.to_string();
             let wire = format!(
                 "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(wire.as_bytes()).unwrap();
+            Ok(recorded)
         });
-        (format!("http://{address}/v1"), recorded, handle)
+        (format!("http://{address}/v1"), handle)
     }
 
     fn settings_for(base_url: String, model: &str) -> UserSettings {
@@ -1422,7 +1441,7 @@ mod tests {
 
     #[tokio::test]
     async fn stored_provider_settings_reach_the_responses_wire_without_echoing_wrong_types() {
-        let (base_url, recorded, server) = recording_provider(
+        let (base_url, server) = recording_provider(
             429,
             serde_json::json!({
                 "error": {
@@ -1441,9 +1460,8 @@ mod tests {
         let loaded = store.load().unwrap();
 
         let error = provider_error_from_settings(&loaded, &store).await;
+        let request = server.join().unwrap().unwrap();
         assert!(error.to_string().contains("usage limit"));
-        server.join().unwrap();
-        let request = recorded.lock().unwrap().take().unwrap();
         assert_eq!(request.path, "/v1/responses");
         assert!(request.authenticated);
         assert_eq!(request.body["model"], "local-cad-model");
@@ -1459,6 +1477,25 @@ mod tests {
         .unwrap();
         let error = SettingsStore::at(malformed_dir).load().unwrap_err();
         assert!(!error.contains(wrong_type));
+    }
+
+    #[test]
+    fn hosted_provider_settings_build_the_shared_application_services() {
+        let configuration_dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::at(configuration_dir.path().join("cadmark"));
+        let settings = UserSettings {
+            ai: Some(cadmark_bridge::config::AiConfiguration {
+                base_url: "https://hosted.example/v1".to_string(),
+                model: "hosted-cad-model".to_string(),
+                accepts_images: true,
+                allow_insecure_http: false,
+            }),
+            ..UserSettings::default()
+        };
+        store.save(&settings).unwrap();
+
+        let services = ai_services(&store.load().unwrap(), Some(&store)).unwrap();
+        assert_eq!(services.model.model_name(), "hosted-cad-model");
     }
 
     #[tokio::test]
@@ -1488,7 +1525,7 @@ mod tests {
         ];
 
         for (status, kind, code, detail, expected_cause) in cases {
-            let (base_url, _recorded, server) = recording_provider(
+            let (base_url, server) = recording_provider(
                 status,
                 serde_json::json!({"error": {"type": kind, "code": code, "message": detail}}),
             );
@@ -1499,7 +1536,7 @@ mod tests {
                 .unwrap();
             store.save_credential("test-only-stored-token").unwrap();
             let error = provider_error_from_settings(&store.load().unwrap(), &store).await;
-            server.join().unwrap();
+            server.join().unwrap().unwrap();
 
             let project_dir = tempfile::tempdir().unwrap();
             let mut app = app_with_pending_response(project_dir.path().to_path_buf());
