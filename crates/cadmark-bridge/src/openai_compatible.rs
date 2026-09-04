@@ -627,15 +627,6 @@ pub(crate) mod recording {
         pub(crate) body: serde_json::Value,
     }
 
-    impl RecordedRequest {
-        /// The text of the `index`th input item.
-        pub(crate) fn input_text(&self, index: usize) -> &str {
-            self.body["input"][index]["content"][0]["text"]
-                .as_str()
-                .expect("recorded request carries message-array input")
-        }
-    }
-
     pub(crate) struct ScriptedResponse {
         pub(crate) status: u16,
         pub(crate) body: String,

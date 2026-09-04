@@ -1,6 +1,7 @@
-// Embed an rpath to the Python runtime's shared library in both binaries
-// so they load libpython without an environment. The interpreter is found
-// the same way the kernel's build script finds it.
+// Embed an rpath to the Python runtime's shared library in the application
+// binary so it loads libpython without an environment. The kernel crate's
+// build script does the same for the worker binary. The interpreter is
+// found the same way there.
 
 #[allow(dead_code)]
 #[path = "../cadmark-kernel/src/python_runtime.rs"]
@@ -32,10 +33,8 @@ fn main() {
         );
     }
 
-    for binary in ["cadmark", "cadmark-kernel-worker"] {
-        println!(
-            "cargo:rustc-link-arg-bin={binary}=-Wl,-rpath,{}",
-            layout.lib_dir.display()
-        );
-    }
+    println!(
+        "cargo:rustc-link-arg-bin=cadmark=-Wl,-rpath,{}",
+        layout.lib_dir.display()
+    );
 }

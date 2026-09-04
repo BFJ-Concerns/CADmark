@@ -251,12 +251,12 @@ impl Project {
             model.mesh.vertices.len(),
             model.ledger.len(),
         );
+        let printable = model.is_printable();
+        let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
         self.ledger = model.ledger;
         self.identification = Box::new(MeasuredIdentification {
             descriptors: model.descriptors,
         });
-        let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
-        let printable = model.is_printable();
         self.model = Some(LoadedModel {
             summary: model.summary,
             bounds,
