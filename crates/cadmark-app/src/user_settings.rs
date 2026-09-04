@@ -103,8 +103,14 @@ impl SettingsStore {
     pub fn load(&self) -> Result<UserSettings, String> {
         let path = self.dir.join(SETTINGS_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map_err(|error| format!("{} is not readable: {error}", path.display())),
+            Ok(contents) => serde_json::from_str(&contents).map_err(|error| {
+                format!(
+                    "{} contains invalid settings near line {}, column {}; correct the JSON syntax or field type and try again",
+                    path.display(),
+                    error.line(),
+                    error.column(),
+                )
+            }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(UserSettings::default())
             }
@@ -212,7 +218,7 @@ mod tests {
         let (_dir, store) = store();
         store.save(&UserSettings::default()).unwrap();
         std::fs::write(store.dir.join(SETTINGS_FILE), "not json").unwrap();
-        assert!(store.load().unwrap_err().contains("not readable"));
+        assert!(store.load().unwrap_err().contains(SETTINGS_FILE));
     }
 
     #[test]
