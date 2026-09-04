@@ -63,6 +63,10 @@ struct TurnRecord {
     comment_ids: Vec<MessageId>,
     /// The model summary before the turn, for the change report.
     summary_before: Option<cadmark_core::geometry::ModelSummary>,
+    /// The elements the reply referred to. Applied when the turn ends,
+    /// because completing it puts the model on screen afresh and that
+    /// clears the previous highlight.
+    references: Vec<TopologyElement>,
 }
 
 /// Top-level application state.
@@ -290,6 +294,7 @@ impl CadmarkApp {
                     tools: None,
                     comment_ids,
                     summary_before,
+                    references: Vec::new(),
                 });
             }
             Err(error) => {
@@ -366,12 +371,18 @@ impl CadmarkApp {
                 self.show_model(*model, source);
                 self.project.note_turn_event(None);
             }
+            TurnEvent::GeometryReferenced { elements } => {
+                turn.references = elements;
+            }
         }
     }
 
     fn finish_turn(&mut self, outcome: TurnOutcome) {
         self.project.busy = None;
-        let Some(turn) = self.turn.take() else { return };
+        let Some(mut turn) = self.turn.take() else {
+            return;
+        };
+        let references = std::mem::take(&mut turn.references);
         let conversation = &mut self.project.conversation;
         match outcome {
             TurnOutcome::Completed {
@@ -435,8 +446,20 @@ impl CadmarkApp {
                 self.restore_after_failed_turn();
             }
         }
+        // After the outcome, so the model the references belong to is the
+        // one on screen: completing a turn shows it, and failing or
+        // cancelling rebuilds the previous one and highlights nothing.
+        self.highlight_references(references);
         self.project.save_conversation();
         self.chat.focus_input();
+    }
+
+    /// Light up the elements the AI's reply referred to.
+    fn highlight_references(&mut self, elements: Vec<TopologyElement>) {
+        self.renderer.highlight_ids = elements
+            .iter()
+            .map(cadmark_renderer::picking::encode_picking_id)
+            .collect();
     }
 
     /// A turn that failed after a mid-turn execution left that model on
@@ -525,8 +548,11 @@ impl CadmarkApp {
         }
         self.status = Some(Status::info(status));
 
-        // Picking IDs belong to the model they were assigned for.
+        // Picking IDs belong to the model they were assigned for, so
+        // neither the selection nor the previous reply's references
+        // survive a new one.
         self.clear_selection();
+        self.renderer.highlight_ids.clear();
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
@@ -559,6 +585,7 @@ impl CadmarkApp {
         self.pending_pick = None;
         self.pick_in_flight = None;
         self.clear_selection();
+        self.renderer.highlight_ids.clear();
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {

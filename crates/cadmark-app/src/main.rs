@@ -6,6 +6,7 @@
 use eframe::egui;
 
 mod app;
+pub mod geometry_reference;
 pub mod git_ops;
 pub mod orchestrator;
 mod project;
