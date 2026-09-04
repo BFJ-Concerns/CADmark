@@ -20,10 +20,8 @@ use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
 use cadmark_renderer::camera::Bounds3;
 
 use crate::orchestrator::{OrchestratorCommand, OrchestratorResult, spawn_orchestrator};
+use crate::parts::{self, OpenPart};
 use crate::turn::TurnInput;
-
-/// The one script a project folder holds at present.
-pub const SCRIPT_FILENAME: &str = "part.py";
 
 /// Where the conversation is kept, inside the project folder.
 const CONVERSATION_FILENAME: &str = ".cadmark/conversation.json";
@@ -67,6 +65,10 @@ impl Busy {
 /// An open project folder.
 pub struct Project {
     pub dir: PathBuf,
+    /// The part of the folder currently being modelled.
+    part: OpenPart,
+    /// Every part script in the folder, for the switcher.
+    parts: Vec<String>,
     cmd_tx: mpsc::Sender<OrchestratorCommand>,
     result_rx: mpsc::Receiver<OrchestratorResult>,
     pub history: VersionHistory,
@@ -98,8 +100,14 @@ pub struct Project {
 impl Project {
     /// Open a folder: initialise its git repository, load its history and
     /// conversation, start a worker, and ask for the script to be built.
-    pub fn open(dir: PathBuf, ai: Result<AiServices, String>, limits: ExecutionLimits) -> Self {
+    pub fn open(
+        dir: PathBuf,
+        preferred_part: Option<&str>,
+        ai: Result<AiServices, String>,
+        limits: ExecutionLimits,
+    ) -> Self {
         let dir = dir.canonicalize().unwrap_or(dir);
+        let part = OpenPart::for_folder(&dir, preferred_part);
 
         if let Err(e) = crate::git_ops::ensure_repo(&dir) {
             log::error!("Failed to initialise git repo in {}: {e}", dir.display());
@@ -107,25 +115,27 @@ impl Project {
 
         let mut conversation = load_conversation(&dir);
         if conversation.is_empty() {
-            conversation.push(Message::notice(
+            conversation.push(Message::notice(format!(
                 "Describe what you'd like to build, or click a face, edge or vertex of the \
-                 model to comment on it. Every completed turn is saved to part.py in the \
-                 project folder and recorded as a design step.",
-            ));
+                     model to comment on it. Every completed turn is saved to {} in the \
+                     project folder and recorded as a design step.",
+                part.file_name()
+            )));
         }
         let ai_model = match &ai {
             Ok(services) => Some(services.model.model_name().to_string()),
             Err(reason) => {
                 log::warn!("{reason}");
                 conversation.push(Message::notice(format!(
-                    "AI is unavailable: {reason}. The model still loads, and you can edit \
-                     {SCRIPT_FILENAME} by hand and press Rebuild."
+                    "AI is unavailable: {reason}. The model still loads, and you can edit {} \
+                     by hand and press Rebuild.",
+                    part.file_name()
                 )));
                 None
             }
         };
         let (cmd_tx, result_rx) =
-            spawn_orchestrator(dir.clone(), SCRIPT_FILENAME.to_string(), ai, limits);
+            spawn_orchestrator(dir.clone(), part.file_name().to_string(), ai, limits);
 
         let history = match crate::git_ops::list_microversions(&dir, 100) {
             Ok(versions) => VersionHistory::from_versions(versions),
@@ -136,6 +146,8 @@ impl Project {
         };
 
         let mut project = Self {
+            parts: parts::list_parts(&dir),
+            part,
             dir,
             cmd_tx,
             result_rx,
@@ -158,7 +170,78 @@ impl Project {
     }
 
     pub fn script_path(&self) -> PathBuf {
-        self.dir.join(SCRIPT_FILENAME)
+        self.dir.join(self.part.file_name())
+    }
+
+    /// The part now open.
+    pub fn part(&self) -> &OpenPart {
+        &self.part
+    }
+
+    /// The file name of the part now open.
+    pub fn part_file_name(&self) -> &str {
+        self.part.file_name()
+    }
+
+    /// Every part script in the folder, most recently listed.
+    pub fn parts(&self) -> &[String] {
+        &self.parts
+    }
+
+    /// Re-read which parts the folder holds.
+    pub fn refresh_parts(&mut self) {
+        self.parts = parts::list_parts(&self.dir);
+    }
+
+    /// Open another part of the same folder: the worker changes script,
+    /// the model is rebuilt, and the conversation and history stay as they
+    /// are — they belong to the folder, not to one part.
+    pub fn switch_part(&mut self, part: OpenPart) {
+        if part == self.part {
+            return;
+        }
+        self.part = part;
+        self.refresh_parts();
+        self.script_source = None;
+        self.has_script = false;
+        self.script_modified_on_disk = false;
+        let file_name = self.part.file_name().to_string();
+        if self.send(OrchestratorCommand::SetScript(file_name)).is_ok() {
+            self.request_reload();
+        }
+    }
+
+    /// Begin a part with no name of its own. It is written and executed
+    /// like any other part; the first save asks for its name.
+    pub fn begin_untitled_part(&mut self) -> Result<(), String> {
+        let path = self.dir.join(parts::UNTITLED_PART);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("Could not clear the previous untitled part: {error}"))?;
+        }
+        self.switch_part(OpenPart::Untitled);
+        // `switch_part` returns early when the part is already open, which
+        // it is when a second new part follows an unsaved one.
+        self.part = OpenPart::Untitled;
+        self.refresh_parts();
+        Ok(())
+    }
+
+    /// Give the untitled part the name the user typed: the file is renamed
+    /// and the part is open under its own name from then on. Refused while
+    /// the part already has a name, and refused for a name that cannot be
+    /// a file name in this folder.
+    pub fn name_untitled_part(&mut self, typed: &str) -> Result<String, String> {
+        if self.part.is_named() {
+            return Err("This part already has a name".to_string());
+        }
+        let file_name = parts::name_untitled_part(&self.dir, typed)?;
+        self.part = OpenPart::Named(file_name.clone());
+        self.refresh_parts();
+        let _ = self.send(OrchestratorCommand::SetScript(file_name.clone()));
+        self.record_script_state();
+        self.has_script = self.script_path().exists();
+        Ok(file_name)
     }
 
     /// Hand a command to the worker.
@@ -226,7 +309,8 @@ impl Project {
     /// Write the current model next to the script.
     pub fn request_export(&mut self, format: ExportFormat) -> Result<PathBuf, String> {
         let model = self.model.as_ref().ok_or("no model to export")?;
-        let path = self.dir.join(format!("part.{}", format.extension()));
+        let stem = parts::part_display_name(self.part.file_name());
+        let path = self.dir.join(format!("{stem}.{}", format.extension()));
         self.send(OrchestratorCommand::Export {
             model: model.model.clone(),
             format,
@@ -361,7 +445,7 @@ fn fresh_conversation(dir: &Path, conversation: &mut Conversation) -> Result<Pat
     let archive = archive_conversation(dir, conversation)?;
     *conversation = Conversation::new();
     conversation.push(Message::notice(
-        "Started a new conversation. The earlier conversation is saved in .cadmark/conversations; part.py is unchanged.",
+        "Started a new conversation. The earlier conversation is saved in .cadmark/conversations; the part scripts are unchanged.",
     ));
     Ok(archive)
 }
@@ -389,7 +473,7 @@ mod tests {
     #[test]
     fn fresh_conversation_archives_chat_without_touching_the_script() {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join(SCRIPT_FILENAME);
+        let script = dir.path().join(parts::DEFAULT_PART);
         std::fs::write(&script, "part = Box(10, 10, 10)").unwrap();
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("Keep the wall at 5 mm."));

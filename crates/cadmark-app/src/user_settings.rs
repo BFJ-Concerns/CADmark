@@ -67,6 +67,12 @@ impl UserSettings {
         self.recent_projects.truncate(RECENT_CAPACITY);
     }
 
+    /// Drop `folder` from the recent list — the start view offers it, and
+    /// it is no longer a folder to open.
+    pub fn forget_project(&mut self, folder: &Path) {
+        self.recent_projects.retain(|existing| existing != folder);
+    }
+
     /// The recent list without `current`, for an "open recent" menu.
     pub fn other_recent_projects(&self, current: &Path) -> Vec<PathBuf> {
         self.recent_projects
@@ -262,5 +268,13 @@ mod tests {
             settings.remember_project(Path::new(&format!("/p{index}")));
         }
         assert_eq!(settings.recent_projects.len(), RECENT_CAPACITY);
+
+        // A folder the start view offered but could not open leaves the
+        // list, and the rest of it is untouched.
+        let remaining = settings.recent_projects.len();
+        let gone = settings.recent_projects[1].clone();
+        settings.forget_project(&gone);
+        assert!(!settings.recent_projects.contains(&gone));
+        assert_eq!(settings.recent_projects.len(), remaining - 1);
     }
 }
