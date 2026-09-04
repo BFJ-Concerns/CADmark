@@ -700,6 +700,7 @@ dependencies = [
  "bytemuck",
  "cadmark-core",
  "log",
+ "naga",
  "pollster",
  "thiserror 2.0.18",
  "wgpu",

@@ -16,13 +16,21 @@ struct Uniforms {
     _pad1: f32,
     selected_id: u32,
     hover_id: u32,
+    highlight_count: u32,
+    _pad3: u32,
     marker_count: u32,
-    _pad2: u32,
+    _pad4: u32,
+    _pad5: vec2<u32>,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+// Picking IDs of the candidate-footprint highlight. A storage binding
+// because a footprint is as large as the geometry one line accounts for,
+// which a uniform array could not hold.
+@group(0) @binding(1) var<storage, read> highlight_ids: array<u32>;
 
 struct Marker {
     element_id: u32,
@@ -32,7 +40,21 @@ struct Marker {
     colour: vec4<f32>,
 }
 
-@group(0) @binding(1) var<storage, read> markers: array<Marker>;
+@group(0) @binding(2) var<storage, read> markers: array<Marker>;
+
+// Whether this element belongs to the highlighted candidate's footprint.
+fn in_highlight(id: u32) -> bool {
+    if id == 0u {
+        return false;
+    }
+    for (var i = 0u; i < uniforms.highlight_count; i = i + 1u) {
+        if highlight_ids[i] == id {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -102,8 +124,7 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     let rim = pow(1.0 - facing, 3.0) * 0.18;
     colour += SKY_COLOUR * rim;
 
-    // Application-provided markers come before transient selection and hover.
-    // They contain only topology IDs and colours, never conversation state.
+    // Application-provided markers come before transient highlights.
     let fid = u32(in.face_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if fid == markers[index].element_id && fid != 0u {
@@ -116,6 +137,8 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
         colour = mix(colour, uniforms.selected_colour.rgb, uniforms.selected_colour.a);
     } else if fid == uniforms.hover_id && uniforms.hover_id != 0u {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a);
+    } else if in_highlight(fid) {
+        colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a * 0.7);
     }
 
     colour = clamp(colour, vec3<f32>(0.0), vec3<f32>(1.0));

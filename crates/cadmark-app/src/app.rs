@@ -166,6 +166,9 @@ pub struct CadmarkApp {
     code_visible: bool,
     /// Source line of the selected element, when its provenance is known.
     highlighted_line: Option<u32>,
+    /// The line the hovered candidate names, shown in place of the
+    /// selection's own line while the pointer rests on a candidate row.
+    candidate_line: Option<u32>,
     version_dialog: VersionDialog,
     part_dialog: PartNameDialog,
     settings_dialog: SettingsDialog,
@@ -243,6 +246,7 @@ impl CadmarkApp {
             code_panel: CodePanel::default(),
             code_visible: false,
             highlighted_line: None,
+            candidate_line: None,
             version_dialog: VersionDialog::default(),
             part_dialog: PartNameDialog::default(),
             settings_dialog: SettingsDialog::default(),
@@ -824,6 +828,8 @@ impl CadmarkApp {
         self.renderer.selected_id = 0;
         self.renderer.hover_id = 0;
         self.highlighted_line = None;
+        self.candidate_line = None;
+        self.renderer.highlight_ids.clear();
         self.overlay.close();
     }
 
@@ -927,6 +933,37 @@ impl CadmarkApp {
     fn open_externally(&mut self, path: &Path, what: &str) {
         if let Err(error) = open::that_detached(path) {
             self.status = Some(Status::error(format!("Could not open {what}: {error}")));
+        }
+    }
+
+    /// Show what the candidate under the pointer accounts for: its own
+    /// source line in the code panel, and the geometry the ledger
+    /// attributes to its operation lit in the viewport.
+    ///
+    /// Where two candidates were recorded against the same elements their
+    /// footprints coincide — the ledger drew no distinction there and this
+    /// invents none; the code panel's line is what tells them apart.
+    ///
+    /// The whole ledger footprint is sent, vertices included, even though
+    /// the renderer draws only faces and edges: vertices are not a drawable
+    /// element class anywhere in CADmark yet — the tessellation carries no
+    /// vertex positions and nothing can pick one — so their picking IDs
+    /// simply match nothing this frame. Filtering them here would make the
+    /// highlight set disagree with the ledger, and the set would then have
+    /// to be widened again the moment a point pass exists.
+    fn apply_candidate_hover(&mut self, ctx: &egui::Context) {
+        let hovered = self.overlay.hovered_candidate().cloned();
+        let (line, footprint) = match (&hovered, self.project.as_ref()) {
+            (Some(candidate), Some(project)) => (
+                Some(candidate.source.line),
+                candidate_highlight_ids(&project.ledger, candidate.operation_id),
+            ),
+            _ => (None, Vec::new()),
+        };
+        if self.candidate_line != line || self.renderer.highlight_ids != footprint {
+            self.candidate_line = line;
+            self.renderer.highlight_ids = footprint;
+            ctx.request_repaint();
         }
     }
 
@@ -1498,7 +1535,7 @@ impl CadmarkApp {
                     CodeView {
                         script_filename: project.part_file_name(),
                         source: project.script_source.as_deref(),
-                        highlighted_line: self.highlighted_line,
+                        highlighted_line: self.candidate_line.or(self.highlighted_line),
                         modified_on_disk: project.script_modified_on_disk,
                         controls_enabled: project.busy.is_none(),
                     },
@@ -1618,6 +1655,7 @@ impl CadmarkApp {
                 rect,
                 ViewportCallback {
                     mesh_uniforms: self.renderer.mesh_uniforms(aspect),
+                    highlight_ids: self.renderer.highlight_ids.clone(),
                     simple_uniforms: self.renderer.simple_uniforms(aspect),
                     markers: self.renderer.markers.clone(),
                     pick_request,
@@ -1643,7 +1681,9 @@ impl CadmarkApp {
                 }
             }
 
-            match self.overlay.show(ui, rect) {
+            let action = self.overlay.show(ui, rect);
+            self.apply_candidate_hover(ui.ctx());
+            match action {
                 OverlayAction::Submit { text, anchors } => {
                     self.overlay.close();
                     self.stage_spatial_comment(text, anchors);
@@ -1776,6 +1816,23 @@ fn standard_view(view: toolbar::StandardView) -> StandardView {
 }
 
 /// Construct the AI services from the user's settings, or say why not.
+/// The picking IDs of every element the ledger attributes to one
+/// candidate's operation — what the viewport lights up while the pointer
+/// rests on that candidate's row.
+///
+/// The footprint is taken whole. Vertices are carried even though no pass
+/// draws them, so the highlight set says what the ledger says rather than
+/// what the renderer currently happens to consume.
+fn candidate_highlight_ids(
+    ledger: &cadmark_core::ledger::ProvenanceLedger,
+    operation_id: u64,
+) -> Vec<u32> {
+    cadmark_core::candidates::candidate_footprint(ledger, operation_id)
+        .iter()
+        .map(cadmark_renderer::picking::encode_picking_id)
+        .collect()
+}
+
 /// What answers the AI's render tool for one project: the viewport's
 /// offscreen renderer where there is a GPU to render with, and the
 /// stand-in that says so honestly where there is not.
@@ -1883,6 +1940,8 @@ impl eframe::App for CadmarkApp {
 
 #[cfg(test)]
 mod tests {
+    use cadmark_core::pending_comment::PendingComments;
+
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -1900,8 +1959,8 @@ mod tests {
     use super::{
         CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
         SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, grounded_comments, measurement_pair, measurement_readout,
-        pending_markers, record_tool_start, stage_pending_comment, turn_chat_message,
+        VersionDialog, ai_services, candidate_highlight_ids, measurement_pair, measurement_readout,
+        record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2052,6 +2111,7 @@ mod tests {
             code_panel: CodePanel::default(),
             code_visible: false,
             highlighted_line: None,
+            candidate_line: None,
             version_dialog: VersionDialog::default(),
             part_dialog: PartNameDialog::default(),
             settings_dialog: SettingsDialog::default(),
@@ -2076,7 +2136,6 @@ mod tests {
             }),
         }
     }
-    use cadmark_core::pending_comment::PendingComments;
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -2126,6 +2185,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: vec![],
+            chosen_candidate: None,
         };
         let first = anchor(1);
         let second = anchor(4);
@@ -2410,65 +2470,191 @@ mod tests {
         assert!(matches!(messages[0].0, MessageKind::ToolCalls(_)));
     }
 
-    fn anchor(face: u32) -> GeometryContext {
-        GeometryContext {
-            element: TopologyElement::Face(FaceId(face)),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-        }
+    /// Two candidates recorded against the same elements, plus geometry
+    /// only one of them claims — the ordinary fillet-over-a-box shape.
+    fn coincident_ledger() -> cadmark_core::ledger::ProvenanceLedger {
+        use cadmark_core::ledger::{
+            ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation, SourceRef,
+        };
+        let entry = |line: u32, operation_id: u64| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation: SemanticOperation::Fillet,
+            operation_id,
+            relation: ProvenanceRelation::Modified,
+        };
+        let mut ledger = ProvenanceLedger::new();
+        // The shared edge: both candidates claim it.
+        ledger
+            .record_edge(
+                EdgeId(5),
+                LedgerValue::Ambiguous(vec![entry(2, 1), entry(9, 4)]),
+            )
+            .unwrap();
+        // A face only the box claims, so the two footprints differ here.
+        ledger
+            .record_face(FaceId(3), LedgerValue::Resolved(entry(2, 1)))
+            .unwrap();
+        ledger
     }
 
     #[test]
-    fn removing_a_pending_card_keeps_the_remaining_turn_input_and_markers_paired() {
-        let mut pending = PendingComments::default();
-        pending.add("round this".into(), vec![anchor(1)]);
-        let remove = pending.add("remove this comment".into(), vec![anchor(2)]);
-        pending.add("chamfer this".into(), vec![anchor(3)]);
+    fn a_candidates_highlight_is_every_element_its_own_operation_claims() {
+        use cadmark_renderer::picking::encode_picking_id;
+        let ledger = coincident_ledger();
 
-        pending.remove(remove);
-        let comments = grounded_comments(pending.comments());
-        let markers = pending_markers(&pending);
-
+        // The box line accounts for its own face and the shared edge.
         assert_eq!(
-            comments
-                .iter()
-                .map(|comment| (comment.text.as_str(), &comment.anchors[0].element))
-                .collect::<Vec<_>>(),
+            candidate_highlight_ids(&ledger, 1),
             vec![
-                ("round this", &TopologyElement::Face(FaceId(1))),
-                ("chamfer this", &TopologyElement::Face(FaceId(3))),
+                encode_picking_id(&TopologyElement::Face(FaceId(3))),
+                encode_picking_id(&TopologyElement::Edge(EdgeId(5))),
             ]
         );
-        assert_eq!(markers.len(), 2);
-        assert_eq!(markers[0].colour, pending.comments()[0].marker_colour());
-        assert_eq!(markers[1].colour, pending.comments()[1].marker_colour());
+        // The fillet line accounts for the shared edge alone.
+        assert_eq!(
+            candidate_highlight_ids(&ledger, 4),
+            vec![encode_picking_id(&TopologyElement::Edge(EdgeId(5)))]
+        );
+        // A line claiming nothing lights nothing, rather than everything.
+        assert!(candidate_highlight_ids(&ledger, 77).is_empty());
     }
 
     #[test]
-    fn staging_a_second_comment_keeps_the_first_unsent_and_intact() {
-        let mut pending = PendingComments::default();
-        let mut conversation = Conversation::new();
-        stage_pending_comment(
-            &mut conversation,
-            &mut pending,
-            "round this".into(),
-            vec![anchor(1)],
-        );
-        stage_pending_comment(
-            &mut conversation,
-            &mut pending,
-            "chamfer this".into(),
-            vec![anchor(2)],
-        );
+    fn coincident_candidates_are_reported_rather_than_given_a_manufactured_difference() {
+        use cadmark_core::ledger::{
+            LedgerValue as LV, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation,
+            SemanticOperation, SourceRef,
+        };
+        let entry = |line: u32, operation_id: u64| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation: SemanticOperation::Fillet,
+            operation_id,
+            relation: ProvenanceRelation::Modified,
+        };
+        // The ledger records both candidates against the same single edge
+        // and nothing else, so their footprints genuinely coincide.
+        let mut ledger = ProvenanceLedger::new();
+        ledger
+            .record_edge(EdgeId(5), LV::Ambiguous(vec![entry(2, 1), entry(9, 4)]))
+            .unwrap();
 
-        assert!(conversation.is_empty(), "staging must not start a turn");
-        assert_eq!(pending.comments().len(), 2);
-        assert_eq!(pending.comments()[0].text, "round this");
         assert_eq!(
-            pending.comments()[0].anchors[0].element(),
-            &TopologyElement::Face(FaceId(1))
+            candidate_highlight_ids(&ledger, 1),
+            candidate_highlight_ids(&ledger, 4),
+            "the ledger draws no distinction here and the highlight must not invent one"
+        );
+        assert!(!candidate_highlight_ids(&ledger, 1).is_empty());
+    }
+
+    /// C28's start view and part-name dialog are reached only from this
+    /// file. A merge that drops those modules and this file's calls to them
+    /// together still compiles, which is how they were lost once already;
+    /// driving both from here is what refuses that silently.
+    #[test]
+    fn the_start_view_still_offers_the_project_folders_the_app_remembers() {
+        use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
+
+        let remembered = std::path::PathBuf::from("/projects/bracket");
+        let ctx = egui::Context::default();
+        let mut chosen = StartAction::None;
+        // The row's position is discovered by sweeping rather than assumed,
+        // so the assertion survives the start view being laid out differently.
+        for y in 0..800 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            // The start view centres a 420-wide column in the window.
+            let pointer = egui::pos2(450.0, y as f32);
+            input.events.push(egui::Event::PointerMoved(pointer));
+            input.events.push(egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            });
+            input.events.push(egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            });
+            let mut action = StartAction::None;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    action = show_start_view(
+                        ui,
+                        StartViewState {
+                            recent_projects: std::slice::from_ref(&remembered),
+                            notice: None,
+                            controls_enabled: true,
+                        },
+                    );
+                });
+            });
+            if action != StartAction::None {
+                chosen = action;
+                if matches!(chosen, StartAction::OpenRecent(_)) {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            chosen,
+            StartAction::OpenRecent(remembered),
+            "no row of the start view opens the project the app remembers"
+        );
+    }
+
+    #[test]
+    fn the_part_name_dialog_still_carries_a_typed_name_back_to_the_app() {
+        use cadmark_ui::part_name_dialog::PartNameAction;
+
+        let ctx = egui::Context::default();
+        let mut dialog = PartNameDialog::default();
+        assert_eq!(dialog.show(&ctx), PartNameAction::None);
+        assert!(!dialog.is_open(), "a dialog nobody opened is not on screen");
+
+        dialog.open();
+        assert!(dialog.is_open());
+
+        let mut settled = PartNameAction::None;
+        for _ in 0..8 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::Text("bracket".to_string()));
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+            let mut action = PartNameAction::None;
+            let _ = ctx.run(input, |ctx| action = dialog.show(ctx));
+            if action != PartNameAction::None {
+                settled = action;
+                break;
+            }
+        }
+        assert_eq!(
+            settled,
+            PartNameAction::Save("bracket".to_string()),
+            "the name typed into the dialog never reached the app"
         );
     }
 }

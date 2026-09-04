@@ -56,12 +56,21 @@ pub struct MeshUniforms {
     pub _pad1: f32,
     pub selected_id: u32,
     pub hover_id: u32,
+    /// How many entries of the highlight storage buffer the shaders read.
+    pub highlight_count: u32,
+    pub _pad3: u32,
     /// Number of live entries at the front of the marker storage buffer.
     pub marker_count: u32,
-    pub _pad2: u32,
+    pub _pad4: u32,
+    pub _pad5: [u32; 2],
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
 }
+
+/// Initial length of the highlight storage buffer. It grows to whatever a
+/// frame needs, so this bounds nothing — it only avoids reallocating for
+/// the footprints small enough to be common.
+const HIGHLIGHT_INITIAL_CAPACITY: u64 = 64;
 
 /// Uniforms for the picking shader (just view_proj).
 #[repr(C)]
@@ -76,6 +85,9 @@ pub struct RenderPipelines {
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
     pub mesh_uniform_buffer: wgpu::Buffer,
     pub mesh_bind_group: wgpu::BindGroup,
+    /// Picking IDs of the candidate-footprint highlight, read by the mesh
+    /// and wireframe fragment shaders. Grown to fit each frame's set.
+    pub highlight_buffer: wgpu::Buffer,
     marker_buffer: wgpu::Buffer,
     marker_capacity: usize,
 
@@ -137,6 +149,16 @@ impl RenderPipelines {
                         count: None,
                     },
                     wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
@@ -156,26 +178,15 @@ impl RenderPipelines {
             mapped_at_creation: false,
         });
 
-        let marker_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("viewport_markers"),
-            size: std::mem::size_of::<MarkerGpu>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mesh_bind_group"),
-            layout: &mesh_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: mesh_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: marker_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        let highlight_buffer = new_highlight_buffer(device, HIGHLIGHT_INITIAL_CAPACITY);
+        let marker_buffer = new_marker_buffer(device, 1);
+        let mesh_bind_group = mesh_bind_group(
+            device,
+            &mesh_bind_group_layout,
+            &mesh_uniform_buffer,
+            &highlight_buffer,
+            &marker_buffer,
+        );
 
         let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh_pipeline_layout"),
@@ -512,6 +523,7 @@ impl RenderPipelines {
             mesh_bind_group_layout,
             mesh_uniform_buffer,
             mesh_bind_group,
+            highlight_buffer,
             marker_buffer,
             marker_capacity: 1,
             picking_pipeline,
@@ -550,52 +562,6 @@ impl RenderPipelines {
                 },
             ],
         });
-    }
-
-    /// Upload generic topology markers for the next viewport pass. The
-    /// storage buffer grows with the application-provided set, so the
-    /// renderer does not impose a comment-count limit.
-    pub fn set_markers(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        markers: &[ViewportMarker],
-    ) {
-        let required = markers.len().max(1);
-        if required > self.marker_capacity {
-            self.marker_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("viewport_markers"),
-                size: (required * std::mem::size_of::<MarkerGpu>()) as u64,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            self.marker_capacity = required;
-            self.mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("mesh_bind_group"),
-                layout: &self.mesh_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.mesh_uniform_buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.marker_buffer.as_entire_binding(),
-                    },
-                ],
-            });
-        }
-        let data: Vec<_> = markers
-            .iter()
-            .map(|marker| MarkerGpu {
-                element_id: marker.element_id,
-                _padding: [0; 3],
-                colour: marker.colour,
-            })
-            .collect();
-        if !data.is_empty() {
-            queue.write_buffer(&self.marker_buffer, 0, bytemuck::cast_slice(&data));
-        }
     }
 }
 
@@ -651,11 +617,15 @@ pub struct Renderer {
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
+    /// Picking IDs of a secondary highlight — every element the ledger
+    /// attributes to one candidate source line. Unbounded: the buffer the
+    /// shaders read grows to hold whatever a footprint contains.
+    pub highlight_ids: Vec<u32>,
+    /// Application-provided topology markers, coloured to pair with UI cards.
+    pub markers: Vec<ViewportMarker>,
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
-    /// Application-provided topology markers, coloured to pair with UI cards.
-    pub markers: Vec<ViewportMarker>,
 }
 
 impl Renderer {
@@ -665,8 +635,9 @@ impl Renderer {
             selection_style: SelectionStyle::default(),
             selected_id: 0,
             hover_id: 0,
-            target_is_srgb: false,
+            highlight_ids: Vec::new(),
             markers: Vec::new(),
+            target_is_srgb: false,
         }
     }
 
@@ -688,8 +659,11 @@ impl Renderer {
             _pad1: 0.0,
             selected_id: self.selected_id,
             hover_id: self.hover_id,
+            highlight_count: self.highlight_ids.len() as u32,
+            _pad3: 0,
             marker_count: self.markers.len().try_into().unwrap_or(u32::MAX),
-            _pad2: 0,
+            _pad4: 0,
+            _pad5: [0; 2],
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
         }
@@ -799,10 +773,245 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
     edge_vertices
 }
 
+/// A storage buffer able to hold `capacity` picking IDs.
+fn new_highlight_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("highlight_ids"),
+        size: capacity * std::mem::size_of::<u32>() as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn new_marker_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("viewport_markers"),
+        size: (capacity * std::mem::size_of::<MarkerGpu>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn mesh_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    highlights: &wgpu::Buffer,
+    markers: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mesh_bind_group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: highlights.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: markers.as_entire_binding(),
+            },
+        ],
+    })
+}
+
+/// How long a highlight buffer must be to hold `wanted` IDs: the current
+/// length while it already fits, and otherwise doubled until it does.
+///
+/// Nothing here caps the answer. A candidate's footprint is however much
+/// geometry the ledger attributes to its operation, and drawing only part
+/// of it would show the user a smaller origin than the line actually has.
+pub fn grown_highlight_capacity(current: u64, wanted: u64) -> u64 {
+    let mut capacity = current.max(HIGHLIGHT_INITIAL_CAPACITY);
+    while capacity < wanted {
+        capacity *= 2;
+    }
+    capacity
+}
+
+impl RenderPipelines {
+    /// Make room for `count` highlight IDs, rebuilding the bind group when
+    /// the buffer had to be replaced. Returns whether it grew.
+    pub fn reserve_highlights(&mut self, device: &wgpu::Device, count: usize) -> bool {
+        let current = self.highlight_buffer.size() / std::mem::size_of::<u32>() as u64;
+        let wanted = grown_highlight_capacity(current, count as u64);
+        if wanted == current {
+            return false;
+        }
+        self.highlight_buffer = new_highlight_buffer(device, wanted);
+        self.mesh_bind_group = mesh_bind_group(
+            device,
+            &self.mesh_bind_group_layout,
+            &self.mesh_uniform_buffer,
+            &self.highlight_buffer,
+            &self.marker_buffer,
+        );
+        true
+    }
+
+    /// Upload generic topology markers for the next viewport pass.
+    pub fn set_markers(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        markers: &[ViewportMarker],
+    ) {
+        let required = markers.len().max(1);
+        if required > self.marker_capacity {
+            self.marker_buffer = new_marker_buffer(device, required);
+            self.marker_capacity = required;
+            self.mesh_bind_group = mesh_bind_group(
+                device,
+                &self.mesh_bind_group_layout,
+                &self.mesh_uniform_buffer,
+                &self.highlight_buffer,
+                &self.marker_buffer,
+            );
+        }
+        let data: Vec<_> = markers
+            .iter()
+            .map(|marker| MarkerGpu {
+                element_id: marker.element_id,
+                _padding: [0; 3],
+                colour: marker.colour,
+            })
+            .collect();
+        if !data.is_empty() {
+            queue.write_buffer(&self.marker_buffer, 0, bytemuck::cast_slice(&data));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wgpu::util::DeviceExt;
+
+    /// Compile a shader and report its `Uniforms` struct as the field names
+    /// and byte offsets the GPU will actually read, which is what the uniform
+    /// buffer must match. Sizes alone do not say this: two same-width fields
+    /// in the wrong order leave the total unchanged while every read after
+    /// them lands on the wrong word.
+    fn uniform_struct_layout(source: &str) -> Vec<(String, u32)> {
+        let module = naga::front::wgsl::parse_str(source).expect("shader must compile");
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        );
+        validator.validate(&module).expect("shader must validate");
+        let mut layouter = naga::proc::Layouter::default();
+        layouter
+            .update(module.to_ctx())
+            .expect("shader types must lay out");
+        let (handle, ty) = module
+            .types
+            .iter()
+            .find(|(_, ty)| ty.name.as_deref() == Some("Uniforms"))
+            .expect("shader must declare Uniforms");
+        let naga::TypeInner::Struct { members, .. } = &ty.inner else {
+            panic!("Uniforms must be a struct");
+        };
+        let fields: Vec<(String, u32)> = members
+            .iter()
+            .map(|member| {
+                (
+                    member
+                        .name
+                        .clone()
+                        .expect("every Uniforms field must be named"),
+                    member.offset,
+                )
+            })
+            .collect();
+        assert_eq!(
+            layouter[handle].size,
+            std::mem::size_of::<MeshUniforms>() as u32,
+            "the shader's Uniforms is a different size from MeshUniforms"
+        );
+        fields
+    }
+
+    #[test]
+    fn every_shader_binding_mesh_uniforms_declares_the_same_layout() {
+        // A field added, removed, renamed or reordered on one side and not
+        // the other renders garbage silently, so the offset of every named
+        // field is compared against the Rust struct rather than trusted.
+        let expected: Vec<(String, u32)> = vec![
+            ("view_proj", std::mem::offset_of!(MeshUniforms, view_proj)),
+            ("eye_pos", std::mem::offset_of!(MeshUniforms, eye_pos)),
+            (
+                "encode_srgb",
+                std::mem::offset_of!(MeshUniforms, encode_srgb),
+            ),
+            (
+                "key_light_dir",
+                std::mem::offset_of!(MeshUniforms, key_light_dir),
+            ),
+            ("_pad0", std::mem::offset_of!(MeshUniforms, _pad0)),
+            (
+                "fill_light_dir",
+                std::mem::offset_of!(MeshUniforms, fill_light_dir),
+            ),
+            ("_pad1", std::mem::offset_of!(MeshUniforms, _pad1)),
+            (
+                "selected_id",
+                std::mem::offset_of!(MeshUniforms, selected_id),
+            ),
+            ("hover_id", std::mem::offset_of!(MeshUniforms, hover_id)),
+            (
+                "highlight_count",
+                std::mem::offset_of!(MeshUniforms, highlight_count),
+            ),
+            ("_pad3", std::mem::offset_of!(MeshUniforms, _pad3)),
+            (
+                "marker_count",
+                std::mem::offset_of!(MeshUniforms, marker_count),
+            ),
+            ("_pad4", std::mem::offset_of!(MeshUniforms, _pad4)),
+            ("_pad5", std::mem::offset_of!(MeshUniforms, _pad5)),
+            (
+                "selected_colour",
+                std::mem::offset_of!(MeshUniforms, selected_colour),
+            ),
+            (
+                "hover_colour",
+                std::mem::offset_of!(MeshUniforms, hover_colour),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, offset)| (name.to_string(), offset as u32))
+        .collect();
+
+        assert_eq!(
+            uniform_struct_layout(include_str!("shaders/mesh.wgsl")),
+            expected
+        );
+        assert_eq!(
+            uniform_struct_layout(include_str!("shaders/wireframe.wgsl")),
+            expected
+        );
+    }
+
+    #[test]
+    fn every_element_of_a_footprint_is_handed_to_the_shaders() {
+        // A fillet chain's footprint routinely runs to hundreds of edges;
+        // showing part of one would understate what the line accounts for.
+        let mut renderer = Renderer::new();
+        renderer.highlight_ids = (1..=500).collect();
+        assert_eq!(renderer.mesh_uniforms(1.0).highlight_count, 500);
+    }
+
+    #[test]
+    fn the_highlight_buffer_grows_to_whatever_a_footprint_needs() {
+        assert_eq!(grown_highlight_capacity(64, 12), 64);
+        assert_eq!(grown_highlight_capacity(64, 64), 64);
+        assert_eq!(grown_highlight_capacity(64, 65), 128);
+        assert_eq!(grown_highlight_capacity(64, 500), 512);
+        assert_eq!(grown_highlight_capacity(512, 9_000), 16_384);
+    }
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {
@@ -825,105 +1034,5 @@ mod tests {
         assert_eq!(edge_vertices.len(), 2);
         assert_eq!(edge_vertices[0].edge_id, encoded);
         assert_eq!(edge_vertices[1].edge_id, encoded);
-    }
-
-    #[test]
-    fn marker_uniforms_name_only_live_entries() {
-        let mut renderer = Renderer::new();
-        renderer.markers = vec![
-            ViewportMarker {
-                element_id: 4,
-                colour: [0.8, 0.2, 0.1, 0.7],
-            },
-            ViewportMarker {
-                element_id: 9,
-                colour: [0.1, 0.5, 0.9, 0.7],
-            },
-        ];
-
-        let uniforms = renderer.mesh_uniforms(1.0);
-        assert_eq!(uniforms.marker_count, 2);
-
-        renderer.markers.pop();
-        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 1);
-
-        renderer.markers.clear();
-        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 0);
-    }
-
-    #[test]
-    fn pipeline_accepts_marker_layout_with_initially_cleared_markers() {
-        let instance = wgpu::Instance::default();
-        let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: true,
-        };
-        let adapter = pollster::block_on(instance.request_adapter(&options))
-            .or_else(|| {
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    force_fallback_adapter: false,
-                    ..options
-                }))
-            })
-            .expect("a wgpu adapter is required for renderer verification");
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("renderer-pipeline-test"),
-                ..Default::default()
-            },
-            None,
-        ))
-        .expect("software adapter device is available");
-        let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
-
-        let mesh = GpuMesh {
-            vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("test-mesh-vertices"),
-                contents: bytemuck::cast_slice(&[GpuVertex {
-                    position: [0.0; 3],
-                    normal: [0.0, 0.0, 1.0],
-                    face_id: 1.0,
-                    _padding: 0.0,
-                }]),
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("test-mesh-indices"),
-                contents: bytemuck::cast_slice(&[0u32, 0, 0]),
-                usage: wgpu::BufferUsages::INDEX,
-            }),
-            index_count: 3,
-            edge_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("test-edge-vertices"),
-                contents: bytemuck::cast_slice(&[
-                    EdgeVertex {
-                        position: [0.0; 3],
-                        edge_id: 1.0,
-                    },
-                    EdgeVertex {
-                        position: [0.0; 3],
-                        edge_id: 1.0,
-                    },
-                ]),
-                usage: wgpu::BufferUsages::VERTEX,
-            }),
-            edge_vertex_count: 2,
-        };
-        let renderer = Renderer::new();
-        queue.write_buffer(
-            &pipelines.mesh_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&renderer.mesh_uniforms(1.0)),
-        );
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        device.push_error_scope(wgpu::ErrorFilter::Validation);
-        crate::viewport::render_scene(&mut encoder, &pipelines, Some(&mesh), wgpu::Color::BLACK);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
-        assert!(
-            pollster::block_on(device.pop_error_scope()).is_none(),
-            "marker bindings and both draw pipelines must validate"
-        );
     }
 }
