@@ -780,7 +780,7 @@ with BuildPart() as part:
                 r#"from build123d import *
 
 box = Solid.make_box(2, 2, 2)
-result = box.mirror(Plane.YZ)
+result = box.mirror(Plane.YZ).moved(Location((10, 0, 0)))
 "#,
                 SemanticOperation::Mirror,
             ),
@@ -788,7 +788,7 @@ result = box.mirror(Plane.YZ)
                 r#"from build123d import *
 
 box = Solid.make_box(2, 2, 2)
-result = box.rotate(Axis.Z, 30, transform=True)
+result = box.rotate(Axis.Z, 30, transform=True).moved(Location((10, 0, 0)))
 "#,
                 SemanticOperation::Rotate,
             ),
@@ -796,7 +796,7 @@ result = box.rotate(Axis.Z, 30, transform=True)
                 r#"from build123d import *
 
 box = Solid.make_box(2, 2, 2)
-result = box.scale(2)
+result = box.scale(2).moved(Location((10, 0, 0)))
 "#,
                 SemanticOperation::Scale,
             ),
@@ -845,11 +845,11 @@ result = part.part.rotate(Axis.Z, 30)
     }
 
     #[test]
-    fn default_rotate_leaves_retained_original_at_its_own_line() {
+    fn default_rotate_keeps_retained_receiver_at_its_own_line() {
         let (_scratch, result) = run(r#"from build123d import *
 
 box = Solid.make_box(2, 2, 2)
-turned = box.moved(Location((10, 0, 0))).rotate(Axis.Z, 30)
+turned = box.rotate(Axis.Z, 30)
 result = Compound(children=[box, turned])
 "#);
         let result = result.unwrap();
@@ -865,6 +865,34 @@ result = Compound(children=[box, turned])
                 (SemanticOperation::Box, ProvenanceRelation::Generated, 3) => original += 1,
                 (SemanticOperation::Rotate, ProvenanceRelation::Modified, 4) => rotated += 1,
                 found => panic!("unexpected retained-rotate provenance: {found:?}"),
+            }
+        }
+        assert_eq!(original, 26);
+        assert_eq!(rotated, 26);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn default_rotate_keeps_moved_output_at_the_rotate_line() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+turned = box.rotate(Axis.Z, 30)
+result = Compound(children=[box, turned.moved(Location((10, 0, 0)))])
+"#);
+        let result = result.unwrap();
+        let mut original = 0;
+        let mut rotated = 0;
+        for context in resolved_contexts(&result) {
+            let provenance = entry(&context);
+            match (
+                provenance.operation,
+                provenance.relation.clone(),
+                provenance.source.line,
+            ) {
+                (SemanticOperation::Box, ProvenanceRelation::Generated, 3) => original += 1,
+                (SemanticOperation::Rotate, ProvenanceRelation::Modified, 4) => rotated += 1,
+                found => panic!("unexpected moved-rotate provenance: {found:?}"),
             }
         }
         assert_eq!(original, 26);
