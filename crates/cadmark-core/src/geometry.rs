@@ -68,6 +68,15 @@ pub struct GeometryContext {
     /// key-value pairs here without changing the outer format.
     #[serde(default)]
     pub identification: std::collections::HashMap<String, String>,
+    /// Lines from the executed script around the provenance candidates.  An
+    /// untraced element carries the whole script, because there is no honest
+    /// smaller window to choose.
+    #[serde(default)]
+    pub source_context: String,
+    /// Elements directly incident to the selected element, measured from the
+    /// final topology rather than inferred from positions.
+    #[serde(default)]
+    pub neighbours: Vec<TopologyElement>,
 }
 
 /// Measured geometry of one face in the final model, in model units (mm).
@@ -79,6 +88,7 @@ pub struct FaceDescriptor {
     pub centre: [f64; 3],
     /// Outward-facing unit normal at the parametric centre.
     pub normal: [f64; 3],
+    pub neighbours: Vec<TopologyElement>,
 }
 
 /// Measured geometry of one edge in the final model, in model units (mm).
@@ -88,12 +98,14 @@ pub struct EdgeDescriptor {
     pub curve_type: String,
     pub length: f64,
     pub centre: [f64; 3],
+    pub neighbours: Vec<TopologyElement>,
 }
 
 /// Position of one vertex in the final model, in model units (mm).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VertexDescriptor {
     pub position: [f64; 3],
+    pub neighbours: Vec<TopologyElement>,
 }
 
 /// Whether one solid of the executed model is printable geometry: every
@@ -226,6 +238,21 @@ impl GeometryDescriptors {
 
     pub fn vertex(&self, id: VertexId) -> Option<&VertexDescriptor> {
         self.vertices.get(id.0 as usize)
+    }
+
+    pub fn neighbours(&self, element: &TopologyElement) -> Vec<TopologyElement> {
+        match element {
+            TopologyElement::Face(id) => self
+                .face(*id)
+                .map(|descriptor| descriptor.neighbours.clone()),
+            TopologyElement::Edge(id) => self
+                .edge(*id)
+                .map(|descriptor| descriptor.neighbours.clone()),
+            TopologyElement::Vertex(id) => self
+                .vertex(*id)
+                .map(|descriptor| descriptor.neighbours.clone()),
+        }
+        .unwrap_or_default()
     }
 }
 

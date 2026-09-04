@@ -26,6 +26,11 @@ pub trait IdentificationStrategy: Send + Sync {
     fn identify(&self, element: &TopologyElement) -> std::collections::HashMap<String, String>;
 
     fn name(&self) -> &str;
+
+    /// Directly incident final-topology elements for the selected element.
+    fn neighbours(&self, _element: &TopologyElement) -> Vec<TopologyElement> {
+        Vec::new()
+    }
 }
 
 /// Null strategy — sends only provenance data, no additional identification.
@@ -84,6 +89,10 @@ impl IdentificationStrategy for MeasuredIdentification {
     fn name(&self) -> &str {
         "measured"
     }
+
+    fn neighbours(&self, element: &TopologyElement) -> Vec<TopologyElement> {
+        self.descriptors.neighbours(element)
+    }
 }
 
 /// Resolve a picked element into a full geometry context for the AI.
@@ -113,13 +122,65 @@ pub fn resolve_context(
 
     // Step 2: Identification strategy.
     let identification = strategy.identify(element);
+    let neighbours = strategy.neighbours(element);
 
     // Step 3: Package into the stable output format.
     Ok(GeometryContext {
         element: element.clone(),
         provenance,
         identification,
+        source_context: String::new(),
+        neighbours,
     })
+}
+
+/// Attach the executed script context to an already resolved element. The
+/// window is deliberately based only on known source candidates; where none
+/// is known, the full script is the only honest context to provide.
+pub fn with_source_context(mut context: GeometryContext, source: Option<&str>) -> GeometryContext {
+    let Some(source) = source else {
+        context.source_context = "The executed script text is unavailable.".to_string();
+        return context;
+    };
+    let lines: Vec<_> = source.lines().collect();
+    if lines.is_empty() {
+        context.source_context = "The executed script is empty.".to_string();
+        return context;
+    }
+    let candidates: Vec<u32> = context
+        .provenance
+        .candidates()
+        .iter()
+        .map(|entry| entry.source.line)
+        .collect();
+    let windows = if candidates.is_empty() {
+        vec![(1, lines.len())]
+    } else {
+        let mut windows = candidates
+            .into_iter()
+            .map(|line| {
+                let line = line as usize;
+                (line.saturating_sub(2).max(1), (line + 2).min(lines.len()))
+            })
+            .collect::<Vec<_>>();
+        windows.sort_unstable();
+        windows.dedup();
+        windows
+    };
+    context.source_context = windows
+        .into_iter()
+        .map(|(first, last)| {
+            let body = lines[first.saturating_sub(1)..last]
+                .iter()
+                .enumerate()
+                .map(|(offset, line)| format!("{} | {line}", first + offset))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("lines {first}-{last}:\n{body}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    context
 }
 
 #[cfg(test)]
@@ -237,6 +298,7 @@ mod tests {
                     area: 200.0,
                     centre: [0.0, 0.0, 2.5],
                     normal: [0.0, 0.0, 1.0],
+                    neighbours: Vec::new(),
                 }],
                 edges: Vec::new(),
                 vertices: Vec::new(),
@@ -296,5 +358,43 @@ mod tests {
 
         assert_eq!(context.identification.get("face_index").unwrap(), "7");
         assert_eq!(context.identification.get("method").unwrap(), "test");
+    }
+
+    #[test]
+    fn context_carries_measured_neighbours_and_honest_source_context() {
+        use crate::geometry::{EdgeDescriptor, FaceDescriptor, VertexDescriptor};
+
+        let mut ledger = ProvenanceLedger::new();
+        ledger
+            .record_face(FaceId(0), LedgerValue::Untraced)
+            .unwrap();
+        let strategy = MeasuredIdentification {
+            descriptors: GeometryDescriptors {
+                faces: vec![FaceDescriptor {
+                    surface_type: "plane".into(),
+                    area: 1.0,
+                    centre: [0.0; 3],
+                    normal: [0.0, 0.0, 1.0],
+                    neighbours: vec![TopologyElement::Edge(EdgeId(2))],
+                }],
+                edges: vec![EdgeDescriptor {
+                    curve_type: "line".into(),
+                    length: 1.0,
+                    centre: [0.0; 3],
+                    neighbours: vec![TopologyElement::Face(FaceId(0))],
+                }],
+                vertices: vec![VertexDescriptor {
+                    position: [0.0; 3],
+                    neighbours: Vec::new(),
+                }],
+            },
+        };
+        let context =
+            resolve_context(&TopologyElement::Face(FaceId(0)), &ledger, &strategy).unwrap();
+        let context = with_source_context(context, Some("with BuildPart():\n    Box(1, 1, 1)"));
+
+        assert_eq!(context.neighbours, vec![TopologyElement::Edge(EdgeId(2))]);
+        assert!(context.source_context.contains("1 | with BuildPart():"));
+        assert!(context.source_context.contains("2 |     Box(1, 1, 1)"));
     }
 }

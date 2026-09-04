@@ -1229,6 +1229,8 @@ mod tests {
             element,
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
         };
         let input = TurnInput {
             chat: Some("and make it taller".into()),
