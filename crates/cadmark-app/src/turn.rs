@@ -854,6 +854,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_request_naming_several_operations_carries_material_for_each() {
+        let model = ScriptedModel::new([text("Done.")]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        harness
+            .run(
+                &model,
+                chat("extrude the profile, revolve the boss, cut a hole, then fillet the corners"),
+                CancelFlag::new(),
+            )
+            .await;
+        let context = first_request_context(&model);
+        // One marker from each of the four examples the request names;
+        // dropping any operation's material fails here.
+        for (operation, marker) in [
+            ("extrude", "extrude(amount=plate_thickness)"),
+            ("revolve", "revolve(axis=Axis.Z"),
+            ("cut", "Hole(radius="),
+            ("fillet", "chamfer("),
+        ] {
+            assert!(
+                context.contains(marker),
+                "no {operation} example reached the model"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_spatial_comment_selects_examples_from_the_words_it_carries() {
         let model = ScriptedModel::new([text("Bored it.")]);
         let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
