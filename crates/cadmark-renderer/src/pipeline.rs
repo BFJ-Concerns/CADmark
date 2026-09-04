@@ -6,8 +6,9 @@ use bytemuck::{Pod, Zeroable};
 use cadmark_core::sketch::SketchProfile;
 
 use crate::camera::Camera;
+use crate::markers::{MarkerExtent, MarkerSizing};
 use crate::mesh::{
-    CORNER_TINT, EdgeVertex, GpuMesh, GpuSketch, GpuVertex, REGION_TINT, SketchVertex,
+    CORNER_TINT, EdgeVertex, GpuMesh, GpuSketch, GpuVertex, MarkerVertex, REGION_TINT, SketchVertex,
 };
 use crate::section::SectionPlane;
 
@@ -84,6 +85,8 @@ pub struct MeshUniforms {
     pub _pad6: f32,
     pub _pad7: f32,
     pub _pad8: f32,
+    /// Edge and vertex-marker sizes, shared with the picking uniforms.
+    pub marker_size: MarkerExtent,
 }
 
 /// Initial length of the highlight storage buffer. It grows to whatever a
@@ -91,12 +94,15 @@ pub struct MeshUniforms {
 /// the footprints small enough to be common.
 const HIGHLIGHT_INITIAL_CAPACITY: u64 = 64;
 
-/// Uniforms for the picking shader (just view_proj).
+/// Uniforms for the picking shaders: the camera, the section plane, and
+/// the same marker sizes the visible passes draw with.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimpleUniforms {
     pub view_proj: [[f32; 4]; 4],
     pub section_plane: [f32; 4],
+    /// Edge and vertex-marker sizes, shared with the mesh uniforms.
+    pub marker_size: MarkerExtent,
 }
 
 /// GPU pipelines and resources for rendering.
@@ -119,9 +125,13 @@ pub struct RenderPipelines {
     pub picking_uniform_buffer: wgpu::Buffer,
     pub picking_bind_group: wgpu::BindGroup,
     pub edge_picking_pipeline: wgpu::RenderPipeline,
+    /// Vertex markers in the picking pass, drawn over the edges.
+    pub marker_picking_pipeline: wgpu::RenderPipeline,
 
     /// Wireframe overlay; reads `mesh_uniform_buffer` through `mesh_bind_group`.
     pub wireframe_pipeline: wgpu::RenderPipeline,
+    /// Visible vertex markers; reads `mesh_uniform_buffer` too.
+    pub vertex_marker_pipeline: wgpu::RenderPipeline,
 
     /// Sketch profile curves as lines, and its regions and corner markers
     /// as triangles. Both read `mesh_uniform_buffer` through
@@ -152,6 +162,53 @@ pub struct RenderPipelines {
     surface_format: wgpu::TextureFormat,
 }
 
+/// Marker sizing and expansion, shared by every shader that draws or
+/// picks an edge or a vertex marker. It declares the WGSL `MarkerExtent`
+/// each shader's own `Uniforms` block names, so the nested layout is
+/// written once however many shaders bind it.
+const MARKERS_COMMON_WGSL: &str = include_str!("shaders/markers_common.wgsl");
+
+/// A shader's full source: the shared marker snippet, then its own body.
+fn shader_source(body: &str) -> String {
+    format!("{MARKERS_COMMON_WGSL}\n{body}")
+}
+
+/// Vertex layout for an edge segment's expanded quad, shared by the
+/// wireframe pass and the edge picking pass so both read one buffer the
+/// same way.
+const EDGE_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    0 => Float32x3, // position
+    1 => Float32,   // edge_id
+    2 => Float32x3, // other endpoint
+    3 => Float32,   // side
+    4 => Float32,   // cap
+    5 => Float32,   // end sign
+];
+
+fn edge_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<EdgeVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &EDGE_VERTEX_ATTRIBUTES,
+    }
+}
+
+/// Vertex layout for a vertex marker's quad, shared by the visible marker
+/// pass and the marker picking pass.
+const MARKER_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+    0 => Float32x3, // position
+    1 => Float32,   // vertex_id
+    2 => Float32x2, // corner
+];
+
+fn marker_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<MarkerVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &MARKER_VERTEX_ATTRIBUTES,
+    }
+}
+
 impl RenderPipelines {
     pub fn new(
         device: &wgpu::Device,
@@ -162,7 +219,9 @@ impl RenderPipelines {
         // -- Main mesh pipeline --
         let mesh_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mesh_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/mesh.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(include_str!("shaders/mesh.wgsl")).into(),
+            ),
         });
 
         let mesh_bind_group_layout =
@@ -336,7 +395,9 @@ impl RenderPipelines {
         // -- Picking pipeline (Rgba8Uint target) --
         let picking_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("picking_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/picking.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(include_str!("shaders/picking.wgsl")).into(),
+            ),
         });
 
         let picking_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -451,14 +512,7 @@ impl RenderPipelines {
                 vertex: wgpu::VertexState {
                     module: &picking_shader,
                     entry_point: Some("vs_edge"),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<EdgeVertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x3,
-                            1 => Float32,
-                        ],
-                    }],
+                    buffers: &[edge_vertex_layout()],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -472,7 +526,47 @@ impl RenderPipelines {
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        // Vertex markers in the picking pass, drawn after the edges so a
+        // marker wins the pixels it covers.
+        let marker_picking_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("marker_picking_pipeline"),
+                layout: Some(&picking_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &picking_shader,
+                    entry_point: Some("vs_marker"),
+                    buffers: &[marker_vertex_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &picking_shader,
+                    entry_point: Some("fs_marker"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Uint,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -534,7 +628,9 @@ impl RenderPipelines {
         // -- Wireframe pipeline --
         let wireframe_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wireframe_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/wireframe.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(include_str!("shaders/wireframe.wgsl")).into(),
+            ),
         });
 
         let wireframe_pipeline_layout =
@@ -550,14 +646,7 @@ impl RenderPipelines {
             vertex: wgpu::VertexState {
                 module: &wireframe_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<EdgeVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3, // position
-                        1 => Float32,   // edge_id
-                    ],
-                }],
+                buffers: &[edge_vertex_layout()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -571,7 +660,8 @@ impl RenderPipelines {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -587,10 +677,58 @@ impl RenderPipelines {
             cache: None,
         });
 
+        // -- Visible vertex markers --
+        let vertex_marker_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("vertex_marker_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(include_str!("shaders/vertex_markers.wgsl")).into(),
+            ),
+        });
+
+        let vertex_marker_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("vertex_marker_pipeline"),
+                layout: Some(&wireframe_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &vertex_marker_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[marker_vertex_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &vertex_marker_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    // Markers sit on the surface they belong to.
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+
         // -- Sketch profile pipelines --
         let sketch_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sketch_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/sketch.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                shader_source(include_str!("shaders/sketch.wgsl")).into(),
+            ),
         });
 
         let sketch_pipeline_layout =
@@ -788,7 +926,9 @@ impl RenderPipelines {
             picking_uniform_buffer,
             picking_bind_group,
             edge_picking_pipeline,
+            marker_picking_pipeline,
             wireframe_pipeline,
+            vertex_marker_pipeline,
             sketch_curve_pipeline,
             sketch_fill_pipeline,
             simple_bind_group_layout,
@@ -894,6 +1034,12 @@ pub struct Renderer {
     pub ghost_solid: bool,
     pub section: SectionPlane,
     pub transparent: bool,
+    /// How wide edges are drawn and how large vertex markers are, in
+    /// screen pixels — the one value both the visible and the picking
+    /// passes are sized from.
+    pub marker_sizing: MarkerSizing,
+    /// Which kinds of element a click may land on.
+    pub selection_filter: crate::picking::SelectionFilter,
 }
 
 /// How far a ghosted solid fades towards the background. Enough that the
@@ -916,6 +1062,8 @@ impl Renderer {
             ghost_solid: false,
             section: SectionPlane::default(),
             transparent: false,
+            marker_sizing: MarkerSizing::default(),
+            selection_filter: crate::picking::SelectionFilter::default(),
         }
     }
 
@@ -927,8 +1075,10 @@ impl Renderer {
         }
     }
 
-    /// Build the mesh uniforms for the current frame.
-    pub fn mesh_uniforms(&self, aspect_ratio: f32) -> MeshUniforms {
+    /// Build the mesh uniforms for the current frame. The viewport size is
+    /// in physical pixels: it sets the aspect ratio and the marker sizes.
+    pub fn mesh_uniforms(&self, viewport: (u32, u32)) -> MeshUniforms {
+        let aspect_ratio = aspect_ratio(viewport);
         let view = self.camera.view_matrix();
         let proj = self.camera.projection_matrix(aspect_ratio);
         let view_proj = mat4_mul(proj, view);
@@ -962,16 +1112,19 @@ impl Renderer {
             _pad6: 0.0,
             _pad7: 0.0,
             _pad8: 0.0,
+            marker_size: self.marker_sizing.extent(viewport.0, viewport.1),
         }
     }
 
-    /// Build view-projection-only uniforms.
-    pub fn simple_uniforms(&self, aspect_ratio: f32) -> SimpleUniforms {
+    /// Build the picking uniforms for the current frame, sized from the
+    /// same `marker_sizing` as the visible passes.
+    pub fn simple_uniforms(&self, viewport: (u32, u32)) -> SimpleUniforms {
         let view = self.camera.view_matrix();
-        let proj = self.camera.projection_matrix(aspect_ratio);
+        let proj = self.camera.projection_matrix(aspect_ratio(viewport));
         SimpleUniforms {
             view_proj: mat4_mul(proj, view),
             section_plane: self.section.equation(),
+            marker_size: self.marker_sizing.extent(viewport.0, viewport.1),
         }
     }
 }
@@ -980,6 +1133,11 @@ impl Default for Renderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The viewport's aspect ratio, guarding a zero-height frame.
+fn aspect_ratio((width, height): (u32, u32)) -> f32 {
+    width.max(1) as f32 / height.max(1) as f32
 }
 
 /// 4x4 matrix multiplication (column-major).
@@ -993,11 +1151,15 @@ fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
     result
 }
 
-/// Upload a tessellated mesh to GPU buffers.
+/// Upload a tessellated mesh to GPU buffers. `vertex_positions` are the
+/// part's topological vertices in ID order — the mesh carries triangles
+/// and edge polylines but no vertex points of its own, so the marker pass
+/// is given them alongside.
 pub fn upload_mesh(
     device: &wgpu::Device,
     mesh: &cadmark_core::mesh::TessellatedMesh,
     part: cadmark_core::geometry::PartId,
+    vertex_positions: &[[f32; 3]],
 ) -> GpuMesh {
     use wgpu::util::DeviceExt;
 
@@ -1039,12 +1201,19 @@ pub fn upload_mesh(
         usage: wgpu::BufferUsages::INDEX,
     });
 
-    // Build edge vertices as line segments.
+    // Build edge quads and vertex-marker quads.
     let edge_vertices = edge_vertices(mesh);
+    let marker_vertices = marker_vertices(vertex_positions);
 
     let edge_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("edge_vertex_buffer"),
         contents: bytemuck::cast_slice(&edge_vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+
+    let marker_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("marker_vertex_buffer"),
+        contents: bytemuck::cast_slice(&marker_vertices),
         usage: wgpu::BufferUsages::VERTEX,
     });
 
@@ -1054,9 +1223,27 @@ pub fn upload_mesh(
         index_count: mesh.indices.len() as u32,
         edge_vertex_buffer,
         edge_vertex_count: edge_vertices.len() as u32,
+        marker_vertex_buffer,
+        marker_vertex_count: marker_vertices.len() as u32,
     }
 }
 
+/// The six corners — two triangles — of a unit quad, each `(u, v)` in
+/// {-1, +1}. An edge segment reads `u` as which side of the line to
+/// expand to and `v` as which endpoint the corner belongs to; a vertex
+/// marker reads the pair as the corner itself.
+const QUAD_CORNERS: [(f32, f32); 6] = [
+    (-1.0, -1.0),
+    (1.0, -1.0),
+    (1.0, 1.0),
+    (-1.0, -1.0),
+    (1.0, 1.0),
+    (-1.0, 1.0),
+];
+
+/// Expand every edge polyline into screen-space quads: two triangles per
+/// segment, each corner carrying the segment's other endpoint so the
+/// shader can widen it along the screen-space normal.
 fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> {
     let mut edge_vertices = Vec::new();
     for edge in &mesh.edges {
@@ -1065,17 +1252,47 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
                 cadmark_core::geometry::EdgeId(edge.edge_id),
             )) as f32;
         for window in edge.points.windows(2) {
-            edge_vertices.push(EdgeVertex {
-                position: window[0],
-                edge_id,
-            });
-            edge_vertices.push(EdgeVertex {
-                position: window[1],
-                edge_id,
-            });
+            let (start, end) = (window[0], window[1]);
+            for (side, which_end) in QUAD_CORNERS {
+                let (position, other) = if which_end < 0.0 {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
+                edge_vertices.push(EdgeVertex {
+                    position,
+                    edge_id,
+                    other,
+                    side,
+                    // The cap always extends outwards, away from the
+                    // segment's other endpoint.
+                    cap: -1.0,
+                    end_sign: -which_end,
+                });
+            }
         }
     }
     edge_vertices
+}
+
+/// Build one screen-space quad per topological vertex, indexed by ID.
+fn marker_vertices(positions: &[[f32; 3]]) -> Vec<MarkerVertex> {
+    let mut markers = Vec::with_capacity(positions.len() * QUAD_CORNERS.len());
+    for (index, position) in positions.iter().enumerate() {
+        let vertex_id =
+            crate::picking::encode_picking_id(&cadmark_core::geometry::TopologyElement::Vertex(
+                cadmark_core::geometry::VertexId(index as u32),
+            )) as f32;
+        for (x, y) in QUAD_CORNERS {
+            markers.push(MarkerVertex {
+                position: *position,
+                vertex_id,
+                corner: [x, y],
+                _padding: [0.0, 0.0],
+            });
+        }
+    }
+    markers
 }
 
 /// A storage buffer able to hold `capacity` picking IDs.
@@ -1403,22 +1620,32 @@ mod tests {
             ("_pad6", std::mem::offset_of!(MeshUniforms, _pad6)),
             ("_pad7", std::mem::offset_of!(MeshUniforms, _pad7)),
             ("_pad8", std::mem::offset_of!(MeshUniforms, _pad8)),
+            (
+                "marker_size",
+                std::mem::offset_of!(MeshUniforms, marker_size),
+            ),
         ]
         .into_iter()
         .map(|(name, offset)| (name.to_string(), offset as u32))
         .collect();
 
-        assert_eq!(
-            uniform_struct_layout(include_str!("shaders/mesh.wgsl"), size_of::<MeshUniforms>()),
-            expected
-        );
-        assert_eq!(
-            uniform_struct_layout(
-                include_str!("shaders/wireframe.wgsl"),
-                size_of::<MeshUniforms>()
+        // The composed source is what the device compiles: a shader file
+        // alone no longer parses, since each names the marker helpers.
+        for (name, body) in [
+            ("mesh.wgsl", include_str!("shaders/mesh.wgsl")),
+            ("wireframe.wgsl", include_str!("shaders/wireframe.wgsl")),
+            ("sketch.wgsl", include_str!("shaders/sketch.wgsl")),
+            (
+                "vertex_markers.wgsl",
+                include_str!("shaders/vertex_markers.wgsl"),
             ),
-            expected
-        );
+        ] {
+            assert_eq!(
+                uniform_struct_layout(&shader_source(body), size_of::<MeshUniforms>()),
+                expected,
+                "{name} declares a different Uniforms layout"
+            );
+        }
     }
 
     /// The picking pass binds its own, smaller uniform struct, which the
@@ -1433,6 +1660,10 @@ mod tests {
                 "section_plane",
                 std::mem::offset_of!(SimpleUniforms, section_plane),
             ),
+            (
+                "marker_size",
+                std::mem::offset_of!(SimpleUniforms, marker_size),
+            ),
         ]
         .into_iter()
         .map(|(name, offset)| (name.to_string(), offset as u32))
@@ -1440,7 +1671,7 @@ mod tests {
 
         assert_eq!(
             uniform_struct_layout(
-                include_str!("shaders/picking.wgsl"),
+                &shader_source(include_str!("shaders/picking.wgsl")),
                 size_of::<SimpleUniforms>()
             ),
             expected
@@ -1461,17 +1692,17 @@ mod tests {
 
         let expected = renderer.section.equation();
         assert_ne!(expected, [0.0; 4]);
-        assert_eq!(renderer.mesh_uniforms(1.0).section_plane, expected);
-        assert_eq!(renderer.simple_uniforms(1.0).section_plane, expected);
+        assert_eq!(renderer.mesh_uniforms((800, 600)).section_plane, expected);
+        assert_eq!(renderer.simple_uniforms((800, 600)).section_plane, expected);
     }
 
     #[test]
     fn a_see_through_model_reaches_the_shader_as_alpha_below_one() {
         let mut renderer = Renderer::new();
-        assert_eq!(renderer.mesh_uniforms(1.0).mesh_alpha, 1.0);
+        assert_eq!(renderer.mesh_uniforms((800, 600)).mesh_alpha, 1.0);
 
         renderer.transparent = true;
-        let alpha = renderer.mesh_uniforms(1.0).mesh_alpha;
+        let alpha = renderer.mesh_uniforms((800, 600)).mesh_alpha;
         assert!(
             (0.0..1.0).contains(&alpha),
             "see-through alpha {alpha} would draw solid or invisible"
@@ -1490,7 +1721,7 @@ mod tests {
         renderer.transparent = true;
         renderer.ghost_solid = true;
 
-        let uniforms = renderer.mesh_uniforms(1.0);
+        let uniforms = renderer.mesh_uniforms((800, 600));
         assert_eq!(
             uniforms.mesh_alpha, 1.0,
             "a ghosted solid must not also be alpha-blended away"
@@ -1503,7 +1734,7 @@ mod tests {
         // The setting is kept, not cleared: dropping the sketch brings
         // the see-through view straight back.
         renderer.ghost_solid = false;
-        assert!(renderer.mesh_uniforms(1.0).mesh_alpha < 1.0);
+        assert!(renderer.mesh_uniforms((800, 600)).mesh_alpha < 1.0);
     }
 
     /// A device for the tests that must actually run a pass. The software
@@ -1613,6 +1844,13 @@ mod tests {
             index_count: indices.len() as u32,
             edge_vertex_buffer: buffer_of(&device, &queue, &[0u8; 16], wgpu::BufferUsages::VERTEX),
             edge_vertex_count: 0,
+            marker_vertex_buffer: buffer_of(
+                &device,
+                &queue,
+                &[0u8; 16],
+                wgpu::BufferUsages::VERTEX,
+            ),
+            marker_vertex_count: 0,
         };
 
         // Cut at x = 0, keeping the low side.
@@ -1630,6 +1868,7 @@ mod tests {
                 [0.0, 0.0, 0.0, 1.0],
             ],
             section_plane: section.equation(),
+            marker_size: MarkerSizing::default().extent(SIZE, SIZE),
         };
         queue.write_buffer(
             &pipelines.picking_uniform_buffer,
@@ -1713,6 +1952,7 @@ mod tests {
             picking,
             std::slice::from_ref(mesh),
             std::slice::from_ref(mesh),
+            crate::picking::SelectionFilter::default(),
         );
         crate::viewport::copy_pick_pixel(&mut encoder, picking, &picking.staging_buffer, x, y);
         queue.submit([encoder.finish()]);
@@ -1720,7 +1960,10 @@ mod tests {
         let slice = picking.staging_buffer.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::Maintain::Wait);
-        let element = crate::viewport::decode_pick_result(&slice.get_mapped_range());
+        let element = crate::viewport::decode_pick_result(
+            &slice.get_mapped_range(),
+            crate::picking::SelectionFilter::default(),
+        );
         picking.staging_buffer.unmap();
         element
     }
@@ -1731,7 +1974,7 @@ mod tests {
         // showing part of one would understate what the line accounts for.
         let mut renderer = Renderer::new();
         renderer.highlight_ids = (1..=500).collect();
-        assert_eq!(renderer.mesh_uniforms(1.0).highlight_count, 500);
+        assert_eq!(renderer.mesh_uniforms((800, 600)).highlight_count, 500);
     }
 
     #[test]
@@ -1806,7 +2049,22 @@ mod tests {
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {
-        let mesh = cadmark_core::mesh::TessellatedMesh {
+        let mesh = one_edge_mesh();
+
+        let encoded = crate::picking::encode_picking_id(
+            &cadmark_core::geometry::TopologyElement::Edge(cadmark_core::geometry::EdgeId(7)),
+        ) as f32;
+
+        assert!(
+            edge_vertices(&mesh)
+                .iter()
+                .all(|vertex| vertex.edge_id == encoded),
+            "every corner of the quad must carry the edge it belongs to"
+        );
+    }
+
+    fn one_edge_mesh() -> cadmark_core::mesh::TessellatedMesh {
+        cadmark_core::mesh::TessellatedMesh {
             vertices: Vec::new(),
             indices: Vec::new(),
             face_ids: Vec::new(),
@@ -1814,18 +2072,99 @@ mod tests {
                 points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
                 edge_id: 7,
             }],
-        };
-
-        let encoded = crate::picking::encode_picking_id(
-            &cadmark_core::geometry::TopologyElement::Edge(cadmark_core::geometry::EdgeId(7)),
-        ) as f32;
-
-        let edge_vertices = edge_vertices(&mesh);
-
-        assert_eq!(edge_vertices.len(), 2);
-        assert_eq!(edge_vertices[0].edge_id, encoded);
-        assert_eq!(edge_vertices[1].edge_id, encoded);
+        }
     }
+
+    #[test]
+    fn an_edge_segment_becomes_a_quad_with_both_sides_at_both_ends() {
+        // A line list draws one physical pixel, which is neither visible at
+        // a distance nor hittable; the segment is widened in screen space
+        // instead, so it needs a corner per triangle vertex.
+        let vertices = edge_vertices(&one_edge_mesh());
+        assert_eq!(vertices.len(), 6, "one segment, two triangles");
+
+        for vertex in &vertices {
+            assert!(
+                vertex.side == 1.0 || vertex.side == -1.0,
+                "{vertex:?} sits on neither side of the segment"
+            );
+            // Each corner is placed from its own endpoint towards the other.
+            assert_ne!(
+                vertex.position, vertex.other,
+                "a corner with no opposite endpoint has no direction to widen along"
+            );
+        }
+
+        // Both endpoints appear, and each carries both sides.
+        for end in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]] {
+            let sides: Vec<f32> = vertices
+                .iter()
+                .filter(|vertex| vertex.position == end)
+                .map(|vertex| vertex.side)
+                .collect();
+            assert_eq!(sides.len(), 3, "each end owns three of the six corners");
+            assert!(
+                sides.contains(&1.0) && sides.contains(&-1.0),
+                "an end missing a side collapses the quad to a triangle"
+            );
+        }
+    }
+
+    #[test]
+    fn every_vertex_gets_a_marker_quad_under_its_own_picking_id() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]];
+        let markers = marker_vertices(&positions);
+
+        assert_eq!(markers.len(), 12, "six corners per vertex marker");
+
+        for (index, position) in positions.iter().enumerate() {
+            let encoded =
+                crate::picking::encode_picking_id(&cadmark_core::geometry::TopologyElement::Vertex(
+                    cadmark_core::geometry::VertexId(index as u32),
+                )) as f32;
+            let corners: Vec<&MarkerVertex> = markers
+                .iter()
+                .filter(|marker| marker.position == *position)
+                .collect();
+            assert_eq!(corners.len(), 6);
+            assert!(
+                corners.iter().all(|marker| marker.vertex_id == encoded),
+                "a marker's corners must all pick the vertex they surround"
+            );
+            // The corners must span the quad, or the disc is clipped.
+            assert!(
+                corners.iter().any(|marker| marker.corner == [-1.0, -1.0])
+                    && corners.iter().any(|marker| marker.corner == [1.0, 1.0])
+            );
+        }
+    }
+
+    #[test]
+    fn a_model_with_no_vertices_has_no_markers() {
+        assert!(marker_vertices(&[]).is_empty());
+    }
+
+    #[test]
+    fn the_visible_and_picking_passes_are_sized_from_the_same_value() {
+        // Drawn width and hit width are the same claim to the user, so
+        // they are one value here rather than two that agree today.
+        let mut renderer = Renderer::new();
+        let viewport = (1280, 720);
+        assert_eq!(
+            renderer.mesh_uniforms(viewport).marker_size,
+            renderer.simple_uniforms(viewport).marker_size
+        );
+
+        renderer.marker_sizing.edge_half_width_px *= 2.0;
+        renderer.marker_sizing.vertex_radius_px *= 2.0;
+        let widened = renderer.mesh_uniforms(viewport).marker_size;
+        assert_eq!(widened, renderer.simple_uniforms(viewport).marker_size);
+        assert_ne!(
+            widened,
+            MarkerSizing::default().extent(viewport.0, viewport.1)
+        );
+    }
+
     #[test]
     fn marker_uniforms_name_only_live_entries() {
         let mut renderer = Renderer::new();
@@ -1840,14 +2179,14 @@ mod tests {
             },
         ];
 
-        let uniforms = renderer.mesh_uniforms(1.0);
+        let uniforms = renderer.mesh_uniforms((800, 600));
         assert_eq!(uniforms.marker_count, 2);
 
         renderer.markers.pop();
-        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 1);
+        assert_eq!(renderer.mesh_uniforms((800, 600)).marker_count, 1);
 
         renderer.markers.clear();
-        assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 0);
+        assert_eq!(renderer.mesh_uniforms((800, 600)).marker_count, 0);
     }
 
     #[test]
@@ -1897,25 +2236,22 @@ mod tests {
             index_count: 3,
             edge_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("test-edge-vertices"),
-                contents: bytemuck::cast_slice(&[
-                    EdgeVertex {
-                        position: [0.0; 3],
-                        edge_id: 1.0,
-                    },
-                    EdgeVertex {
-                        position: [0.0; 3],
-                        edge_id: 1.0,
-                    },
-                ]),
+                contents: bytemuck::cast_slice(&edge_vertices(&one_edge_mesh())),
                 usage: wgpu::BufferUsages::VERTEX,
             }),
-            edge_vertex_count: 2,
+            edge_vertex_count: 6,
+            marker_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-marker-vertices"),
+                contents: bytemuck::cast_slice(&marker_vertices(&[[0.0; 3]])),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            marker_vertex_count: 6,
         };
         let renderer = Renderer::new();
         queue.write_buffer(
             &pipelines.mesh_uniform_buffer,
             0,
-            bytemuck::bytes_of(&renderer.mesh_uniforms(1.0)),
+            bytemuck::bytes_of(&renderer.mesh_uniforms((800, 600))),
         );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         device.push_error_scope(wgpu::ErrorFilter::Validation);

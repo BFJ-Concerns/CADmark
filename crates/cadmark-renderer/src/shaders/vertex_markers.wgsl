@@ -1,10 +1,11 @@
-// Wireframe edge overlay — draws each edge as a screen-space quad over
-// the shaded mesh, so it holds a constant width at any camera distance,
-// with the selected or hovered edge picked out in its highlight colour.
+// Visible vertex markers — a screen-space disc at each of the model's
+// vertices, so a vertex is something the user can see and aim at.
 //
 // The marker expansion comes from the shared snippet prepended at
-// pipeline creation. The picking pass expands the same buffer through the
-// same function, so what is drawn is what picks.
+// pipeline creation; the picking pass expands and masks the same buffer
+// through the same functions. A vertex carrying a reference marker or
+// sitting in a candidate's footprint takes that colour, which is what
+// makes a highlighted vertex visible at all.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -27,7 +28,6 @@ struct Uniforms {
     // Section plane [nx, ny, nz, d]: a fragment is discarded when
     // dot(n, world_pos) + d < 0. All zeroes means no section.
     section_plane: vec4<f32>,
-    // Opacity of the shaded surface.
     mesh_alpha: f32,
     _pad6: f32,
     _pad7: f32,
@@ -41,15 +41,13 @@ fn section_keeps(section_plane: vec4<f32>, world_pos: vec3<f32>) -> bool {
     return dot(section_plane.xyz, world_pos) + section_plane.w >= 0.0;
 }
 
-// What a ghosted solid's edges fade towards — the viewport background,
+// What a ghosted solid's markers fade towards — the viewport background,
 // display-encoded like the rest of this shader's output.
 const GHOST_COLOUR: vec3<f32> = vec3<f32>(0.157, 0.165, 0.188);
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
-// Picking IDs of the candidate-footprint highlight. A storage binding
-// because a footprint is as large as the geometry one line accounts for,
-// which a uniform array could not hold.
+// Picking IDs of the candidate-footprint highlight.
 @group(0) @binding(1) var<storage, read> highlight_ids: array<u32>;
 
 struct Marker {
@@ -75,30 +73,29 @@ fn in_highlight(id: u32) -> bool {
     return false;
 }
 
-
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) edge_id: f32,
-    // The segment's other endpoint, for the screen-space direction.
-    @location(2) other: vec3<f32>,
-    @location(3) side: f32,
-    @location(4) cap: f32,
-    @location(5) end_sign: f32,
+    @location(1) vertex_id: f32,
+    // Which corner of the marker's quad this is: -1 or +1 on each axis.
+    @location(2) corner: vec2<f32>,
 }
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
-    @location(0) edge_id: f32,
-    @location(1) world_pos: vec3<f32>,
+    @location(0) vertex_id: f32,
+    @location(1) corner: vec2<f32>,
+    // The marker's own vertex, not the expanded corner: a marker is
+    // clipped away with the vertex it stands for, as a whole.
+    @location(2) world_pos: vec3<f32>,
 }
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let here = uniforms.view_proj * vec4<f32>(in.position, 1.0);
-    let other = uniforms.view_proj * vec4<f32>(in.other, 1.0);
-    out.clip_pos = expand_edge(here, other, in.side, in.cap, in.end_sign, uniforms.marker_size);
-    out.edge_id = in.edge_id;
+    let centre = uniforms.view_proj * vec4<f32>(in.position, 1.0);
+    out.clip_pos = expand_marker(centre, in.corner, uniforms.marker_size);
+    out.vertex_id = in.vertex_id;
+    out.corner = in.corner;
     out.world_pos = in.position;
     return out;
 }
@@ -108,22 +105,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     if !section_keeps(uniforms.section_plane, in.world_pos) {
         discard;
     }
+    if !marker_covers(in.corner) {
+        discard;
+    }
     let ghost = clamp(uniforms.ghost, 0.0, 1.0);
-    let eid = u32(in.edge_id + 0.5);
+    let vid = u32(in.vertex_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
-        if eid == markers[index].element_id && eid != 0u {
+        if vid == markers[index].element_id && vid != 0u {
             return vec4<f32>(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), 1.0);
         }
     }
-    if eid == uniforms.selected_id && uniforms.selected_id != 0u {
+    if vid == uniforms.selected_id && uniforms.selected_id != 0u {
         return vec4<f32>(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), 1.0);
     }
-    if eid == uniforms.hover_id && uniforms.hover_id != 0u {
+    if vid == uniforms.hover_id && uniforms.hover_id != 0u {
         return vec4<f32>(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), 1.0);
     }
-    if in_highlight(eid) {
+    if in_highlight(vid) {
         return vec4<f32>(uniforms.hover_colour.rgb, 1.0);
     }
-    // Dark edges, already display-encoded.
+    // Dark discs, already display-encoded, matching the wireframe.
     return vec4<f32>(mix(vec3<f32>(0.10, 0.10, 0.12), GHOST_COLOUR, ghost), 1.0);
 }

@@ -118,7 +118,15 @@ impl OffscreenRenderer {
         // back from it.
         let gpu_mesh: Vec<GpuMesh> = mesh
             .map(|mesh| {
-                crate::pipeline::upload_mesh(device, mesh, cadmark_core::geometry::PartId(0))
+                // No vertex markers: this path renders a framed picture,
+                // and a marker is an aiming aid for a viewport the user
+                // is clicking in.
+                crate::pipeline::upload_mesh(
+                    device,
+                    mesh,
+                    cadmark_core::geometry::PartId(0),
+                    &[],
+                )
             })
             .into_iter()
             .collect();
@@ -349,7 +357,7 @@ mod tests {
                 &queue,
                 Some(&cube()),
                 None,
-                &scene.mesh_uniforms(width as f32 / height as f32),
+                &scene.mesh_uniforms((width, height)),
                 clear,
             )
             .expect("render");
@@ -428,7 +436,7 @@ mod tests {
                 &queue,
                 None,
                 None,
-                &scene.mesh_uniforms(1.0),
+                &scene.mesh_uniforms((512, 512)),
                 wgpu::Color {
                     r: 0.0,
                     g: 0.0,
@@ -501,7 +509,7 @@ mod tests {
                 &queue,
                 None,
                 Some(&profile),
-                &scene.mesh_uniforms(1.0),
+                &scene.mesh_uniforms((512, 512)),
                 wgpu::Color {
                     r: 0.6,
                     g: 0.6,
@@ -573,7 +581,7 @@ mod tests {
                     &queue,
                     Some(&cube()),
                     None,
-                    &scene.mesh_uniforms(1.0),
+                    &scene.mesh_uniforms((512, 512)),
                     clear,
                 )
                 .expect("render")
@@ -652,7 +660,7 @@ mod tests {
                     &queue,
                     Some(&cube()),
                     None,
-                    &scene.mesh_uniforms(1.0),
+                    &scene.mesh_uniforms((512, 512)),
                     clear,
                 )
                 .expect("render")
@@ -758,7 +766,7 @@ mod tests {
                 &queue,
                 Some(&cube()),
                 None,
-                &scene.mesh_uniforms(1.0),
+                &scene.mesh_uniforms((512, 512)),
                 clear,
             )
             .expect("render");
@@ -769,7 +777,7 @@ mod tests {
                 &queue,
                 Some(&cube()),
                 None,
-                &scene.mesh_uniforms(1.0),
+                &scene.mesh_uniforms((512, 512)),
                 clear,
             )
             .expect("render");
