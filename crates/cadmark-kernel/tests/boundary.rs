@@ -4,7 +4,7 @@
 // provenance-resolution interface exposes no kernel-specific type. A
 // build that reintroduces any of these fails here before it ships.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use cadmark_core::ledger::SemanticOperation;
@@ -189,14 +189,22 @@ fn contains_identifier(code: &str, identifier: &str) -> bool {
     })
 }
 
-/// Variants made available as bare names by a use declaration in this file.
-fn imported_operation_variants(code: &[String]) -> BTreeSet<String> {
+fn starts_use_statement(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("use ")
+        || line.starts_with("pub use ")
+        || (line.starts_with("pub(") && line.contains(") use "))
+}
+
+/// Local names made available by a SemanticOperation use declaration in this
+/// file, mapped to the operation variant each one denotes.
+fn imported_operation_variants(code: &[String]) -> BTreeMap<String, String> {
     let known = semantic_operation_names();
-    let mut imported = BTreeSet::new();
+    let mut imported = BTreeMap::new();
     let mut use_statement = String::new();
     for line in code {
         if use_statement.is_empty() {
-            if line.contains("use ") {
+            if starts_use_statement(line) {
                 use_statement.push_str(line);
             } else {
                 continue;
@@ -218,20 +226,33 @@ fn imported_operation_variants(code: &[String]) -> BTreeSet<String> {
             .and_then(|rest| rest.split_once('}'))
         {
             for name in names.0.split(',').map(str::trim) {
-                let name = name.split_whitespace().next().unwrap_or_default();
+                let (name, local) = name
+                    .split_once(" as ")
+                    .map_or((name, name), |(name, local)| (name.trim(), local.trim()));
                 if known.iter().any(|known_name| known_name == name) {
-                    imported.insert(name.to_owned());
+                    imported.insert(local.to_owned(), name.to_owned());
                 }
             }
         } else if import.starts_with('*') {
-            imported.extend(known.iter().cloned());
+            imported.extend(known.iter().cloned().map(|name| (name.clone(), name)));
         } else {
             let name: String = import
                 .chars()
                 .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
                 .collect();
+            let local = import[name.len()..]
+                .trim_start()
+                .strip_prefix("as ")
+                .and_then(|rest| {
+                    let alias: String = rest
+                        .chars()
+                        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                        .collect();
+                    (!alias.is_empty()).then_some(alias)
+                })
+                .unwrap_or_else(|| name.clone());
             if known.iter().any(|known_name| known_name == &name) {
-                imported.insert(name);
+                imported.insert(local, name);
             }
         }
         use_statement.clear();
@@ -241,14 +262,18 @@ fn imported_operation_variants(code: &[String]) -> BTreeSet<String> {
 
 fn operation_in_pattern(
     pattern: &str,
-    imported: &BTreeSet<String>,
+    imported: &BTreeMap<String, String>,
     permit_self: bool,
 ) -> Option<String> {
-    semantic_operation_names().into_iter().find(|variant| {
+    if let Some(variant) = semantic_operation_names().into_iter().find(|variant| {
         pattern.contains(&format!("SemanticOperation::{variant}"))
             || (!permit_self && pattern.contains(&format!("Self::{variant}")))
-            || (imported.contains(variant) && contains_identifier(pattern, variant))
-    })
+    }) {
+        return Some(variant);
+    }
+    imported
+        .iter()
+        .find_map(|(local, variant)| contains_identifier(pattern, local).then(|| variant.clone()))
 }
 
 /// Returns the operation variant when a line branches on it. Match arms only
@@ -257,7 +282,7 @@ fn operation_in_pattern(
 /// inherent implementation, where it defines the vocabulary itself.
 fn operation_branch_on_line(
     code: &str,
-    imported: &BTreeSet<String>,
+    imported: &BTreeMap<String, String>,
     permit_self: bool,
 ) -> Option<String> {
     if let Some((pattern, _)) = code.split_once("=>") {
@@ -377,7 +402,7 @@ fn only_code_is_inspected() {
 
 #[test]
 fn operation_branch_detection_allows_data_and_rejects_branches() {
-    let no_imports = BTreeSet::new();
+    let no_imports = BTreeMap::new();
     let imported = imported_operation_variants(&code_only(
         "use cadmark_core::ledger::SemanticOperation::{\n    Chamfer, Fillet,\n};",
     ));
@@ -387,6 +412,16 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
     let glob_import = imported_operation_variants(&code_only(
         "use cadmark_core::ledger::SemanticOperation::*;",
     ));
+    let alias_import = imported_operation_variants(&code_only(
+        "use cadmark_core::ledger::SemanticOperation::Fillet as Round;",
+    ));
+    let data_only = code_only(
+        "let cause = describe(\n    cadmark_core::ledger::SemanticOperation::Fillet,\n);",
+    );
+    assert!(
+        imported_operation_variants(&data_only).is_empty(),
+        "an ordinary data reference is not a use statement"
+    );
     assert_eq!(
         operation_branch_on_line(
             "let operation = SemanticOperation::Fillet;",
@@ -426,6 +461,15 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
     assert_eq!(
         operation_branch_on_line("Fillet => render(),", &glob_import, false),
         Some("Fillet".to_owned())
+    );
+    assert_eq!(
+        operation_branch_on_line("Round => render(),", &alias_import, false),
+        Some("Fillet".to_owned())
+    );
+    assert_eq!(
+        operation_branch_on_line("Corner::Fillet => render(),", &no_imports, false),
+        None,
+        "a data-only operation reference does not make another enum's variant a kernel branch"
     );
     assert_eq!(
         operation_branch_on_line("Self::Fillet => render(),", &no_imports, false),
