@@ -72,6 +72,8 @@ All notable changes to this project will be documented in this file.
 - Window title carries the project name
 
 ### Fixed
+- Malformed settings errors identify the affected file and repair location
+  without echoing settings content
 - Completed-turn chat reports now show face count, volume, and overall size
   before and after an unchanged edit
 - Repeated edits from the same undone design step now create separate history

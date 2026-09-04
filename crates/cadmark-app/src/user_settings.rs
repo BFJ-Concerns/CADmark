@@ -109,8 +109,20 @@ impl SettingsStore {
     pub fn load(&self) -> Result<UserSettings, String> {
         let path = self.dir.join(SETTINGS_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents)
-                .map_err(|error| format!("{} is not readable: {error}", path.display())),
+            Ok(contents) => {
+                let mut deserializer = serde_json::Deserializer::from_str(&contents);
+                let settings =
+                    serde_path_to_error::deserialize::<_, UserSettings>(&mut deserializer)
+                        .map_err(|error| {
+                            let field = known_settings_field(&error.path().to_string());
+                            let parse_error = error.into_inner();
+                            invalid_settings_error(&path, field, &parse_error)
+                        })?;
+                deserializer
+                    .end()
+                    .map_err(|error| invalid_settings_error(&path, None, &error))?;
+                Ok(settings)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(UserSettings::default())
             }
@@ -180,6 +192,55 @@ impl SettingsStore {
     }
 }
 
+fn known_settings_field(path: &str) -> Option<&'static str> {
+    match path {
+        "ai" => Some("ai"),
+        "ai.base_url" => Some("ai.base_url"),
+        "ai.model" => Some("ai.model"),
+        "ai.accepts_images" => Some("ai.accepts_images"),
+        "ai.allow_insecure_http" => Some("ai.allow_insecure_http"),
+        "limits" => Some("limits"),
+        "limits.wall_clock" | "limits.wall_clock.secs" | "limits.wall_clock.nanos" => {
+            Some("limits.wall_clock")
+        }
+        "limits.memory_bytes" => Some("limits.memory_bytes"),
+        "context_window_tokens" => Some("context_window_tokens"),
+        path if path.starts_with("recent_projects[") => Some("recent_projects"),
+        "recent_projects" => Some("recent_projects"),
+        _ => None,
+    }
+}
+
+fn invalid_settings_error(path: &Path, field: Option<&str>, error: &serde_json::Error) -> String {
+    let location = format!("line {}, column {}", error.line(), error.column());
+    match error.classify() {
+        serde_json::error::Category::Data => match field {
+            Some(field) => format!(
+                "{} has an invalid value for {field} near {location}; correct the field type and try again",
+                path.display(),
+            ),
+            None => format!(
+                "{} contains an invalid setting near {location}; correct the field type and try again",
+                path.display(),
+            ),
+        },
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => match field {
+            Some(field) => format!(
+                "{} has invalid JSON for {field} near {location}; correct the JSON syntax and try again",
+                path.display(),
+            ),
+            None => format!(
+                "{} contains invalid settings near {location}; correct the JSON syntax and try again",
+                path.display(),
+            ),
+        },
+        serde_json::error::Category::Io => format!(
+            "{} contains invalid settings near {location}; correct the JSON syntax and try again",
+            path.display(),
+        ),
+    }
+}
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -218,7 +279,60 @@ mod tests {
         let (_dir, store) = store();
         store.save(&UserSettings::default()).unwrap();
         std::fs::write(store.dir.join(SETTINGS_FILE), "not json").unwrap();
-        assert!(store.load().unwrap_err().contains("not readable"));
+        assert!(store.load().unwrap_err().contains(SETTINGS_FILE));
+    }
+
+    #[test]
+    fn malformed_settings_are_actionable_without_echoing_their_contents() {
+        let (_dir, store) = store();
+        let cases = [
+            (
+                r#"{"context_window_tokens":"wrong-type-sentinel"}"#,
+                "wrong-type-sentinel",
+                Some("context_window_tokens"),
+                "field type",
+            ),
+            (
+                r#"{"unknown-key-sentinel":[1,}"#,
+                "unknown-key-sentinel",
+                None,
+                "JSON syntax",
+            ),
+            (
+                r#"{"ai":{"base_url":"https://provider.example/v1","model":"m","unknown-data-key-sentinel":"value"}}"#,
+                "unknown-data-key-sentinel",
+                None,
+                "field type",
+            ),
+            (
+                r#"{"context_window_tokens":"malformed-literal-sentinel"#,
+                "malformed-literal-sentinel",
+                Some("context_window_tokens"),
+                "JSON syntax",
+            ),
+            (
+                r#"{"context_window_tokens":128000} trailing-junk-sentinel"#,
+                "trailing-junk-sentinel",
+                None,
+                "JSON syntax",
+            ),
+        ];
+
+        for (contents, sentinel, field, repair) in cases {
+            std::fs::create_dir_all(&store.dir).unwrap();
+            std::fs::write(store.dir.join(SETTINGS_FILE), contents).unwrap();
+
+            let error = store.load().unwrap_err();
+
+            assert!(error.contains("settings.json"));
+            assert!(!error.contains(sentinel));
+            assert!(error.contains("line 1"));
+            assert!(error.contains("correct"));
+            assert!(error.contains(repair));
+            if let Some(field) = field {
+                assert!(error.contains(field));
+            }
+        }
     }
 
     #[test]

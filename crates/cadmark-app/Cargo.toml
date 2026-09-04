@@ -26,6 +26,7 @@ png = "=0.18.1"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal", "wayland"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
 open = "=5.4.2"
 
 [dev-dependencies]
