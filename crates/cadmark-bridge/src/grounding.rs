@@ -105,7 +105,7 @@ fn render_anchor(context: &GeometryContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
+    use cadmark_core::geometry::{EdgeId, FaceId, PickedElement, TopologyElement, VertexId};
     use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
 
     fn entry(line: u32, operation: SemanticOperation) -> ProvenanceEntry {
@@ -139,7 +139,7 @@ mod tests {
             anchors: vec![
                 GeometryContext {
                     sketch: Default::default(),
-                    element: TopologyElement::Face(FaceId(3)),
+                    element: PickedElement::Solid(TopologyElement::Face(FaceId(3))),
                     provenance: LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
                     identification,
                     source_context: "lines 3-7:\n3 | with BuildPart():\n5 | Box(10, 10, 2)".into(),
@@ -147,7 +147,7 @@ mod tests {
                 },
                 GeometryContext {
                     sketch: Default::default(),
-                    element: TopologyElement::Edge(EdgeId(4)),
+                    element: PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
                     provenance: LedgerValue::Ambiguous(vec![
                         entry(2, SemanticOperation::Box),
                         entry(3, SemanticOperation::Fillet),
@@ -161,7 +161,7 @@ mod tests {
                 },
                 GeometryContext {
                     sketch: Default::default(),
-                    element: TopologyElement::Edge(EdgeId(9)),
+                    element: PickedElement::Solid(TopologyElement::Edge(EdgeId(9))),
                     provenance: LedgerValue::Untraced,
                     identification: Default::default(),
                     source_context:
@@ -190,7 +190,7 @@ mod tests {
     fn an_anchor_carries_its_sketch_route_or_says_there_is_none() {
         let anchor = |sketch: cadmark_core::sketch_lineage::SketchLineage| GeometryContext {
             sketch,
-            element: TopologyElement::Face(FaceId(0)),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
             source_context: "1 | from build123d import *".into(),
@@ -238,7 +238,7 @@ mod tests {
             text: "adjust this".into(),
             anchors: vec![GeometryContext {
                 sketch: Default::default(),
-                element: TopologyElement::Face(FaceId(0)),
+                element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
                 provenance: LedgerValue::Untraced,
                 identification: Default::default(),
                 source_context: String::new(),

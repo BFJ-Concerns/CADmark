@@ -376,7 +376,7 @@ mod tests {
     use cadmark_core::context::{NullIdentification, resolve_context};
     use cadmark_core::geometry::GeometryContext;
     use cadmark_core::geometry::{
-        EdgeId, FaceId, SketchElement, SketchElementKind, TopologyElement, VertexId,
+        EdgeId, FaceId, PickedElement, SketchElement, SketchElementKind, TopologyElement, VertexId,
     };
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
@@ -851,7 +851,10 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Fillet
-                && matches!(context.element, TopologyElement::Face(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Face(_))
+                )
                 && entry(context).relation == ProvenanceRelation::Generated
         }));
         assert!(contexts.iter().any(|context| {
@@ -860,7 +863,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Fillet
-                && matches!(context.element, TopologyElement::Edge(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Edge(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -869,7 +875,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Fillet
-                && matches!(context.element, TopologyElement::Vertex(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Vertex(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -892,7 +901,10 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Chamfer
-                && matches!(context.element, TopologyElement::Face(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Face(_))
+                )
                 && entry(context).relation == ProvenanceRelation::Generated
         }));
         assert!(contexts.iter().any(|context| {
@@ -901,7 +913,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Chamfer
-                && matches!(context.element, TopologyElement::Edge(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Edge(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -910,7 +925,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Chamfer
-                && matches!(context.element, TopologyElement::Vertex(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Vertex(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -1113,7 +1131,10 @@ with BuildPart() as part:
                 .collect();
             assert_eq!(
                 named,
-                expected.iter().copied().collect::<std::collections::BTreeSet<u32>>(),
+                expected
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<u32>>(),
                 "{operation} named the wrong sketch lines: {:?}",
                 face_lineages(&result),
             );
@@ -1514,7 +1535,10 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Extrude
-                && matches!(context.element, TopologyElement::Face(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Face(_))
+                )
                 && entry(context).source.line == 12
         }));
         assert_bridge_consumers(&result);
