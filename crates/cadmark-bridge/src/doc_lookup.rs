@@ -205,39 +205,97 @@ mod tests {
 
     #[test]
     fn documentation_consumer_covers_instrumented_build123d_operations() {
-        // Each source names a distinct part of the current instrumented
-        // vocabulary. Check its operation terms and that the exact source
-        // reaches the lookup_docs payload.
-        for primitive in ["Box", "Cylinder", "Sphere", "Cone", "Torus", "Wedge"] {
-            assert!(
-                OBJECTS_REFERENCE.contains(primitive),
-                "objects reference is missing documentation for {primitive}"
-            );
-        }
-        for operation in [
-            "extrude", "revolve", "loft", "sweep", "thicken", "draft", "split", "fillet",
-            "chamfer", "mirror", "scale", "offset",
+        // Each anchor is the construct's explanatory entry, not merely a
+        // word in a table or a neighbouring API name. The whole source must
+        // also reach lookup_docs, so removing either the entry or its source
+        // from the payload reddens this test.
+        for (construct, anchor) in [
+            ("Box", "**Box** - Box defined by length, width, height"),
+            (
+                "Cylinder",
+                "**Cylinder** - Cylinder defined by radius and height",
+            ),
+            (
+                "Sphere",
+                "**Sphere** - Sphere defined by radius and arc angles",
+            ),
+            ("Cone", "**Cone** - Cone defined by radii and height"),
+            (
+                "Torus",
+                "**Torus** - Torus defined by major and minor radii",
+            ),
+            (
+                "Wedge",
+                "**Wedge** - Wedge defined by lengths along multiple axes",
+            ),
         ] {
             assert!(
-                OPERATIONS_REFERENCE.contains(operation),
-                "operations reference is missing documentation for {operation}"
+                OBJECTS_REFERENCE.contains(anchor),
+                "objects reference is missing the documented {construct} entry"
             );
         }
+        for (construct, anchor) in [
+            ("extrude", "### extrude\nDraw a 2D Shape into a 3D solid"),
+            ("revolve", "### revolve\nRotate a 2D shape around an axis"),
+            ("loft", "### loft\nCreate a 3D form by interpolating"),
+            ("sweep", "### sweep\nExtrude a 2D or 3D section"),
+            ("thicken", "### thicken\nExpand a 2D face into a 3D solid"),
+            ("draft", "### draft\nApply a taper angle"),
+            ("split", "### split\nDivide an object by a plane"),
+            ("fillet", "### fillet\nRadius a vertex or edge"),
+            ("chamfer", "### chamfer\nBevel a vertex or edge"),
+            (
+                "mirror",
+                "### mirror\nMirror the shape about a specified plane",
+            ),
+            ("scale", "### scale\nChange the size of a shape"),
+            ("offset", "### offset\nInset or outset a shape"),
+        ] {
+            assert!(
+                OPERATIONS_REFERENCE.contains(anchor),
+                "operations reference is missing the documented {construct} entry"
+            );
+        }
+        assert!(
+            OBJECTS_REFERENCE.contains("**Box**") && DOC_CORPUS.contains(OBJECTS_REFERENCE),
+            "lookup_docs payload no longer contains the objects reference"
+        );
         assert!(
             DOC_CORPUS.contains(OPERATIONS_REFERENCE),
             "lookup_docs payload no longer contains the operations reference"
         );
         assert!(
-            DOC_CORPUS.contains(OBJECTS_REFERENCE) && DOC_CORPUS.contains(MOVING_OBJECTS_REFERENCE),
-            "lookup_docs payload no longer contains the primitive or location reference"
+            MOVING_OBJECTS_REFERENCE
+                .contains("`Locations` - Use this to define a specific location")
+                && MOVING_OBJECTS_REFERENCE
+                    .contains("`GridLocations` - Arrange objects in a grid pattern")
+                && MOVING_OBJECTS_REFERENCE
+                    .contains("`PolarLocations` - Position objects in a circular pattern")
+                && MOVING_OBJECTS_REFERENCE
+                    .contains("`HexLocations` - Arrange objects in a hexagonal grid")
+                && MOVING_OBJECTS_REFERENCE
+                    .contains("**Rotation:** Rotate a shape around a specified axis")
+                && MOVING_OBJECTS_REFERENCE.contains("shape.rotate(Axis, angle_in_degrees)")
+                && DOC_CORPUS.contains(MOVING_OBJECTS_REFERENCE),
+            "lookup_docs payload is missing documented location patterns or rotate"
         );
+        for (construct, anchor) in [
+            ("Shell", "*class *Shell("),
+            ("fuse", "fuse(**to_fuse: Shape*"),
+            ("cut", "cut(**to_cut: Shape*)"),
+            (
+                "common",
+                "intersect(**to_intersect: Shape | Vector | Location | Axis | Plane*",
+            ),
+        ] {
+            assert!(
+                DIRECT_API_REFERENCE.contains(anchor),
+                "direct API reference is missing the documented {construct} entry"
+            );
+        }
         assert!(
-            DIRECT_API_REFERENCE.contains("Shell")
-                && DIRECT_API_REFERENCE.contains("fuse(**to_fuse")
-                && DIRECT_API_REFERENCE.contains("cut(**to_cut")
-                && DIRECT_API_REFERENCE.contains("intersect(**to_intersect")
-                && DOC_CORPUS.contains(DIRECT_API_REFERENCE),
-            "lookup_docs payload is missing the documented direct-API operations"
+            DOC_CORPUS.contains(DIRECT_API_REFERENCE),
+            "lookup_docs payload no longer contains the direct API reference"
         );
     }
 }
