@@ -24,6 +24,64 @@ impl TopologyElement {
     }
 }
 
+/// What a sketch object drew, as the user points at it: the curves
+/// themselves, the corners where they meet, and the regions they enclose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SketchElementKind {
+    Curve,
+    Corner,
+    Region,
+}
+
+impl SketchElementKind {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Curve => "curve",
+            Self::Corner => "corner",
+            Self::Region => "region",
+        }
+    }
+}
+
+/// An element of a sketch the user can select. Numbered per kind in the
+/// order the script drew them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SketchElement {
+    pub kind: SketchElementKind,
+    pub index: u32,
+}
+
+impl SketchElement {
+    /// Plain-language label such as "sketch curve 3".
+    pub fn display_label(&self) -> String {
+        format!("sketch {} {}", self.kind.display_name(), self.index)
+    }
+}
+
+/// What a click landed on: a piece of the solid, or a piece of a sketch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PickedElement {
+    Solid(TopologyElement),
+    Sketch(SketchElement),
+}
+
+impl PickedElement {
+    pub fn display_label(&self) -> String {
+        match self {
+            Self::Solid(element) => element.display_label(),
+            Self::Sketch(element) => element.display_label(),
+        }
+    }
+
+    /// The solid topology this pick names, where it names solid topology.
+    pub fn solid(&self) -> Option<&TopologyElement> {
+        match self {
+            Self::Solid(element) => Some(element),
+            Self::Sketch(_) => None,
+        }
+    }
+}
+
 /// Unique identifier for a face in the rendered mesh.
 /// Assigned during tessellation and used for GPU picking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,17 +108,17 @@ pub enum SelectionState {
     #[default]
     None,
     /// Element under the cursor — preview highlight, not yet clicked.
-    Hovering(TopologyElement),
+    Hovering(PickedElement),
     /// Element the user has clicked — glow effect active.
-    Selected(TopologyElement),
+    Selected(PickedElement),
 }
 
 /// Geometry context packaged for the AI.
 /// Stable output format regardless of which identification strategy produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeometryContext {
-    /// The selected element type and ID.
-    pub element: TopologyElement,
+    /// What the user selected: a piece of the solid, or a sketch element.
+    pub element: PickedElement,
     /// Construction-time provenance: one source line, several candidate
     /// lines, or none. Never guessed; the UI and the AI both see which.
     pub provenance: LedgerValue,
@@ -84,6 +142,23 @@ pub struct GeometryContext {
     /// needs, and a resolved entry would carry neither.
     #[serde(default)]
     pub chosen_candidate: Option<crate::ledger::ProvenanceEntry>,
+    /// The sketch curve this element descends from, where the kernel's own
+    /// history reached one, or the stated reason there is no route to a
+    /// sketch at all.
+    #[serde(default)]
+    pub sketch: crate::sketch_lineage::SketchLineage,
+}
+
+impl GeometryContext {
+    /// The solid element this context anchors to, where it anchors to one.
+    /// A sketch anchor has none: sketch elements are not solid topology,
+    /// so measurement and neighbour queries do not apply to them.
+    pub fn solid(&self) -> Option<&TopologyElement> {
+        match &self.element {
+            PickedElement::Solid(element) => Some(element),
+            PickedElement::Sketch(_) => None,
+        }
+    }
 }
 
 /// Measured geometry of one face in the final model, in model units (mm).

@@ -14,6 +14,7 @@ pub mod protocol;
 pub mod provenance;
 mod python_runtime;
 pub mod sandbox;
+pub mod sketch_lineage;
 pub mod sketch_tessellation;
 pub mod tessellation;
 pub mod worker;

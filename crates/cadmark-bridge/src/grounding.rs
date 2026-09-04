@@ -91,6 +91,8 @@ fn render_anchor(context: &GeometryContext) -> String {
                 .join(", "),
         );
     }
+    out.push_str("\n    sketch: ");
+    out.push_str(&context.sketch.describe());
     out.push_str("\n    surrounding code:\n");
     if context.source_context.trim().is_empty() {
         out.push_str("The executed script text is unavailable.");
@@ -117,7 +119,7 @@ fn render_anchor(context: &GeometryContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
+    use cadmark_core::geometry::{EdgeId, FaceId, PickedElement, TopologyElement, VertexId};
     use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
 
     fn entry(line: u32, operation: SemanticOperation) -> ProvenanceEntry {
@@ -138,7 +140,7 @@ mod tests {
         GroundedComment {
             text: "round this".into(),
             anchors: vec![GeometryContext {
-                element: TopologyElement::Edge(EdgeId(4)),
+                element: PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
                 provenance: LedgerValue::Ambiguous(vec![
                     entry(2, SemanticOperation::Box),
                     entry(3, SemanticOperation::Fillet),
@@ -147,6 +149,7 @@ mod tests {
                 source_context: String::new(),
                 neighbours: Vec::new(),
                 chosen_candidate: chosen,
+                sketch: Default::default(),
             }],
         }
     }
@@ -191,7 +194,8 @@ mod tests {
             text: "round this".into(),
             anchors: vec![
                 GeometryContext {
-                    element: TopologyElement::Face(FaceId(3)),
+                    sketch: Default::default(),
+                    element: PickedElement::Solid(TopologyElement::Face(FaceId(3))),
                     provenance: LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
                     identification,
                     source_context: "lines 3-7:\n3 | with BuildPart():\n5 | Box(10, 10, 2)".into(),
@@ -199,7 +203,8 @@ mod tests {
                     chosen_candidate: None,
                 },
                 GeometryContext {
-                    element: TopologyElement::Edge(EdgeId(4)),
+                    sketch: Default::default(),
+                    element: PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
                     provenance: LedgerValue::Ambiguous(vec![
                         entry(2, SemanticOperation::Box),
                         entry(3, SemanticOperation::Fillet),
@@ -213,7 +218,8 @@ mod tests {
                     chosen_candidate: None,
                 },
                 GeometryContext {
-                    element: TopologyElement::Edge(EdgeId(9)),
+                    sketch: Default::default(),
+                    element: PickedElement::Solid(TopologyElement::Edge(EdgeId(9))),
                     provenance: LedgerValue::Untraced,
                     identification: Default::default(),
                     source_context:
@@ -240,11 +246,59 @@ mod tests {
     }
 
     #[test]
+    fn an_anchor_carries_its_sketch_route_or_says_there_is_none() {
+        let anchor = |sketch: cadmark_core::sketch_lineage::SketchLineage| GeometryContext {
+            sketch,
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: "1 | from build123d import *".into(),
+            neighbours: Vec::new(),
+            chosen_candidate: None,
+        };
+
+        let drawn = render_comment(&GroundedComment {
+            text: "widen this".into(),
+            anchors: vec![anchor(
+                cadmark_core::sketch_lineage::SketchLineage::Resolved(
+                    cadmark_core::sketch_lineage::SketchSource {
+                        source: SourceRef {
+                            line: 5,
+                            code: "Rectangle(20, 10)".into(),
+                        },
+                        object: "Rectangle".into(),
+                    },
+                ),
+            )],
+        });
+        assert!(
+            drawn.contains("sketch: drawn by Rectangle at line 5"),
+            "{drawn}",
+        );
+
+        // The model must be told the route is absent, not left to infer a
+        // line from the surrounding code.
+        let unreachable = render_comment(&GroundedComment {
+            text: "widen this".into(),
+            anchors: vec![anchor(
+                cadmark_core::sketch_lineage::SketchLineage::NoRoute(
+                    cadmark_core::sketch_lineage::NoSketchRoute::CleanUpStep,
+                ),
+            )],
+        });
+        assert!(
+            unreachable.contains("sketch: no sketch route:"),
+            "{unreachable}",
+        );
+    }
+
+    #[test]
     fn legacy_anchor_without_source_context_states_what_is_unavailable() {
         let text = render_comment(&GroundedComment {
             text: "adjust this".into(),
             anchors: vec![GeometryContext {
-                element: TopologyElement::Face(FaceId(0)),
+                sketch: Default::default(),
+                element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
                 provenance: LedgerValue::Untraced,
                 identification: Default::default(),
                 source_context: String::new(),

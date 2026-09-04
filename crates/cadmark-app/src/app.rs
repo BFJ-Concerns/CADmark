@@ -13,8 +13,8 @@ use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryContext, GeometryDescriptors, MinimumDistance, ScreenPosition, SelectionState,
-    TopologyElement,
+    GeometryContext, GeometryDescriptors, MinimumDistance, PickedElement, ScreenPosition,
+    SelectionState, TopologyElement,
 };
 use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
 use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
@@ -145,7 +145,9 @@ fn turn_chat_message(response_message: &str, geometry: TurnGeometry<'_>) -> Stri
 /// The pair C21 measures: exactly the two anchors currently held for the
 /// comment the user is composing. Additional anchors remain comments only.
 fn measurement_pair(anchors: &[GeometryContext]) -> Option<(TopologyElement, TopologyElement)> {
-    (anchors.len() == 2).then(|| (anchors[0].element.clone(), anchors[1].element.clone()))
+    (anchors.len() == 2)
+        .then(|| Some((anchors[0].solid()?.clone(), anchors[1].solid()?.clone())))
+        .flatten()
 }
 
 /// The readout tracks the element currently highlighted by the application;
@@ -159,8 +161,11 @@ fn measurement_readout(
         let SelectionState::Selected(element) = selection else {
             return None;
         };
-        descriptors
-            .and_then(|descriptors| cadmark_ui::status::selection_measurement(element, descriptors))
+        element.solid().and_then(|element| {
+            descriptors.and_then(|descriptors| {
+                cadmark_ui::status::selection_measurement(element, descriptors)
+            })
+        })
     })
 }
 
@@ -1061,24 +1066,33 @@ impl CadmarkApp {
 
     /// Handle a completed pick — resolve to selection and open the spatial
     /// comment overlay, or add the element to an open comment.
-    fn handle_pick_result(&mut self, element: TopologyElement, screen_pos: (f32, f32)) {
+    fn handle_pick_result(&mut self, element: PickedElement, screen_pos: (f32, f32)) {
         let Some(project) = self.project.as_ref() else {
             return;
         };
-        let context = match cadmark_core::context::resolve_context(
-            &element,
-            &project.ledger,
-            project.identification.as_ref(),
-        ) {
-            Ok(context) => cadmark_core::context::with_source_context(
-                context,
+        let context = match &element {
+            PickedElement::Solid(solid) => match cadmark_core::context::resolve_context(
+                solid,
+                &project.ledger,
+                project.identification.as_ref(),
+            ) {
+                Ok(context) => cadmark_core::context::with_sketch_route(
+                    cadmark_core::context::with_source_context(
+                        context,
+                        project.script_source.as_deref(),
+                    ),
+                    &project.sketch_lineage,
+                ),
+                Err(error) => {
+                    self.clear_selection();
+                    self.status = Some(Status::error(format!("Selection failed: {error}")));
+                    return;
+                }
+            },
+            PickedElement::Sketch(sketch) => cadmark_core::context::with_source_context(
+                cadmark_core::context::resolve_sketch_context(*sketch, &project.sketch_lineage),
                 project.script_source.as_deref(),
             ),
-            Err(error) => {
-                self.clear_selection();
-                self.status = Some(Status::error(format!("Selection failed: {error}")));
-                return;
-            }
         };
         log::info!(
             "Selected {}: {}",
@@ -1086,8 +1100,12 @@ impl CadmarkApp {
             context.provenance.describe()
         );
         self.selection = SelectionState::Selected(element.clone());
-        self.renderer.selected_id = cadmark_renderer::picking::encode_picking_id(&element);
-        self.highlighted_line = context.provenance.resolved().map(|entry| entry.source.line);
+        self.renderer.selected_id = cadmark_renderer::picking::encode_pick(&element);
+        self.highlighted_line = context
+            .provenance
+            .resolved()
+            .map(|entry| entry.source.line)
+            .or_else(|| context.sketch.resolved().map(|source| source.source.line));
         if !self.overlay.toggle_anchor(context.clone()) {
             self.overlay.open(
                 ScreenPosition {
@@ -1132,7 +1150,10 @@ impl CadmarkApp {
                 }
             }
             PickTransition::Hit(element, screen_pos) => {
-                self.handle_pick_result(element, screen_pos)
+                self.handle_pick_result(PickedElement::Solid(element), screen_pos)
+            }
+            PickTransition::SketchHit(element, screen_pos) => {
+                self.handle_pick_result(PickedElement::Sketch(element), screen_pos)
             }
             PickTransition::ReadbackFailed => {
                 self.status = Some(Status::error("Selection failed: GPU pick readback failed"));
@@ -1879,7 +1900,7 @@ fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
         .flat_map(|comment| {
             comment.anchors.iter().filter_map(|anchor| match anchor {
                 PendingAnchor::Live(context) => Some(ViewportMarker {
-                    element_id: cadmark_renderer::picking::encode_picking_id(&context.element),
+                    element_id: cadmark_renderer::picking::encode_pick(&context.element),
                     colour: comment.marker_colour(),
                 }),
                 PendingAnchor::Lost { .. } => None,
@@ -2038,6 +2059,7 @@ impl eframe::App for CadmarkApp {
 
 #[cfg(test)]
 mod tests {
+    use cadmark_core::geometry::PickedElement;
     use cadmark_core::pending_comment::PendingComments;
 
     use std::io::{ErrorKind, Read, Write};
@@ -2298,19 +2320,23 @@ mod tests {
     #[test]
     fn exactly_two_comment_anchors_become_the_measurement_pair() {
         let anchor = |id| GeometryContext {
-            element: TopologyElement::Face(FaceId(id)),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(id))),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
             source_context: String::new(),
             neighbours: vec![],
             chosen_candidate: None,
+            sketch: Default::default(),
         };
         let first = anchor(1);
         let second = anchor(4);
         assert_eq!(measurement_pair(std::slice::from_ref(&first)), None);
         assert_eq!(
             measurement_pair(&[first.clone(), second.clone()]),
-            Some((first.element.clone(), second.element.clone()))
+            Some((
+                TopologyElement::Face(FaceId(1)),
+                TopologyElement::Face(FaceId(4))
+            ))
         );
         assert_eq!(measurement_pair(&[first, second, anchor(7)]), None);
     }
@@ -2330,7 +2356,7 @@ mod tests {
         };
         assert_eq!(
             measurement_readout(
-                &SelectionState::Selected(TopologyElement::Edge(EdgeId(0))),
+                &SelectionState::Selected(PickedElement::Solid(TopologyElement::Edge(EdgeId(0)))),
                 None,
                 Some(&descriptors),
             ),

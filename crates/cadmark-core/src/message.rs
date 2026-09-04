@@ -259,14 +259,15 @@ impl ContextUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{FaceId, GeometryContext, TopologyElement};
+    use crate::geometry::{FaceId, GeometryContext, PickedElement, TopologyElement};
     use crate::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
 
     fn sample_geometry_context() -> GeometryContext {
         GeometryContext {
-            element: TopologyElement::Face(FaceId(5)),
+            sketch: Default::default(),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(5))),
             provenance: LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
                     line: 10,

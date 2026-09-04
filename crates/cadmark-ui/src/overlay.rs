@@ -409,7 +409,7 @@ impl OverlayState {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::{FaceId, GeometryContext, TopologyElement};
+    use cadmark_core::geometry::{FaceId, GeometryContext, PickedElement, TopologyElement};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
@@ -421,7 +421,7 @@ mod tests {
         let mut identification = std::collections::HashMap::new();
         identification.insert("surface".to_string(), "plane".to_string());
         let context = GeometryContext {
-            element: TopologyElement::Face(FaceId(2)),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(2))),
             provenance: LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
                     line: 4,
@@ -435,6 +435,7 @@ mod tests {
             source_context: String::new(),
             neighbours: Vec::new(),
             chosen_candidate: None,
+            sketch: Default::default(),
         };
 
         assert_eq!(
@@ -447,12 +448,13 @@ mod tests {
     fn clicking_more_geometry_adds_anchors_and_clicking_again_removes_them() {
         use cadmark_core::geometry::{EdgeId, ScreenPosition};
         let anchor = |element: TopologyElement| GeometryContext {
-            element,
+            element: PickedElement::Solid(element),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
             chosen_candidate: None,
+            sketch: Default::default(),
         };
         let mut overlay = OverlayState::default();
         assert!(!overlay.toggle_anchor(anchor(TopologyElement::Face(FaceId(1)))));
@@ -472,12 +474,13 @@ mod tests {
     #[test]
     fn overlay_summary_admits_an_untraced_source() {
         let context = GeometryContext {
-            element: TopologyElement::Face(FaceId(0)),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
             chosen_candidate: None,
+            sketch: Default::default(),
         };
         assert!(context_summary(&context).starts_with("face 0: no source line"));
     }
@@ -570,12 +573,13 @@ mod tests {
         ];
         (
             GeometryContext {
-                element: TopologyElement::Face(FaceId(2)),
+                element: PickedElement::Solid(TopologyElement::Face(FaceId(2))),
                 provenance: LedgerValue::Ambiguous(candidates.clone()),
                 identification: Default::default(),
                 source_context: String::new(),
                 neighbours: Vec::new(),
                 chosen_candidate: None,
+                sketch: Default::default(),
             },
             candidates,
         )

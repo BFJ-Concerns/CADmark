@@ -267,7 +267,8 @@ fn capture_result(
 ) -> Result<ExecutedModel, ExecutionError> {
     match crate::tessellation::find_result_shape(globals)? {
         crate::tessellation::ScriptResult::Solid(shape) => {
-            let (_raw, ledger) = crate::provenance::finalise(py, session, &shape, source)?;
+            let (_raw, ledger, sketch_lineage) =
+                crate::provenance::finalise(py, session, &shape, source)?;
             let mesh = crate::tessellation::tessellate_from_namespace(py, globals, &shape)?;
             validate_tessellation_ids(&mesh, &ledger)?;
             let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
@@ -279,6 +280,7 @@ fn capture_result(
             Ok(ExecutedModel {
                 mesh,
                 ledger,
+                sketch_lineage,
                 descriptors,
                 form: ModelForm::Solid(SolidResult {
                     summary,
@@ -293,6 +295,7 @@ fn capture_result(
             Ok(ExecutedModel {
                 mesh: TessellatedMesh::default(),
                 ledger: ProvenanceLedger::new(),
+                sketch_lineage: Default::default(),
                 descriptors: cadmark_core::geometry::GeometryDescriptors::default(),
                 form: ModelForm::Sketch(profile),
             })
@@ -402,7 +405,7 @@ mod tests {
     use super::*;
     use cadmark_core::context::{NullIdentification, resolve_context};
     use cadmark_core::geometry::GeometryContext;
-    use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
+    use cadmark_core::geometry::{EdgeId, FaceId, PickedElement, TopologyElement, VertexId};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
@@ -839,7 +842,10 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Fillet
-                && matches!(context.element, TopologyElement::Face(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Face(_))
+                )
                 && entry(context).relation == ProvenanceRelation::Generated
         }));
         assert!(contexts.iter().any(|context| {
@@ -848,7 +854,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Fillet
-                && matches!(context.element, TopologyElement::Edge(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Edge(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -857,7 +866,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Fillet
-                && matches!(context.element, TopologyElement::Vertex(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Vertex(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -880,7 +892,10 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Chamfer
-                && matches!(context.element, TopologyElement::Face(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Face(_))
+                )
                 && entry(context).relation == ProvenanceRelation::Generated
         }));
         assert!(contexts.iter().any(|context| {
@@ -889,7 +904,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Chamfer
-                && matches!(context.element, TopologyElement::Edge(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Edge(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -898,7 +916,10 @@ with BuildPart() as part:
         }));
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Chamfer
-                && matches!(context.element, TopologyElement::Vertex(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Vertex(_))
+                )
                 && matches!(
                     entry(context).relation,
                     ProvenanceRelation::GeneratedDescendant
@@ -1591,7 +1612,10 @@ with BuildPart() as part:
         let contexts = resolved_contexts(&result);
         assert!(contexts.iter().any(|context| {
             entry(context).operation == SemanticOperation::Extrude
-                && matches!(context.element, TopologyElement::Face(_))
+                && matches!(
+                    context.element,
+                    PickedElement::Solid(TopologyElement::Face(_))
+                )
                 && entry(context).source.line == 12
         }));
         assert_bridge_consumers(&result);
@@ -1610,10 +1634,12 @@ with BuildPart() as part:
         let result = result.unwrap();
         for context in resolved_contexts(&result) {
             let expected_relation = match context.element {
-                TopologyElement::Face(_) => ProvenanceRelation::Generated,
-                TopologyElement::Edge(_) | TopologyElement::Vertex(_) => {
+                PickedElement::Solid(TopologyElement::Face(_)) => ProvenanceRelation::Generated,
+                PickedElement::Solid(TopologyElement::Edge(_))
+                | PickedElement::Solid(TopologyElement::Vertex(_)) => {
                     ProvenanceRelation::GeneratedDescendant
                 }
+                PickedElement::Sketch(_) => unreachable!("solid provenance test resolved a sketch"),
             };
             let provenance = entry(&context);
             assert_eq!(provenance.operation, SemanticOperation::Revolve);

@@ -11,6 +11,12 @@ All notable changes to this project will be documented in this file.
   in the code panel and the geometry that line accounts for in the
   viewport; choosing one sends that line alone to the AI, and choosing
   none sends them all as before
+- Selecting a face or edge shows which sketch curve produced it, and a sketch
+  curve, corner or region can be clicked and commented on like any other
+  selection, anchored to the line that drew it. Where the
+  kernel keeps no route from the sketch to that element — across a clean-up
+  step, or a boolean's edge inputs — the reason is stated rather than a
+  nearest plausible line being offered
 - Start view on launch: recent projects, opening a project folder, and
   creating a new one. Nothing is loaded until a project is chosen; a folder
   named on the command line still opens directly. Chat stays available there:

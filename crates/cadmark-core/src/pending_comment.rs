@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::{GeometryContext, TopologyElement};
+use crate::geometry::{GeometryContext, PickedElement};
 
 /// Stable identity for one pending card and its viewport marker cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -19,11 +19,11 @@ pub struct PendingCommentId(pub u64);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PendingAnchor {
     Live(GeometryContext),
-    Lost { element: TopologyElement },
+    Lost { element: PickedElement },
 }
 
 impl PendingAnchor {
-    pub fn element(&self) -> &TopologyElement {
+    pub fn element(&self) -> &PickedElement {
         match self {
             Self::Live(context) => &context.element,
             Self::Lost { element } => element,
@@ -143,12 +143,13 @@ impl PendingComments {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::{FaceId, GeometryContext};
+    use crate::geometry::{FaceId, GeometryContext, TopologyElement};
     use crate::ledger::LedgerValue;
 
     fn anchor(face: u32) -> GeometryContext {
         GeometryContext {
-            element: TopologyElement::Face(FaceId(face)),
+            sketch: Default::default(),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(face))),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
             source_context: String::new(),
@@ -180,7 +181,7 @@ mod tests {
         let mut pending = PendingComments::default();
         let id = pending.add("round this".into(), vec![anchor(1)]);
         pending.comments[0].anchors[0] = PendingAnchor::Lost {
-            element: TopologyElement::Face(FaceId(1)),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(1))),
         };
 
         assert_eq!(pending.comments()[0].id, id);
