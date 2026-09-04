@@ -7,6 +7,8 @@
 /// One image ready for a compact preview in the chat pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferenceImageView {
+    /// Stable path-based identity for the texture cache.
+    pub id: String,
     pub name: String,
     pub bytes: Vec<u8>,
 }
@@ -19,8 +21,10 @@ pub enum ReferenceImagesAction {
 }
 
 /// State for the project reference-image panel.
-#[derive(Debug, Default)]
-pub struct ReferenceImagesPanel;
+#[derive(Default)]
+pub struct ReferenceImagesPanel {
+    previews: std::collections::BTreeMap<String, egui::TextureHandle>,
+}
 
 impl ReferenceImagesPanel {
     /// Draw attached-image previews and offer the system picker.
@@ -40,6 +44,9 @@ impl ReferenceImagesPanel {
             return action;
         }
 
+        self.previews
+            .retain(|id, _| images.iter().any(|image| image.id == *id));
+
         egui::ScrollArea::horizontal()
             .id_salt("reference_images")
             .max_height(94.0)
@@ -47,14 +54,19 @@ impl ReferenceImagesPanel {
                 ui.horizontal(|ui| {
                     for image in images {
                         ui.vertical(|ui| {
-                            ui.add(
-                                egui::Image::from_bytes(
-                                    format!("bytes://cadmark-reference/{}", image.name),
-                                    image.bytes.clone(),
+                            if let Some(texture) = self.preview(ui, image) {
+                                ui.add(
+                                    egui::Image::new(&texture)
+                                        .fit_to_exact_size(egui::vec2(64.0, 64.0)),
                                 )
-                                .fit_to_exact_size(egui::vec2(64.0, 64.0)),
-                            )
-                            .on_hover_text(&image.name);
+                                .on_hover_text(&image.name);
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("Image could not be previewed")
+                                        .small()
+                                        .color(crate::theme::ERROR),
+                                );
+                            }
                             ui.label(
                                 egui::RichText::new(&image.name)
                                     .small()
@@ -65,5 +77,24 @@ impl ReferenceImagesPanel {
                 });
             });
         action
+    }
+
+    fn preview(
+        &mut self,
+        ui: &egui::Ui,
+        image: &ReferenceImageView,
+    ) -> Option<egui::TextureHandle> {
+        if let Some(texture) = self.previews.get(&image.id) {
+            return Some(texture.clone());
+        }
+        let decoded = image::load_from_memory(&image.bytes).ok()?.to_rgba8();
+        let size = [decoded.width() as usize, decoded.height() as usize];
+        let texture = ui.ctx().load_texture(
+            format!("cadmark-reference-image/{}", image.id),
+            egui::ColorImage::from_rgba_unmultiplied(size, decoded.as_raw()),
+            egui::TextureOptions::LINEAR,
+        );
+        self.previews.insert(image.id.clone(), texture.clone());
+        Some(texture)
     }
 }
