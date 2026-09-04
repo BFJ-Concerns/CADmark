@@ -78,6 +78,31 @@ const FORBIDDEN_OUTSIDE_THE_KERNEL: &[(&str, &str)] = &[
     ("cadmark_kernel::export", "reaches past the worker boundary"),
 ];
 
+/// Semantic operation variants belong to the kernel's provenance vocabulary.
+/// Other crates may carry an operation as data, but must not choose behaviour
+/// based on a particular operation.
+const SEMANTIC_OPERATION_VARIANTS: &[&str] = &[
+    "Box",
+    "Cylinder",
+    "Sphere",
+    "Cone",
+    "Torus",
+    "Wedge",
+    "Extrude",
+    "Revolve",
+    "Loft",
+    "Sweep",
+    "Thicken",
+    "Shell",
+    "Draft",
+    "Split",
+    "BooleanFuse",
+    "BooleanCut",
+    "BooleanCommon",
+    "Fillet",
+    "Chamfer",
+];
+
 /// The file's code with comments and string literals removed: prose the
 /// model reads and prose in comments may name anything; code may not.
 /// Returns one entry per source line so a finding can cite its line.
@@ -122,6 +147,23 @@ fn code_only(source: &str) -> Vec<String> {
     lines
 }
 
+/// Returns the operation variant when a line branches on it. This deliberately
+/// recognises Rust's direct enum branch forms, while allowing an operation to
+/// be stored or passed as data outside the kernel.
+fn operation_branch_on_line(code: &str) -> Option<&'static str> {
+    let is_branch = code.contains("=>")
+        || code.contains("matches!")
+        || ((code.contains("==") || code.contains("!=")) && code.contains("if"));
+    if !is_branch {
+        return None;
+    }
+
+    SEMANTIC_OPERATION_VARIANTS
+        .iter()
+        .copied()
+        .find(|variant| code.contains(&format!("SemanticOperation::{variant}")))
+}
+
 #[test]
 fn no_crate_outside_the_kernel_names_python_build123d_or_ocp() {
     let mut violations = Vec::new();
@@ -139,6 +181,30 @@ fn no_crate_outside_the_kernel_names_python_build123d_or_ocp() {
                         line.trim()
                     ));
                 }
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "kernel boundary crossed:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn no_crate_outside_the_kernel_branches_on_a_semantic_operation() {
+    let mut violations = Vec::new();
+    for file in sources_outside_the_kernel() {
+        let text = std::fs::read_to_string(&file).unwrap();
+        let original: Vec<&str> = text.lines().collect();
+        for (number, code) in code_only(&text).iter().enumerate() {
+            if let Some(operation) = operation_branch_on_line(code) {
+                violations.push(format!(
+                    "{}:{}: branches on kernel-specific operation {operation}: {}",
+                    file.strip_prefix(workspace_root()).unwrap().display(),
+                    number + 1,
+                    original[number].trim()
+                ));
             }
         }
     }
@@ -168,6 +234,31 @@ fn only_code_is_inspected() {
     assert_eq!(
         one(r#"if c == '"' { TopoDS }"#),
         r#"if c == '"' { TopoDS }"#
+    );
+}
+
+#[test]
+fn operation_branch_detection_allows_data_and_rejects_branches() {
+    assert_eq!(
+        operation_branch_on_line("let operation = SemanticOperation::Fillet;"),
+        None
+    );
+    assert_eq!(
+        operation_branch_on_line("SemanticOperation::Fillet => render(),"),
+        Some("Fillet")
+    );
+    assert_eq!(
+        operation_branch_on_line("if operation == SemanticOperation::Fillet {"),
+        Some("Fillet")
+    );
+    assert_eq!(
+        operation_branch_on_line("matches!(operation, SemanticOperation::Fillet)"),
+        Some("Fillet")
+    );
+    assert_eq!(
+        operation_branch_on_line(&code_only(r#"if name == "Fillet" {"#).join("\n")),
+        None,
+        "string-literal branches are intentionally outside code_only's boundary"
     );
 }
 
