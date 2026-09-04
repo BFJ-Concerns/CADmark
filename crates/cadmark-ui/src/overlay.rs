@@ -1,8 +1,9 @@
 // Comment overlay — appears near selected geometry with a connecting line.
 //
-// Positioned in screen space near the selection point and kept inside the
-// viewport. The user writes free text and submits with Enter; Escape
-// cancels and returns to the default state.
+// Positioned in screen space near the first selection point and kept
+// inside the viewport. The user writes free text and submits with Enter;
+// Escape cancels. Clicking more geometry while the overlay is open adds
+// anchors, so one comment can point at several elements.
 
 use cadmark_core::geometry::{GeometryContext, ScreenPosition};
 
@@ -32,12 +33,13 @@ pub enum OverlayState {
     Hidden,
     /// Overlay is open at a screen position, user is writing.
     Active {
-        /// Where the selected element is on screen.
+        /// Where the first selected element is on screen.
         anchor: ScreenPosition,
         /// The text the user is writing.
         text: String,
-        /// Provenance resolved at pick time and retained through submission.
-        context: GeometryContext,
+        /// Every anchored element, in the order they were clicked, with
+        /// the provenance resolved at pick time.
+        anchors: Vec<GeometryContext>,
         /// Whether the text field has been given focus since opening.
         focused: bool,
     },
@@ -47,10 +49,10 @@ pub enum OverlayState {
 pub enum OverlayAction {
     /// No action — overlay still open or hidden.
     None,
-    /// User submitted a spatial comment.
+    /// User submitted a spatial comment anchored to these elements.
     Submit {
         text: String,
-        context: GeometryContext,
+        anchors: Vec<GeometryContext>,
     },
     /// User cancelled (Escape).
     Cancel,
@@ -59,14 +61,38 @@ pub enum OverlayAction {
 const OVERLAY_WIDTH: f32 = 300.0;
 
 impl OverlayState {
-    /// Open the overlay at the given screen position.
+    /// Open the overlay at the given screen position with one anchor.
     pub fn open(&mut self, anchor: ScreenPosition, context: GeometryContext) {
         *self = Self::Active {
             anchor,
             text: String::new(),
-            context,
+            anchors: vec![context],
             focused: false,
         };
+    }
+
+    /// Add an anchor to the open comment; clicking an element already
+    /// anchored removes it. Returns whether the overlay was open.
+    pub fn toggle_anchor(&mut self, context: GeometryContext) -> bool {
+        let Self::Active { anchors, .. } = self else {
+            return false;
+        };
+        match anchors.iter().position(|anchor| anchor.element == context.element) {
+            Some(index) if anchors.len() > 1 => {
+                anchors.remove(index);
+            }
+            Some(_) => {}
+            None => anchors.push(context),
+        }
+        true
+    }
+
+    /// The elements the open comment is anchored to.
+    pub fn anchors(&self) -> &[GeometryContext] {
+        match self {
+            Self::Active { anchors, .. } => anchors,
+            Self::Hidden => &[],
+        }
     }
 
     /// Close the overlay.
@@ -86,7 +112,7 @@ impl OverlayState {
             Self::Active {
                 anchor,
                 text,
-                context,
+                anchors,
                 focused,
             } => {
                 let mut action = OverlayAction::None;
@@ -113,16 +139,23 @@ impl OverlayState {
                             .shadow(ui.style().visuals.popup_shadow)
                             .show(ui, |ui| {
                                 ui.set_width(OVERLAY_WIDTH);
-                                ui.horizontal(|ui| {
-                                    theme::chip(
-                                        ui,
-                                        &context.element.display_label(),
-                                        theme::SPATIAL,
-                                    );
+                                ui.horizontal_wrapped(|ui| {
+                                    for context in anchors.iter() {
+                                        theme::chip(
+                                            ui,
+                                            &context.element.display_label(),
+                                            theme::SPATIAL,
+                                        )
+                                        .on_hover_text(context_summary(context));
+                                    }
                                     ui.label(
-                                        egui::RichText::new("Comment on this")
-                                            .small()
-                                            .color(theme::TEXT_MUTED),
+                                        egui::RichText::new(if anchors.len() == 1 {
+                                            "Comment on this"
+                                        } else {
+                                            "Comment on these"
+                                        })
+                                        .small()
+                                        .color(theme::TEXT_MUTED),
                                     );
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
@@ -145,9 +178,14 @@ impl OverlayState {
                                 });
                                 ui.add(
                                     egui::Label::new(
-                                        egui::RichText::new(context_summary(context))
-                                            .small()
-                                            .color(theme::TEXT_MUTED),
+                                        egui::RichText::new(match anchors.as_slice() {
+                                            [only] => context_summary(only),
+                                            _ => "Click more geometry to add anchors; click an \
+                                                  anchored element again to remove it."
+                                                .to_string(),
+                                        })
+                                        .small()
+                                        .color(theme::TEXT_MUTED),
                                     )
                                     .wrap(),
                                 );
@@ -186,7 +224,7 @@ impl OverlayState {
                                 if enter && has_text {
                                     action = OverlayAction::Submit {
                                         text: text.trim().to_string(),
-                                        context: context.clone(),
+                                        anchors: anchors.clone(),
                                     };
                                 }
 
@@ -219,7 +257,7 @@ impl OverlayState {
                                             {
                                                 action = OverlayAction::Submit {
                                                     text: text.trim().to_string(),
-                                                    context: context.clone(),
+                                                    anchors: anchors.clone(),
                                                 };
                                             }
                                         },
@@ -260,7 +298,7 @@ mod tests {
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
 
-    use super::context_summary;
+    use super::{OverlayState, context_summary};
 
     #[test]
     fn overlay_summary_reads_as_plain_language() {
@@ -284,6 +322,29 @@ mod tests {
             context_summary(&context),
             "face 2: created by box at line 4 (plane)"
         );
+    }
+
+    #[test]
+    fn clicking_more_geometry_adds_anchors_and_clicking_again_removes_them() {
+        use cadmark_core::geometry::{EdgeId, ScreenPosition};
+        let anchor = |element: TopologyElement| GeometryContext {
+            element,
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+        };
+        let mut overlay = OverlayState::default();
+        assert!(!overlay.toggle_anchor(anchor(TopologyElement::Face(FaceId(1)))));
+        overlay.open(
+            ScreenPosition { x: 1.0, y: 2.0 },
+            anchor(TopologyElement::Face(FaceId(1))),
+        );
+        assert!(overlay.toggle_anchor(anchor(TopologyElement::Edge(EdgeId(4)))));
+        assert_eq!(overlay.anchors().len(), 2);
+        overlay.toggle_anchor(anchor(TopologyElement::Edge(EdgeId(4))));
+        assert_eq!(overlay.anchors().len(), 1);
+        // The last anchor cannot be removed: a comment needs one.
+        overlay.toggle_anchor(anchor(TopologyElement::Face(FaceId(1))));
+        assert_eq!(overlay.anchors().len(), 1);
     }
 
     #[test]
