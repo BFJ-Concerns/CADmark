@@ -72,11 +72,10 @@ fn no_crate_outside_the_kernel_names_python_build123d_or_ocp() {
     let mut violations = Vec::new();
     for file in sources_outside_the_kernel() {
         let text = std::fs::read_to_string(&file).unwrap();
-        // The system prompt is instruction text for the model, not code,
-        // and lives in the bridge as a string constant; string literals
-        // in tests that assert on the model's *words* are prose too.
+        // String literals in tests that assert on the model's *words*
+        // are prose, not code.
         for (number, line) in text.lines().enumerate() {
-            if !is_code(line) || line.contains("\"") && line.contains("assert!") {
+            if !is_code(line) || (line.contains('"') && line.contains("assert!")) {
                 continue;
             }
             for (needle, reason) in FORBIDDEN_OUTSIDE_THE_KERNEL {
