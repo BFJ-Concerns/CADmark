@@ -2427,4 +2427,110 @@ mod tests {
         assert!(!candidate_highlight_ids(&ledger, 1).is_empty());
     }
 
+
+    /// C28's start view and part-name dialog are reached only from this
+    /// file. A merge that drops those modules and this file's calls to them
+    /// together still compiles, which is how they were lost once already;
+    /// driving both from here is what refuses that silently.
+    #[test]
+    fn the_start_view_still_offers_the_project_folders_the_app_remembers() {
+        use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
+
+        let remembered = std::path::PathBuf::from("/projects/bracket");
+        let ctx = egui::Context::default();
+        let mut chosen = StartAction::None;
+        // The row's position is discovered by sweeping rather than assumed,
+        // so the assertion survives the start view being laid out differently.
+        for y in 0..800 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            // The start view centres a 420-wide column in the window.
+            let pointer = egui::pos2(450.0, y as f32);
+            input.events.push(egui::Event::PointerMoved(pointer));
+            input.events.push(egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: Default::default(),
+            });
+            input.events.push(egui::Event::PointerButton {
+                pos: pointer,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            });
+            let mut action = StartAction::None;
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    action = show_start_view(
+                        ui,
+                        StartViewState {
+                            recent_projects: std::slice::from_ref(&remembered),
+                            notice: None,
+                            controls_enabled: true,
+                        },
+                    );
+                });
+            });
+            if action != StartAction::None {
+                chosen = action;
+                if matches!(chosen, StartAction::OpenRecent(_)) {
+                    break;
+                }
+            }
+        }
+        assert_eq!(
+            chosen,
+            StartAction::OpenRecent(remembered),
+            "no row of the start view opens the project the app remembers"
+        );
+    }
+
+    #[test]
+    fn the_part_name_dialog_still_carries_a_typed_name_back_to_the_app() {
+        use cadmark_ui::part_name_dialog::PartNameAction;
+
+        let ctx = egui::Context::default();
+        let mut dialog = PartNameDialog::default();
+        assert_eq!(dialog.show(&ctx), PartNameAction::None);
+        assert!(!dialog.is_open(), "a dialog nobody opened is not on screen");
+
+        dialog.open();
+        assert!(dialog.is_open());
+
+        let mut settled = PartNameAction::None;
+        for _ in 0..8 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            input.events.push(egui::Event::Text("bracket".to_string()));
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+            let mut action = PartNameAction::None;
+            let _ = ctx.run(input, |ctx| action = dialog.show(ctx));
+            if action != PartNameAction::None {
+                settled = action;
+                break;
+            }
+        }
+        assert_eq!(
+            settled,
+            PartNameAction::Save("bracket".to_string()),
+            "the name typed into the dialog never reached the app"
+        );
+    }
 }
