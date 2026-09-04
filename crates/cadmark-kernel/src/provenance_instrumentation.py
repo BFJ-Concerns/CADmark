@@ -393,20 +393,30 @@ class _CadmarkSession:
                 sources.add((input_kind, ordinal))
         return sources
 
-    def carry_sketch_lineage(self, result, inputs_by_kind, tables, barrier, identity_tables=None):
-        """Move sketch labels from inputs to outputs across one operation."""
+    def carry_sketch_lineage(
+        self, result, inputs_by_kind, tables, barrier, identity_tables=None, strict=False
+    ):
+        """Move sketch labels from inputs to outputs across one operation.
+
+        Under `strict` — which is how a barrier step such as build123d's
+        clean-up runs — only exact shape identity carries a label, so a
+        label reaches an output solely when that output is the very shape
+        the step left alone. Elsewhere the looser partner identity moves a
+        label onto the same underlying shape relocated to its plane.
+        """
+        label_of = self.sketch_registry.get if strict else self.sketch_lookup
         labelled_inputs = {
-            (kind, ordinal): labels
+            (kind, ordinal): set(labels)
             for kind, inputs in inputs_by_kind.items()
             for ordinal, shape in enumerate(inputs)
-            for labels in (self.sketch_lookup(shape),)
+            for labels in (label_of(shape) or (),)
             if labels
         }
         if not labelled_inputs:
             return
         for kind, outputs in self.topology(result):
             for output in outputs:
-                if self.sketch_lookup(output):
+                if label_of(output):
                     continue
                 sketch_ids = set()
                 for source in self.direct_sources(tables[kind].get(output) or ()):
@@ -602,6 +612,7 @@ class _CadmarkSession:
             tables,
             barrier,
             identity_tables=input_tables,
+            strict=barrier is not None,
         )
 
     def capture(self, builder, result, operation, adapter, api_class):
