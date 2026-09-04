@@ -168,7 +168,11 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
     ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
         let mut items = history_items(conversation);
-        let usage = context_usage(conversation, &input.images, input.context_window_tokens);
+        let usage = context_usage(
+            conversation,
+            input.images.len(),
+            input.context_window_tokens,
+        );
         if usage.needs_condensing() && !conversation.is_empty() {
             let summary = match self.condense(conversation).await {
                 Ok(summary) => summary,
@@ -537,12 +541,12 @@ pub const REFERENCE_IMAGE_TOKENS: usize = 765;
 
 pub fn context_usage(
     conversation: &Conversation,
-    images: &[ImageData],
+    reference_image_count: usize,
     window_tokens: usize,
 ) -> ContextUsage {
     ContextUsage {
         conversation_tokens: conversation.estimated_tokens(),
-        reference_image_tokens: images.len() * REFERENCE_IMAGE_TOKENS,
+        reference_image_tokens: reference_image_count * REFERENCE_IMAGE_TOKENS,
         window_tokens,
     }
 }
@@ -617,10 +621,8 @@ pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
         .collect();
     paths.sort();
     for path in paths {
-        let media_type = match path.extension().and_then(|ext| ext.to_str()) {
-            Some("png") => "image/png",
-            Some("jpg" | "jpeg") => "image/jpeg",
-            _ => continue,
+        let Some(media_type) = reference_image_media_type(&path) else {
+            continue;
         };
         if let Ok(bytes) = std::fs::read(&path) {
             images.push(ImageData {
@@ -630,6 +632,26 @@ pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
         }
     }
     images
+}
+
+/// Count reference images without opening them. The frame loop needs this for
+/// occupancy display, while a turn alone pays to load their bytes.
+pub fn reference_image_count(project_dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(project_dir.join("references")) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| reference_image_media_type(&entry.path()).is_some())
+        .count()
+}
+
+fn reference_image_media_type(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -952,6 +974,32 @@ mod tests {
             chat: Some(text.to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn context_usage_includes_reference_images_found_in_the_project() {
+        let project = tempfile::tempdir().unwrap();
+        let references = project.path().join("references");
+        std::fs::create_dir(&references).unwrap();
+        std::fs::write(
+            references.join("bracket.png"),
+            "image bytes are not opened for counting",
+        )
+        .unwrap();
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("x".repeat(300)));
+
+        let without_images = context_usage(&conversation, 0, 1_000);
+        let with_images =
+            context_usage(&conversation, reference_image_count(project.path()), 1_000);
+
+        assert_eq!(with_images.conversation_tokens, 75);
+        assert_eq!(with_images.reference_image_tokens, REFERENCE_IMAGE_TOKENS);
+        assert_eq!(
+            with_images.used_tokens(),
+            without_images.used_tokens() + REFERENCE_IMAGE_TOKENS
+        );
+        assert!(with_images.needs_condensing());
     }
 
     #[tokio::test]

@@ -377,21 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_counts_text_and_reference_images_without_message_thresholds() {
-        let mut conversation = Conversation::new();
-        conversation.push(Message::user_chat("x".repeat(300)));
-        let usage = ContextUsage {
-            conversation_tokens: conversation.estimated_tokens(),
-            reference_image_tokens: 765,
-            window_tokens: 1_000,
-        };
-
-        assert_eq!(usage.conversation_tokens, 75);
-        assert_eq!(usage.used_tokens(), 840);
-        assert!(usage.needs_condensing());
-    }
-
-    #[test]
     fn message_ids_are_unique() {
         let a = Message::user_chat("one");
         let b = Message::user_chat("two");
