@@ -109,11 +109,30 @@ fn semantic_operation_name(operation: SemanticOperation) -> &'static str {
 }
 
 fn semantic_operation_names() -> Vec<String> {
-    SemanticOperation::ALL
-        .iter()
-        .copied()
-        .map(semantic_operation_name)
-        .map(str::to_owned)
+    let ledger =
+        std::fs::read_to_string(workspace_root().join("crates/cadmark-core/src/ledger.rs"))
+            .expect("semantic operation definition");
+    let mut in_enum = false;
+    code_only(&ledger)
+        .into_iter()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line == "pub enum SemanticOperation {" {
+                in_enum = true;
+                return None;
+            }
+            if in_enum && line == "}" {
+                in_enum = false;
+                return None;
+            }
+            in_enum
+                .then(|| {
+                    line.chars()
+                        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                        .collect::<String>()
+                })
+                .filter(|name| !name.is_empty())
+        })
         .collect()
 }
 

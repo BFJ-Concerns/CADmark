@@ -31,50 +31,29 @@ pub enum ProvenanceRelation {
     ModifiedDescendant,
 }
 
-macro_rules! semantic_operation_set {
-    ($declare:ident) => {
-        $declare!(
-            Box,
-            Cylinder,
-            Sphere,
-            Cone,
-            Torus,
-            Wedge,
-            Extrude,
-            Revolve,
-            Loft,
-            Sweep,
-            Thicken,
-            Shell,
-            Draft,
-            Split,
-            BooleanFuse,
-            BooleanCut,
-            BooleanCommon,
-            Fillet,
-            Chamfer,
-        );
-    };
+/// The user-authored operation responsible for topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SemanticOperation {
+    Box,
+    Cylinder,
+    Sphere,
+    Cone,
+    Torus,
+    Wedge,
+    Extrude,
+    Revolve,
+    Loft,
+    Sweep,
+    Thicken,
+    Shell,
+    Draft,
+    Split,
+    BooleanFuse,
+    BooleanCut,
+    BooleanCommon,
+    Fillet,
+    Chamfer,
 }
-
-macro_rules! declare_semantic_operation {
-    ($($operation:ident),+ $(,)?) => {
-        /// The user-authored operation responsible for topology.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-        pub enum SemanticOperation {
-            $($operation,)+
-        }
-
-        impl SemanticOperation {
-            /// Every operation the provenance instrumenter currently reports.
-            /// Generated from the same operation set as the enum, so the two
-            /// cannot drift apart.
-            pub const ALL: &[Self] = &[$(Self::$operation,)+];
-        }
-    };
-}
-
-semantic_operation_set!(declare_semantic_operation);
 
 impl SemanticOperation {
     /// Plain-language name for people reading the chat pane or overlay.

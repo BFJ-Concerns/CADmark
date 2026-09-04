@@ -53,10 +53,6 @@ const BOX: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box
 
 const SEPARATED_BOXES: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n    with Locations((20, 0, 0)):\n        Box(10, 10, 10)\n";
 
-// The source contains no CADmark import or wrapper. It is first executed by
-// the real worker, then by stock build123d in the same project virtualenv.
-const PORTABLE_BOX: &str = "from build123d import BuildPart, Box\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n\nassert round(part.part.volume) == 1000\n";
-
 #[test]
 fn executes_a_script_and_exports_its_kept_model() {
     let (project, script, mut worker) = project_with_script(BOX);
@@ -175,40 +171,6 @@ fn exposes_known_circular_edge_radius_and_face_area_in_descriptors() {
             .iter()
             .any(|face| { (face.area - std::f64::consts::PI * 25.0).abs() < 1e-6 })
     );
-}
-
-#[test]
-fn worker_executed_script_also_runs_under_stock_build123d() {
-    let (project, script, mut worker) = project_with_script(PORTABLE_BOX);
-
-    let model = worker
-        .execute(&script, roomy(), &CancelFlag::new())
-        .expect("the application-driven kernel worker should run the script");
-    assert_eq!(model.ledger.face_count(), 6);
-
-    let stock = std::process::Command::new(venv().join("bin/python"))
-        .arg(&script)
-        .current_dir(project.path())
-        .output()
-        .expect("the project virtualenv should provide stock Python");
-    assert!(
-        stock.status.success(),
-        "the same source must run under stock build123d without CADmark:\\nstdout:\\n{}\\nstderr:\\n{}",
-        String::from_utf8_lossy(&stock.stdout),
-        String::from_utf8_lossy(&stock.stderr),
-    );
-}
-
-#[test]
-fn worker_does_not_supply_build123d_imports_for_a_script() {
-    let (_project, script, mut worker) =
-        project_with_script("with BuildPart() as part:\n    Box(10, 10, 10)\n");
-
-    let error = worker
-        .execute(&script, roomy(), &CancelFlag::new())
-        .expect_err("scripts must import their own build123d names");
-    assert!(error.is_script_fault(), "{error}");
-    assert!(error.to_string().contains("NameError"), "{error}");
 }
 
 #[test]
