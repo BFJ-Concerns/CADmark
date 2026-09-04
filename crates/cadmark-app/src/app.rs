@@ -1121,6 +1121,7 @@ impl CadmarkApp {
                 rect,
                 ViewportCallback {
                     mesh_uniforms: self.renderer.mesh_uniforms(aspect),
+                    highlight_ids: self.renderer.highlight_ids.clone(),
                     simple_uniforms: self.renderer.simple_uniforms(aspect),
                     pick_request,
                     hover_request,

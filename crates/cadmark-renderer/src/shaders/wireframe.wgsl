@@ -15,11 +15,14 @@ struct Uniforms {
     _pad3: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
-    // Picking IDs of the candidate-footprint highlight, four to a row.
-    highlight_ids: array<vec4<u32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+// Picking IDs of the candidate-footprint highlight. A storage binding
+// because a footprint is as large as the geometry one line accounts for,
+// which a uniform array could not hold.
+@group(0) @binding(1) var<storage, read> highlight_ids: array<u32>;
 
 // Whether this element belongs to the highlighted candidate's footprint.
 fn in_highlight(id: u32) -> bool {
@@ -27,7 +30,7 @@ fn in_highlight(id: u32) -> bool {
         return false;
     }
     for (var i = 0u; i < uniforms.highlight_count; i = i + 1u) {
-        if uniforms.highlight_ids[i / 4u][i % 4u] == id {
+        if highlight_ids[i] == id {
             return true;
         }
     }
