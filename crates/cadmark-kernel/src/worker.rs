@@ -138,10 +138,7 @@ impl KernelWorker {
         };
         match self.request(&request, Some(limits), cancel)? {
             WorkerReply::Executed(model) => Ok(*model),
-            WorkerReply::Failed(failure) => Err(failure_error(failure)),
-            WorkerReply::Exported => Err(WorkerError::Runtime(
-                "worker replied to an execution with an export".to_string(),
-            )),
+            other => Err(unexpected_reply("an execution", other)),
         }
     }
 
@@ -165,10 +162,7 @@ impl KernelWorker {
         };
         match self.request(&request, Some(limits), &CancelFlag::new())? {
             WorkerReply::Exported => Ok(()),
-            WorkerReply::Failed(failure) => Err(failure_error(failure)),
-            WorkerReply::Executed(_) => Err(WorkerError::Runtime(
-                "worker replied to an export with a model".to_string(),
-            )),
+            other => Err(unexpected_reply("an export", other)),
         }
     }
 
@@ -234,8 +228,10 @@ impl KernelWorker {
         if let Some(venv) = &self.launch.venv {
             command.arg("--venv").arg(venv);
         }
-        if let Some(level) = std::env::var_os("RUST_LOG") {
-            command.env("RUST_LOG", level);
+        // Logging is configured by argument, not environment: the child's
+        // environment stays empty for the script.
+        if let Some(filter) = std::env::var_os("RUST_LOG") {
+            command.arg("--log-filter").arg(filter);
         }
         let mut child = command.spawn().map_err(|error| {
             WorkerError::Runtime(format!("could not start the worker: {error}"))
@@ -273,10 +269,20 @@ impl Drop for KernelWorker {
     }
 }
 
-fn failure_error(failure: WorkerFailure) -> WorkerError {
-    match failure {
-        WorkerFailure::Script { message } => WorkerError::Script(message),
-        WorkerFailure::Runtime { message } => WorkerError::Runtime(message),
+/// Any reply but the one a request expects: a failure becomes the error
+/// it describes; a wrong-kind reply is the worker breaking protocol.
+fn unexpected_reply(request: &str, reply: WorkerReply) -> WorkerError {
+    match reply {
+        WorkerReply::Failed(WorkerFailure::Script { message }) => WorkerError::Script(message),
+        WorkerReply::Failed(WorkerFailure::Runtime { message }) => WorkerError::Runtime(message),
+        other => WorkerError::Runtime(format!(
+            "worker replied to {request} with {}",
+            match other {
+                WorkerReply::Executed(_) => "a model",
+                WorkerReply::Exported => "an export",
+                WorkerReply::Failed(_) => unreachable!("handled above"),
+            }
+        )),
     }
 }
 
@@ -406,24 +412,25 @@ pub struct WorkerArgs {
     pub project_dir: PathBuf,
     pub scratch_dir: PathBuf,
     pub venv: Option<PathBuf>,
+    /// An `env_logger` filter such as `info` or `cadmark_kernel=debug`.
+    pub log_filter: Option<String>,
 }
 
 impl WorkerArgs {
-    /// Parse `--project-dir <p> --scratch-dir <p> [--venv <p>]`.
+    /// Parse `--project-dir <p> --scratch-dir <p> [--venv <p>] [--log-filter <f>]`.
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut project_dir = None;
         let mut scratch_dir = None;
         let mut venv = None;
+        let mut log_filter = None;
         let mut args = args.into_iter();
         while let Some(flag) = args.next() {
-            let value = args
-                .next()
-                .map(PathBuf::from)
-                .ok_or_else(|| format!("{flag} needs a value"))?;
+            let value = args.next().ok_or_else(|| format!("{flag} needs a value"))?;
             match flag.as_str() {
-                "--project-dir" => project_dir = Some(value),
-                "--scratch-dir" => scratch_dir = Some(value),
-                "--venv" => venv = Some(value),
+                "--project-dir" => project_dir = Some(PathBuf::from(value)),
+                "--scratch-dir" => scratch_dir = Some(PathBuf::from(value)),
+                "--venv" => venv = Some(PathBuf::from(value)),
+                "--log-filter" => log_filter = Some(value),
                 other => return Err(format!("unknown argument {other}")),
             }
         }
@@ -431,6 +438,7 @@ impl WorkerArgs {
             project_dir: project_dir.ok_or("--project-dir is required")?,
             scratch_dir: scratch_dir.ok_or("--scratch-dir is required")?,
             venv,
+            log_filter,
         })
     }
 }
@@ -561,6 +569,21 @@ mod tests {
         assert_eq!(parsed.project_dir, PathBuf::from("/p"));
         assert_eq!(parsed.scratch_dir, PathBuf::from("/s"));
         assert_eq!(parsed.venv, Some(PathBuf::from("/v")));
+        assert_eq!(parsed.log_filter, None);
+        let logged = WorkerArgs::parse(
+            [
+                "--project-dir",
+                "/p",
+                "--scratch-dir",
+                "/s",
+                "--log-filter",
+                "debug",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(logged.log_filter.as_deref(), Some("debug"));
 
         let missing = WorkerArgs::parse(["--project-dir", "/p"].into_iter().map(String::from));
         assert_eq!(missing.unwrap_err(), "--scratch-dir is required");

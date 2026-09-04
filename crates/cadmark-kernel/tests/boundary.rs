@@ -78,11 +78,26 @@ const FORBIDDEN_OUTSIDE_THE_KERNEL: &[(&str, &str)] = &[
     ("cadmark_kernel::export", "reaches past the worker boundary"),
 ];
 
-/// Lines that legitimately mention a forbidden word: the prompt text
-/// the model reads, and prose in comments. Only code is checked.
-fn is_code(line: &str) -> bool {
+/// A line with its comment and string literals removed: prose the model
+/// reads and prose in comments may name anything; code may not.
+fn code_only(line: &str) -> String {
     let trimmed = line.trim_start();
-    !(trimmed.starts_with("//") || trimmed.starts_with("///") || trimmed.starts_with("//!"))
+    if trimmed.starts_with("//") {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in line.chars() {
+        match (in_string, ch, escaped) {
+            (false, '"', _) => in_string = true,
+            (false, _, _) => out.push(ch),
+            (true, '\\', false) => escaped = true,
+            (true, '"', false) => in_string = false,
+            (true, _, _) => escaped = false,
+        }
+    }
+    out
 }
 
 #[test]
@@ -90,14 +105,10 @@ fn no_crate_outside_the_kernel_names_python_build123d_or_ocp() {
     let mut violations = Vec::new();
     for file in sources_outside_the_kernel() {
         let text = std::fs::read_to_string(&file).unwrap();
-        // String literals in tests that assert on the model's *words*
-        // are prose, not code.
         for (number, line) in text.lines().enumerate() {
-            if !is_code(line) || (line.contains('"') && line.contains("assert!")) {
-                continue;
-            }
+            let code = code_only(line);
             for (needle, reason) in FORBIDDEN_OUTSIDE_THE_KERNEL {
-                if line.contains(needle) {
+                if code.contains(needle) {
                     violations.push(format!(
                         "{}:{}: {reason} ({needle}): {}",
                         file.strip_prefix(workspace_root()).unwrap().display(),
@@ -112,6 +123,23 @@ fn no_crate_outside_the_kernel_names_python_build123d_or_ocp() {
         violations.is_empty(),
         "kernel boundary crossed:\n{}",
         violations.join("\n")
+    );
+}
+
+#[test]
+fn only_code_is_inspected() {
+    assert_eq!(code_only("    // TopoDS in a comment"), "");
+    assert_eq!(
+        code_only(r#"let x = "BuildPart"; TopoDS"#),
+        "let x = ; TopoDS"
+    );
+    assert_eq!(
+        code_only(r#"assert!(s.contains("BuildPart"))"#),
+        "assert!(s.contains())"
+    );
+    assert_eq!(
+        code_only(r#"let q = "a \" BRep \" b"; PyAny"#),
+        "let q = ; PyAny"
     );
 }
 

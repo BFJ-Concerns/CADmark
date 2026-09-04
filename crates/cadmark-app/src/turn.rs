@@ -214,8 +214,13 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     tool: call.name.clone(),
                     arguments: call.arguments.clone(),
                 });
+                let mut rendered = None;
                 let (output, failed) = match self.run_tool(&call, &mut attempt, &mut emit).await {
                     ToolRun::Output { output, failed } => (output, failed),
+                    ToolRun::Rendered { image } => {
+                        rendered = Some(image);
+                        ("rendered; the image follows".to_string(), false)
+                    }
                     ToolRun::Built {
                         code,
                         model,
@@ -247,6 +252,17 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     call_id: call.id,
                     output,
                 });
+                if let Some(image) = rendered {
+                    // A tool result carries text only on the wire; the
+                    // image rides as the next user item.
+                    items.push(ModelItem::User {
+                        text: format!(
+                            "The render you asked for ({}).",
+                            describe_view(render_view_of(&call.arguments))
+                        ),
+                        images: vec![image],
+                    });
+                }
             }
         }
 
@@ -331,13 +347,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     describe_view(args.view)
                 )));
                 match self.render.render(args.view) {
-                    Ok(_image) => ToolRun::Output {
-                        // The image itself travels as the next user
-                        // message's attachment; the tool result is the
-                        // text the protocol requires.
-                        output: "rendered; see the attached image".to_string(),
-                        failed: false,
-                    },
+                    Ok(image) => ToolRun::Rendered { image },
                     Err(reason) => ToolRun::Output {
                         output: format!("render unavailable: {reason}"),
                         failed: true,
@@ -386,6 +396,11 @@ enum ToolRun {
         code: String,
         model: Box<ExecutedModel>,
         summary: String,
+    },
+    /// A render: the tool result is text, and the image itself follows
+    /// as a user item so the model can see it.
+    Rendered {
+        image: ImageData,
     },
     Abort(TurnOutcome),
 }
@@ -484,6 +499,14 @@ fn describe_tool(name: &str) -> &str {
         RENDER_VIEW => "look at the render",
         other => other,
     }
+}
+
+/// The view a render call named, for the caption; a call whose arguments
+/// did not parse never reaches here.
+fn render_view_of(arguments: &serde_json::Value) -> RenderView {
+    serde_json::from_value::<RenderViewArgs>(arguments.clone())
+        .map(|args| args.view)
+        .unwrap_or(RenderView::Current)
 }
 
 fn describe_view(view: RenderView) -> &'static str {
@@ -675,6 +698,17 @@ mod tests {
                 .pop_front()
                 .unwrap_or(Ok(()))
                 .map(|()| sample_model())
+        }
+    }
+
+    struct FakeRender;
+
+    impl RenderSource for FakeRender {
+        fn render(&mut self, _view: RenderView) -> Result<ImageData, String> {
+            Ok(ImageData {
+                media_type: "image/png".into(),
+                bytes: vec![1, 2, 3],
+            })
         }
     }
 
@@ -983,6 +1017,46 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_render_reaches_the_model_as_an_image_on_the_next_request() {
+        let render_call = Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: RENDER_VIEW.into(),
+                arguments: serde_json::json!({"view": "top"}),
+            }],
+        });
+        let mut model = ScriptedModel::new([render_call, text("Looks right.")]);
+        model.accepts_images = true;
+        let project = tempfile::tempdir().unwrap();
+        let script = project.path().join("part.py");
+        let mut executor = FakeExecutor::new([]);
+        let mut render = FakeRender;
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            script_path: script,
+            cancel: CancelFlag::new(),
+        };
+        let outcome = runner
+            .run(&Conversation::new(), &chat("check it"), |_event| {})
+            .await;
+        assert_eq!(outcome, TurnOutcome::Answered);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests[0].tools.len(), 3, "the render tool is offered");
+        let second = &requests[1];
+        assert!(
+            matches!(&second.items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
+        );
+        assert!(matches!(
+            &second.items[3],
+            ModelItem::User { text, images } if text.contains("top") && images.len() == 1
+        ));
     }
 
     #[test]

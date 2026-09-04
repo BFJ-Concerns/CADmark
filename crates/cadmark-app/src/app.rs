@@ -13,7 +13,7 @@ use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{GeometryContext, ScreenPosition, SelectionState, TopologyElement};
-use cadmark_core::message::{Message, MessageId, ToolActivity};
+use cadmark_core::message::{Conversation, Message, MessageId, ToolActivity};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
 use cadmark_renderer::pipeline::Renderer;
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
@@ -240,6 +240,7 @@ impl CadmarkApp {
 
     /// Send a chat message: one turn with this text and no anchors.
     fn send_chat_message(&mut self, text: String) {
+        let history = self.project.conversation.clone();
         self.project.conversation.push(Message::user_chat(&text));
         self.start_turn(
             TurnInput {
@@ -247,12 +248,14 @@ impl CadmarkApp {
                 comments: Vec::new(),
                 images: reference_images(&self.project.dir),
             },
+            history,
             Vec::new(),
         );
     }
 
     /// Send a spatial comment: one turn anchored to the elements.
     fn send_spatial_comment(&mut self, text: String, anchors: Vec<GeometryContext>) {
+        let history = self.project.conversation.clone();
         let id = self
             .project
             .conversation
@@ -263,18 +266,21 @@ impl CadmarkApp {
                 comments: vec![GroundedComment { text, anchors }],
                 images: reference_images(&self.project.dir),
             },
+            history,
             vec![id],
         );
     }
 
-    fn start_turn(&mut self, input: TurnInput, comment_ids: Vec<MessageId>) {
+    /// `history` is the conversation before this turn's messages were
+    /// recorded; the model sees it plus the turn's input, once.
+    fn start_turn(&mut self, input: TurnInput, history: Conversation, comment_ids: Vec<MessageId>) {
         let summary_before = self
             .project
             .model
             .as_ref()
             .map(|model| model.summary.clone());
         let response = self.project.conversation.push(Message::ai_response(""));
-        match self.project.start_turn(input) {
+        match self.project.start_turn(input, history) {
             Ok(_cancel) => {
                 self.turn = Some(TurnRecord {
                     response,

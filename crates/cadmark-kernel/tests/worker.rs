@@ -214,13 +214,17 @@ fn executed_code_cannot_open_a_socket() {
 
 #[test]
 fn executed_code_sees_no_inherited_environment() {
-    // The credential the application holds must not be visible to the
-    // script. The variable is set in this process; the worker is started
-    // with a cleared environment.
-    // SAFETY: the test binary is single-threaded at this point in this test.
-    unsafe { std::env::set_var("CADMARK_TEST_CREDENTIAL", "must-not-leak") };
+    // The application's environment holds the provider credential among
+    // much else. The worker starts with an empty environment, so nothing
+    // the test process has — HOME, PATH, RUST_LOG — is visible to the
+    // script. (The credential itself is never set in a test process;
+    // these variables stand in for it.)
+    assert!(
+        std::env::var_os("HOME").is_some(),
+        "the test process has an environment to leak"
+    );
     let (_project, script, mut worker) = project_with_script(
-        "import os\nfrom build123d import *\nassert 'CADMARK_TEST_CREDENTIAL' not in os.environ, 'credential leaked'\nassert 'HOME' not in os.environ\n\nwith BuildPart() as part:\n    Box(2, 2, 2)\n",
+        "import os\nfrom build123d import *\nfor name in ('HOME', 'PATH', 'RUST_LOG', 'USER'):\n    assert name not in os.environ, name + ' leaked'\n\nwith BuildPart() as part:\n    Box(2, 2, 2)\n",
     );
     worker
         .execute(&script, roomy(), &CancelFlag::new())

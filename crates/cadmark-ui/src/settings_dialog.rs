@@ -1,7 +1,9 @@
 // Settings dialog — the AI provider and the script execution ceilings,
 // configured once for every project. Opens from the toolbar and from the
 // AI badge when no provider is set; the credential field is masked and
-// its value is never echoed back into the form.
+// its value is never echoed back into the form. A floating window, not a
+// modal: while it is open the viewport still takes clicks and the chat
+// still takes text (C39).
 
 use std::time::Duration;
 
@@ -77,7 +79,13 @@ impl SettingsDialog {
         };
         let mut action = SettingsAction::None;
 
-        let modal = egui::Modal::new(egui::Id::new("settings_dialog"))
+        let mut open = true;
+        egui::Window::new("Settings")
+            .id(egui::Id::new("settings_dialog"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
             .frame(
                 egui::Frame::window(&ctx.style())
                     .fill(theme::RAISED)
@@ -85,12 +93,6 @@ impl SettingsDialog {
             )
             .show(ctx, |ui| {
                 ui.set_width(460.0);
-                ui.label(
-                    egui::RichText::new("Settings")
-                        .heading()
-                        .color(theme::TEXT_STRONG),
-                );
-                ui.add_space(8.0);
 
                 ui.label(
                     egui::RichText::new("AI provider")
@@ -199,7 +201,7 @@ impl SettingsDialog {
                 });
             });
 
-        if modal.should_close() {
+        if !open {
             action = SettingsAction::Cancel;
         }
         if action == SettingsAction::Cancel {
