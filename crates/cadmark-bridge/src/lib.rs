@@ -60,3 +60,35 @@ pub fn build_ai_services(
         model: client,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::SYSTEM_PROMPT;
+
+    #[test]
+    fn modelling_prompt_keeps_build123d_idioms_available() {
+        // This is deliberately a bounded regression check, not an attempt to
+        // decide whether arbitrary prose restricts build123d. The prompt is
+        // the production instructions consumer receives, and these are the
+        // two retired restrictions C36 names.
+        let prompt = SYSTEM_PROMPT
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            prompt.contains("builder mode with context managers")
+                && prompt.contains("algebra mode with operators")
+                && prompt.contains("or the direct api"),
+            "the production prompt must offer builder, algebra, and direct-API idioms"
+        );
+        assert!(
+            !prompt.contains("builder mode only"),
+            "the production prompt must not restrict modelling to builder mode"
+        );
+        assert!(
+            !prompt.contains("must use `from build123d import *`"),
+            "the production prompt must not require a wildcard build123d import"
+        );
+    }
+}
