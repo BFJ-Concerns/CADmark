@@ -1042,6 +1042,32 @@ with BuildPart() as part:
     }
 
     #[test]
+    fn algebra_mode_and_direct_api_scripts_execute_with_provenance() {
+        let (_scratch, algebra) = run(
+            r#"from build123d import *
+
+plate = Box(20, 10, 5)
+hole = Cylinder(2, 10)
+result = plate - hole
+"#,
+        );
+        let algebra = algebra.unwrap();
+        assert!(algebra.summary.face_count > 6, "the hole adds faces");
+        assert_contains_operation(&algebra, SemanticOperation::BooleanCut);
+        assert!(algebra.is_printable());
+
+        let (_scratch, direct) = run(
+            r#"from build123d import *
+
+block = Solid.make_box(4, 4, 4)
+"#,
+        );
+        let direct = direct.unwrap();
+        assert_eq!(direct.ledger.face_count(), 6);
+        assert_every_element_resolves(&direct, SemanticOperation::Box, 3);
+    }
+
+    #[test]
     fn a_closed_solid_is_printable_and_an_open_shell_is_flagged() {
         let (_scratch, closed) = run(
             r#"from build123d import *

@@ -33,10 +33,10 @@ know is wrong.
 # The script
 
 - Import with `from build123d import *`.
-- The script must leave a completed `BuildPart` in the namespace, for
-  example `with BuildPart() as part:` with the model in `part.part`. Every
-  part the user asked for is a `BuildPart` at the top level; CADmark
-  renders each one.
+- The script's result is the 3D shape bound last at the top level: a
+  completed `BuildPart` (`with BuildPart() as part:`), or a `Part`,
+  `Solid`, or `Compound` from algebra mode or the direct API. A script
+  that has only reached a sketch is reported as not yet a solid.
 - Write **parametrically**. Every dimension, distance, angle, count, and
   radius a designer might adjust is a named variable in a parameter block
   at the top of the file, after the imports and before any geometry.

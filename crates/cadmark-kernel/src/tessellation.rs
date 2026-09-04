@@ -209,12 +209,19 @@ pub(crate) fn unwrap_shape<'py>(
     }
 }
 
+/// The 3D result of a script, whichever build123d idiom wrote it: a
+/// completed `BuildPart`'s part, or a `Part`, `Solid`, or `Compound` of
+/// solids bound at the top level (algebra mode, the direct API). When
+/// several qualify, the one bound last wins — the conventional "result"
+/// of a script is its final assignment. A script whose only output is a
+/// sketch or a line has reached no solid yet; that is reported as such
+/// rather than as an error, so the caller can show the profile.
 pub(crate) fn find_result_shape<'py>(
     namespace: &Bound<'py, PyDict>,
 ) -> Result<Bound<'py, PyAny>, TessellationError> {
     let mut namespace_debug = Vec::new();
-    let mut build_part_shape = None;
-    let mut unsupported_outputs = Vec::new();
+    let mut solids: Vec<(String, Bound<'py, PyAny>)> = Vec::new();
+    let mut flat_outputs = Vec::new();
 
     for (name, value) in namespace.iter() {
         let Ok(name) = name.extract::<String>() else {
@@ -234,28 +241,29 @@ pub(crate) fn find_result_shape<'py>(
         match type_name.as_str() {
             "BuildPart" => {
                 if let Some(part) = get_non_none_attr(&value, "part")? {
-                    build_part_shape = Some(part);
+                    solids.push((name, part));
                 }
             }
             // Builders hold their result in `_obj`. The public `sketch` and
             // `line` properties rebuild the result in global coordinates
             // through OCP copies, which the provenance wrapper refuses
             // outside a user frame, so only the stored object is inspected.
-            "BuildSketch" => {
-                if get_non_none_attr(&value, "_obj")?.is_some() {
-                    unsupported_outputs.push(format!("{name}: BuildSketch (2D output)"));
+            "BuildSketch" | "BuildLine" | "Sketch" | "Curve" | "Face" | "Wire" | "Edge" => {
+                let held = if type_name.starts_with("Build") {
+                    get_non_none_attr(&value, "_obj")?.is_some()
+                } else {
+                    has_non_none_attr(&value, "wrapped")?
+                };
+                if held {
+                    flat_outputs.push(format!("{name}: {type_name}"));
                 }
             }
-            "BuildLine" => {
-                if get_non_none_attr(&value, "_obj")?.is_some() {
-                    unsupported_outputs.push(format!("{name}: BuildLine (1D output)"));
-                }
-            }
-            _ => {
+            "Part" | "Solid" | "Compound" => {
                 if has_non_none_attr(&value, "wrapped")? {
-                    unsupported_outputs.push(format!("{name}: {type_name}"));
+                    solids.push((name, value));
                 }
             }
+            _ => {}
         }
     }
 
@@ -266,27 +274,26 @@ pub(crate) fn find_result_shape<'py>(
     };
     log::debug!("Script namespace contents: {namespace_debug}");
 
-    if let Some(shape) = build_part_shape {
+    // Dict iteration is insertion order, so the last qualifying binding is
+    // the script's final result.
+    if let Some((name, shape)) = solids.pop() {
+        log::debug!("Result shape is `{name}`");
         return Ok(shape);
     }
 
-    if !unsupported_outputs.is_empty() {
-        let details = unsupported_outputs.join(", ");
-        log::error!(
-            "Unsupported script output detected. Outputs: {details}. Namespace contents: {namespace_debug}"
-        );
+    if !flat_outputs.is_empty() {
+        let details = flat_outputs.join(", ");
         return Err(TessellationError::UnsupportedScriptOutput(format!(
-            "CADmark only supports Builder mode scripts with a completed `BuildPart` context. \
-             Unsupported outputs detected: {details}. \
-             Use `with BuildPart() as part:` and leave the final 3D model in `part.part`. \
-             Namespace contents: {namespace_debug}"
+            "The script produced a sketch or curve but no solid yet ({details}). \
+             Extrude, revolve, loft or sweep it into a Part, or leave a Part, Solid, \
+             Compound, or completed BuildPart at the top level."
         )));
     }
 
-    log::error!("No completed BuildPart found. Contents: {namespace_debug}");
+    log::error!("No 3D result found. Contents: {namespace_debug}");
     Err(TessellationError::NoShape(format!(
-        "Expected a completed `BuildPart` context such as `with BuildPart() as part:`. \
-         Namespace contents: {namespace_debug}"
+        "Expected a 3D result at the top level of the script: a completed `BuildPart`, \
+         or a `Part`, `Solid`, or `Compound` bound to a name. Namespace contents: {namespace_debug}"
     )))
 }
 
@@ -380,121 +387,87 @@ fn parse_tessellation_result(
 mod tests {
     use super::*;
 
-    #[test]
-    fn finds_completed_build_part_output() {
-        Python::with_gil(|py| {
-            let namespace = PyDict::new(py);
-            py.run(
-                c"
-class DirectShape:
+    /// A stand-in for a build123d shape: something with a `wrapped`.
+    const FAKE_SHAPES: &std::ffi::CStr = c"
+class _Wrapped:
     def __init__(self):
         self.wrapped = object()
+
+class Part(_Wrapped): pass
+class Solid(_Wrapped): pass
+class Compound(_Wrapped): pass
+class Sketch(_Wrapped): pass
+class Face(_Wrapped): pass
 
 class BuildPart:
-    def __init__(self):
-        self.part = DirectShape()
-
-part = BuildPart()
-",
-                Some(&namespace),
-                None,
-            )
-            .unwrap();
-
-            let shape = find_result_shape(&namespace).unwrap();
-            assert!(shape.getattr("wrapped").is_ok());
-        });
-    }
-
-    #[test]
-    fn rejects_direct_shape_outputs_without_build_part() {
-        Python::with_gil(|py| {
-            let namespace = PyDict::new(py);
-            py.run(
-                c"
-class DirectShape:
-    def __init__(self):
-        self.wrapped = object()
-
-result = DirectShape()
-",
-                Some(&namespace),
-                None,
-            )
-            .unwrap();
-
-            let err = find_result_shape(&namespace).unwrap_err();
-            assert!(matches!(err, TessellationError::UnsupportedScriptOutput(_)));
-            assert!(
-                err.to_string()
-                    .contains("CADmark only supports Builder mode scripts")
-            );
-        });
-    }
-
-    #[test]
-    fn rejects_sketch_only_builder_scripts() {
-        Python::with_gil(|py| {
-            let namespace = PyDict::new(py);
-            py.run(
-                c"
-class DirectShape:
-    def __init__(self):
-        self.wrapped = object()
+    def __init__(self, part=None):
+        self.part = part
 
 class BuildSketch:
-    def __init__(self):
-        self._obj = DirectShape()
+    def __init__(self, obj=None):
+        self._obj = obj
+";
 
-sketch = BuildSketch()
-",
-                Some(&namespace),
-                None,
-            )
-            .unwrap();
+    fn namespace_from<'py>(py: Python<'py>, script: &std::ffi::CStr) -> Bound<'py, PyDict> {
+        let namespace = PyDict::new(py);
+        py.run(FAKE_SHAPES, Some(&namespace), None).unwrap();
+        py.run(script, Some(&namespace), None).unwrap();
+        namespace
+    }
 
-            let err = find_result_shape(&namespace).unwrap_err();
-            assert!(matches!(err, TessellationError::UnsupportedScriptOutput(_)));
-            assert!(err.to_string().contains("BuildSketch"));
+    #[test]
+    fn a_completed_build_part_is_the_result() {
+        Python::with_gil(|py| {
+            let namespace = namespace_from(py, c"part = BuildPart(Part())");
+            let shape = find_result_shape(&namespace).unwrap();
+            assert_eq!(shape.get_type().name().unwrap(), "Part");
         });
     }
 
     #[test]
-    fn reports_missing_build_part_when_no_shape_exists() {
+    fn algebra_and_direct_api_results_are_accepted_and_the_last_binding_wins() {
         Python::with_gil(|py| {
-            let namespace = PyDict::new(py);
-            py.run(c"value = 42", Some(&namespace), None).unwrap();
+            for script in [c"result = Part()", c"result = Solid()", c"result = Compound()"] {
+                let namespace = namespace_from(py, script);
+                find_result_shape(&namespace).unwrap();
+            }
+            let namespace = namespace_from(py, c"first = Part()\nsecond = Solid()");
+            let shape = find_result_shape(&namespace).unwrap();
+            assert_eq!(shape.get_type().name().unwrap(), "Solid");
+            // A completed BuildPart bound earlier loses to a later Part.
+            let namespace = namespace_from(py, c"bp = BuildPart(Part())\nfinal = Compound()");
+            let shape = find_result_shape(&namespace).unwrap();
+            assert_eq!(shape.get_type().name().unwrap(), "Compound");
+        });
+    }
 
+    #[test]
+    fn a_sketch_only_script_is_reported_as_not_yet_a_solid() {
+        Python::with_gil(|py| {
+            for script in [c"sketch = BuildSketch(Sketch())", c"profile = Sketch()", c"f = Face()"] {
+                let namespace = namespace_from(py, script);
+                let err = find_result_shape(&namespace).unwrap_err();
+                assert!(matches!(err, TessellationError::UnsupportedScriptOutput(_)), "{script:?}");
+                assert!(err.to_string().contains("no solid yet"), "{err}");
+            }
+        });
+    }
+
+    #[test]
+    fn reports_missing_result_when_no_shape_exists() {
+        Python::with_gil(|py| {
+            let namespace = namespace_from(py, c"value = 42");
             let err = find_result_shape(&namespace).unwrap_err();
             assert!(matches!(err, TessellationError::NoShape(_)));
-            assert!(
-                err.to_string()
-                    .contains("Expected a completed `BuildPart` context")
-            );
+            assert!(err.to_string().contains("Expected a 3D result"));
+            assert!(err.to_string().contains("value: int"));
         });
     }
 
     #[test]
     fn tessellation_injects_result_shape_before_running_helper_code() {
         Python::with_gil(|py| {
-            let namespace = PyDict::new(py);
-            py.run(
-                c"
-class DirectShape:
-    def __init__(self):
-        self.wrapped = object()
-
-class BuildPart:
-    def __init__(self):
-        self.part = DirectShape()
-
-part = BuildPart()
-",
-                Some(&namespace),
-                None,
-            )
-            .unwrap();
-
+            let namespace = namespace_from(py, c"part = BuildPart(Part())");
             let shape = find_result_shape(&namespace).unwrap();
             namespace.set_item("_cadmark_result_shape", &shape).unwrap();
             let err = py.run(TESSELLATE_CODE, Some(&namespace), None).unwrap_err();
@@ -504,28 +477,23 @@ part = BuildPart()
                 .get_item("_cadmark_result_shape")
                 .unwrap()
                 .unwrap();
-            assert_eq!(stored_shape.get_type().name().unwrap(), "DirectShape");
+            assert_eq!(stored_shape.get_type().name().unwrap(), "Part");
         });
     }
 
     #[test]
-    fn missing_build_part_error_only_reports_user_namespace() {
+    fn missing_result_error_only_reports_user_namespace() {
         Python::with_gil(|py| {
-            let namespace = PyDict::new(py);
-            py.run(
+            let namespace = namespace_from(
+                py,
                 c"
 value = 42
 BRepMesh_IncrementalMesh = object()
 math = __import__('math')
 ",
-                Some(&namespace),
-                None,
-            )
-            .unwrap();
-
+            );
             let err = find_result_shape(&namespace).unwrap_err();
             let msg = err.to_string();
-
             assert!(msg.contains("value: int"));
             assert!(!msg.contains("BRepMesh_IncrementalMesh"));
             assert!(!msg.contains("math: module"));
