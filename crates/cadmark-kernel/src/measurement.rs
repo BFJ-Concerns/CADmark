@@ -3,11 +3,14 @@
 // and the edit regression check.
 
 use cadmark_core::geometry::{
-    EdgeDescriptor, FaceDescriptor, GeometryDescriptors, ModelSummary, SolidValidity,
-    VertexDescriptor,
+    EdgeDescriptor, FaceDescriptor, GeometryDescriptors, MinimumDistance, ModelSummary,
+    SolidValidity, TopologyElement, VertexDescriptor,
 };
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use thiserror::Error;
+
+use crate::protocol::ModelFile;
 
 /// Measures every face, edge and vertex in the final topology maps, in the
 /// same order the provenance ledger and picking IDs use.
@@ -17,14 +20,16 @@ from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
 from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepCheck import BRepCheck_Analyzer
+from OCP.BRepExtrema import BRepExtrema_DistShapeShape
 from OCP.BRepGProp import BRepGProp, BRepGProp_Face
 from OCP.BRepTools import BRepTools
 from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
 from OCP.gp import gp_Pnt, gp_Vec
 from OCP.GProp import GProp_GProps
-from OCP.TopAbs import TopAbs_SHELL, TopAbs_SOLID
+from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_SHELL, TopAbs_SOLID, TopAbs_VERTEX
 from OCP.TopExp import TopExp_Explorer
 from OCP.TopoDS import TopoDS
+from build123d import import_brep
 
 _surface_names = {
     GeomAbs_SurfaceType.GeomAbs_Plane: 'plane',
@@ -137,6 +142,28 @@ def solid_validity(shape):
     return results
 
 
+def minimum_distance(model_path, first_kind, first_index, second_kind, second_index):
+    shape = import_brep(model_path).wrapped
+    kinds = {'face': TopAbs_FACE, 'edge': TopAbs_EDGE, 'vertex': TopAbs_VERTEX}
+
+    def element(kind, index):
+        explorer = TopExp_Explorer(shape, kinds[kind])
+        for current in range(index + 1):
+            if not explorer.More():
+                raise IndexError(f'{kind} {index} is not in the retained model')
+            found = explorer.Current()
+            explorer.Next()
+        return found
+
+    extrema = BRepExtrema_DistShapeShape(
+        element(first_kind, first_index), element(second_kind, second_index)
+    )
+    extrema.Perform()
+    if not extrema.IsDone():
+        raise RuntimeError('OCCT did not complete the minimum-distance calculation')
+    return extrema.Value()
+
+
 def measure(shape, session):
     faces = session.map_values(session.final_maps['face'])
     edges = session.map_values(session.final_maps['edge'])
@@ -148,6 +175,12 @@ def measure(shape, session):
         'summary': measure_model(shape, len(faces), len(edges), len(vertices)),
     }
 ";
+
+#[derive(Debug, Error)]
+pub enum MeasurementError {
+    #[error("minimum-distance measurement failed: {0}")]
+    Python(#[from] PyErr),
+}
 
 /// Measure the finalised model. `session` is the provenance session whose
 /// final topology maps define element order.
@@ -228,4 +261,43 @@ pub(crate) fn solid_validity(
         });
     }
     Ok(validity)
+}
+
+/// Measure the closest separation of two elements from the model retained by
+/// the worker. The IDs are the traversal indices exposed to picking.
+pub(crate) fn minimum_distance(
+    model: &ModelFile,
+    first: &TopologyElement,
+    second: &TopologyElement,
+) -> Result<MinimumDistance, MeasurementError> {
+    let _execution_guard = crate::execution::PYTHON_EXECUTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Python::with_gil(|py| {
+        let namespace = PyDict::new(py);
+        py.run(MEASUREMENT_SOURCE, Some(&namespace), None)?;
+        let measure = namespace
+            .get_item("minimum_distance")?
+            .expect("measurement source defines minimum_distance()");
+        let (first_kind, first_index) = element_reference(first);
+        let (second_kind, second_index) = element_reference(second);
+        let millimetres = measure
+            .call1((
+                model.0.display().to_string(),
+                first_kind,
+                first_index,
+                second_kind,
+                second_index,
+            ))?
+            .extract()?;
+        Ok(MinimumDistance { millimetres })
+    })
+}
+
+fn element_reference(element: &TopologyElement) -> (&'static str, u32) {
+    match element {
+        TopologyElement::Face(id) => ("face", id.0),
+        TopologyElement::Edge(id) => ("edge", id.0),
+        TopologyElement::Vertex(id) => ("vertex", id.0),
+    }
 }

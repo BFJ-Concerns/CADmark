@@ -1,7 +1,7 @@
 // Status bar — what the worker is doing, else the last result, plus the
 // model's measurements and the navigation hint.
 
-use cadmark_core::geometry::ModelSummary;
+use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, TopologyElement};
 
 use crate::theme;
 
@@ -38,6 +38,39 @@ pub struct StatusView<'a> {
     pub summary: Option<&'a ModelSummary>,
     /// What the user has selected, as a short label.
     pub selection: Option<String>,
+    /// The measurement for the current selection, if it can be read locally.
+    pub measurement: Option<&'a str>,
+}
+
+/// Describe the measurement available from one picked element's descriptors.
+pub fn selection_measurement(
+    element: &TopologyElement,
+    descriptors: &GeometryDescriptors,
+) -> Option<String> {
+    match element {
+        TopologyElement::Face(id) => descriptors
+            .face(*id)
+            .map(|face| format!("Area {} mm²", compact(face.area))),
+        TopologyElement::Edge(id) => descriptors.edge(*id).map(|edge| {
+            if edge.curve_type == "circle" {
+                format!(
+                    "Diameter {} mm",
+                    compact(edge.length / std::f64::consts::PI)
+                )
+            } else {
+                format!("Length {} mm", compact(edge.length))
+            }
+        }),
+        TopologyElement::Vertex(_) => None,
+    }
+}
+
+fn compact(value: f64) -> String {
+    if (value - value.round()).abs() < 5e-3 {
+        format!("{}", value.round() as i64)
+    } else {
+        format!("{value:.2}")
+    }
 }
 
 /// Render the status bar contents.
@@ -88,6 +121,45 @@ pub fn show_status_bar(ui: &mut egui::Ui, view: StatusView<'_>) {
                 ui.separator();
                 theme::chip(ui, &selection, theme::SPATIAL);
             }
+            if let Some(measurement) = view.measurement {
+                ui.separator();
+                theme::chip(ui, measurement, theme::SUCCESS);
+            }
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use cadmark_core::geometry::{
+        EdgeDescriptor, EdgeId, FaceDescriptor, FaceId, GeometryDescriptors, TopologyElement,
+    };
+
+    use super::selection_measurement;
+
+    #[test]
+    fn reads_face_area_and_circular_edge_diameter_from_descriptors() {
+        let descriptors = GeometryDescriptors {
+            faces: vec![FaceDescriptor {
+                surface_type: "plane".into(),
+                area: 250.0,
+                centre: [0.0; 3],
+                normal: [0.0, 0.0, 1.0],
+            }],
+            edges: vec![EdgeDescriptor {
+                curve_type: "circle".into(),
+                length: std::f64::consts::PI * 12.0,
+                centre: [0.0; 3],
+            }],
+            vertices: vec![],
+        };
+        assert_eq!(
+            selection_measurement(&TopologyElement::Face(FaceId(0)), &descriptors),
+            Some("Area 250 mm²".into())
+        );
+        assert_eq!(
+            selection_measurement(&TopologyElement::Edge(EdgeId(0)), &descriptors),
+            Some("Diameter 12 mm".into())
+        );
+    }
 }
