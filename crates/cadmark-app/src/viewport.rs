@@ -230,9 +230,6 @@ pub fn completed_pick_transition(
 /// whether a pick was requested, viewport dimensions).
 pub struct ViewportCallback {
     pub mesh_uniforms: MeshUniforms,
-    /// Picking IDs of the candidate-footprint highlight, uploaded whole:
-    /// the buffer grows to fit rather than the set being trimmed to fit.
-    pub highlight_ids: Vec<u32>,
     pub simple_uniforms: SimpleUniforms,
     /// Pixel coordinates within the viewport to read back for
     /// picking, if the user clicked this frame.
@@ -324,15 +321,6 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         res.hover.collect(device);
 
         // ── Write per-frame uniforms ──
-        res.pipelines
-            .reserve_highlights(device, self.highlight_ids.len());
-        if !self.highlight_ids.is_empty() {
-            queue.write_buffer(
-                &res.pipelines.highlight_buffer,
-                0,
-                bytemuck::cast_slice(&self.highlight_ids),
-            );
-        }
         queue.write_buffer(
             &res.pipelines.mesh_uniform_buffer,
             0,

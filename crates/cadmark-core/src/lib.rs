@@ -4,7 +4,6 @@
 // messages, and design-step metadata. No kernel, GPU, or UI dependencies.
 
 pub mod cancellation;
-pub mod candidates;
 pub mod context;
 pub mod export;
 pub mod geometry;

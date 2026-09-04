@@ -11,32 +11,13 @@ struct Uniforms {
     _pad1: f32,
     selected_id: u32,
     hover_id: u32,
-    highlight_count: u32,
+    _pad2: u32,
     _pad3: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-
-// Picking IDs of the candidate-footprint highlight. A storage binding
-// because a footprint is as large as the geometry one line accounts for,
-// which a uniform array could not hold.
-@group(0) @binding(1) var<storage, read> highlight_ids: array<u32>;
-
-// Whether this element belongs to the highlighted candidate's footprint.
-fn in_highlight(id: u32) -> bool {
-    if id == 0u {
-        return false;
-    }
-    for (var i = 0u; i < uniforms.highlight_count; i = i + 1u) {
-        if highlight_ids[i] == id {
-            return true;
-        }
-    }
-    return false;
-}
-
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -63,9 +44,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(uniforms.selected_colour.rgb, 1.0);
     }
     if eid == uniforms.hover_id && uniforms.hover_id != 0u {
-        return vec4<f32>(uniforms.hover_colour.rgb, 1.0);
-    }
-    if in_highlight(eid) {
         return vec4<f32>(uniforms.hover_colour.rgb, 1.0);
     }
     // Dark edges, already display-encoded.

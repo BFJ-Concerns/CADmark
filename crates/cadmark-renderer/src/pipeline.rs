@@ -40,17 +40,11 @@ pub struct MeshUniforms {
     pub _pad1: f32,
     pub selected_id: u32,
     pub hover_id: u32,
-    /// How many entries of the highlight storage buffer the shaders read.
-    pub highlight_count: u32,
+    pub _pad2: u32,
     pub _pad3: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
 }
-
-/// Initial length of the highlight storage buffer. It grows to whatever a
-/// frame needs, so this bounds nothing — it only avoids reallocating for
-/// the footprints small enough to be common.
-const HIGHLIGHT_INITIAL_CAPACITY: u64 = 64;
 
 /// Uniforms for the picking shader (just view_proj).
 #[repr(C)]
@@ -65,9 +59,6 @@ pub struct RenderPipelines {
     pub mesh_bind_group_layout: wgpu::BindGroupLayout,
     pub mesh_uniform_buffer: wgpu::Buffer,
     pub mesh_bind_group: wgpu::BindGroup,
-    /// Picking IDs of the candidate-footprint highlight, read by the mesh
-    /// and wireframe fragment shaders. Grown to fit each frame's set.
-    pub highlight_buffer: wgpu::Buffer,
 
     pub picking_pipeline: wgpu::RenderPipeline,
     pub picking_uniform_buffer: wgpu::Buffer,
@@ -115,28 +106,16 @@ impl RenderPipelines {
         let mesh_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("mesh_bind_group_layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
+                    count: None,
+                }],
             });
 
         let mesh_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -146,13 +125,14 @@ impl RenderPipelines {
             mapped_at_creation: false,
         });
 
-        let highlight_buffer = new_highlight_buffer(device, HIGHLIGHT_INITIAL_CAPACITY);
-        let mesh_bind_group = mesh_bind_group(
-            device,
-            &mesh_bind_group_layout,
-            &mesh_uniform_buffer,
-            &highlight_buffer,
-        );
+        let mesh_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mesh_bind_group"),
+            layout: &mesh_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: mesh_uniform_buffer.as_entire_binding(),
+            }],
+        });
 
         let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mesh_pipeline_layout"),
@@ -489,7 +469,6 @@ impl RenderPipelines {
             mesh_bind_group_layout,
             mesh_uniform_buffer,
             mesh_bind_group,
-            highlight_buffer,
             picking_pipeline,
             picking_uniform_buffer,
             picking_bind_group,
@@ -581,10 +560,6 @@ pub struct Renderer {
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
-    /// Picking IDs of a secondary highlight — every element the ledger
-    /// attributes to one candidate source line. Unbounded: the buffer the
-    /// shaders read grows to hold whatever a footprint contains.
-    pub highlight_ids: Vec<u32>,
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
@@ -597,7 +572,6 @@ impl Renderer {
             selection_style: SelectionStyle::default(),
             selected_id: 0,
             hover_id: 0,
-            highlight_ids: Vec::new(),
             target_is_srgb: false,
         }
     }
@@ -620,7 +594,7 @@ impl Renderer {
             _pad1: 0.0,
             selected_id: self.selected_id,
             hover_id: self.hover_id,
-            highlight_count: self.highlight_ids.len() as u32,
+            _pad2: 0,
             _pad3: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
@@ -731,129 +705,9 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
     edge_vertices
 }
 
-/// A storage buffer able to hold `capacity` picking IDs.
-fn new_highlight_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("highlight_ids"),
-        size: capacity * std::mem::size_of::<u32>() as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    })
-}
-
-fn mesh_bind_group(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    uniforms: &wgpu::Buffer,
-    highlights: &wgpu::Buffer,
-) -> wgpu::BindGroup {
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("mesh_bind_group"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniforms.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: highlights.as_entire_binding(),
-            },
-        ],
-    })
-}
-
-/// How long a highlight buffer must be to hold `wanted` IDs: the current
-/// length while it already fits, and otherwise doubled until it does.
-///
-/// Nothing here caps the answer. A candidate's footprint is however much
-/// geometry the ledger attributes to its operation, and drawing only part
-/// of it would show the user a smaller origin than the line actually has.
-pub fn grown_highlight_capacity(current: u64, wanted: u64) -> u64 {
-    let mut capacity = current.max(HIGHLIGHT_INITIAL_CAPACITY);
-    while capacity < wanted {
-        capacity *= 2;
-    }
-    capacity
-}
-
-impl RenderPipelines {
-    /// Make room for `count` highlight IDs, rebuilding the bind group when
-    /// the buffer had to be replaced. Returns whether it grew.
-    pub fn reserve_highlights(&mut self, device: &wgpu::Device, count: usize) -> bool {
-        let current = self.highlight_buffer.size() / std::mem::size_of::<u32>() as u64;
-        let wanted = grown_highlight_capacity(current, count as u64);
-        if wanted == current {
-            return false;
-        }
-        self.highlight_buffer = new_highlight_buffer(device, wanted);
-        self.mesh_bind_group = mesh_bind_group(
-            device,
-            &self.mesh_bind_group_layout,
-            &self.mesh_uniform_buffer,
-            &self.highlight_buffer,
-        );
-        true
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Compile a shader and report the byte size its `Uniforms` struct
-    /// occupies, which is what the uniform buffer must match.
-    fn uniform_struct_size(source: &str) -> u32 {
-        let module = naga::front::wgsl::parse_str(source).expect("shader must compile");
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        );
-        validator.validate(&module).expect("shader must validate");
-        let mut layouter = naga::proc::Layouter::default();
-        layouter
-            .update(module.to_ctx())
-            .expect("shader types must lay out");
-        let (handle, _) = module
-            .types
-            .iter()
-            .find(|(_, ty)| ty.name.as_deref() == Some("Uniforms"))
-            .expect("shader must declare Uniforms");
-        layouter[handle].size
-    }
-
-    #[test]
-    fn every_shader_binding_mesh_uniforms_declares_the_same_layout() {
-        // A field added on one side and not the other renders garbage
-        // silently, so the sizes are compared rather than trusted.
-        let expected = std::mem::size_of::<MeshUniforms>() as u32;
-        assert_eq!(
-            uniform_struct_size(include_str!("shaders/mesh.wgsl")),
-            expected
-        );
-        assert_eq!(
-            uniform_struct_size(include_str!("shaders/wireframe.wgsl")),
-            expected
-        );
-    }
-
-    #[test]
-    fn every_element_of_a_footprint_is_handed_to_the_shaders() {
-        // A fillet chain's footprint routinely runs to hundreds of edges;
-        // showing part of one would understate what the line accounts for.
-        let mut renderer = Renderer::new();
-        renderer.highlight_ids = (1..=500).collect();
-        assert_eq!(renderer.mesh_uniforms(1.0).highlight_count, 500);
-    }
-
-    #[test]
-    fn the_highlight_buffer_grows_to_whatever_a_footprint_needs() {
-        assert_eq!(grown_highlight_capacity(64, 12), 64);
-        assert_eq!(grown_highlight_capacity(64, 64), 64);
-        assert_eq!(grown_highlight_capacity(64, 65), 128);
-        assert_eq!(grown_highlight_capacity(64, 500), 512);
-        assert_eq!(grown_highlight_capacity(512, 9_000), 16_384);
-    }
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {

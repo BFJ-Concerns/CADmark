@@ -279,7 +279,6 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
-            chosen_candidate: None,
         }
     }
 
