@@ -71,11 +71,8 @@ pub fn create_microversion(
     run_git(project_dir, &["add", script_filename])?;
 
     // Build the structured commit message.
-    // The part is recorded so restoring the step can reopen the part it
-    // changed: one folder, one history, several parts.
-    let message = format!(
-        "{summary}\n\n{METADATA_MARKER}\ntrigger: {trigger_message}\ntype: microversion\npart: {script_filename}"
-    );
+    let message =
+        format!("{summary}\n\n{METADATA_MARKER}\ntrigger: {trigger_message}\ntype: microversion");
 
     run_git(project_dir, &["commit", "-m", &message])?;
 
@@ -100,9 +97,7 @@ pub fn create_snapshot(
 ) -> Result<Microversion, GitError> {
     run_git(project_dir, &["add", script_filename])?;
 
-    let message = format!(
-        "Snapshot: {name}\n\n{METADATA_MARKER}\ntype: snapshot\nname: {name}\npart: {script_filename}"
-    );
+    let message = format!("Snapshot: {name}\n\n{METADATA_MARKER}\ntype: snapshot\nname: {name}");
 
     run_git(project_dir, &["commit", "-m", &message, "--allow-empty"])?;
 
@@ -118,24 +113,6 @@ pub fn create_snapshot(
             name: name.to_string(),
         }),
     })
-}
-
-/// Stage a part's rename so the next step records the move rather than
-/// the new file beside the old one. Both paths are staged: the one that
-/// went and the one that arrived.
-pub fn stage_part_rename(project_dir: &Path, from: &str, to: &str) -> Result<(), GitError> {
-    run_git(project_dir, &["add", "-A", "--", from, to])?;
-    Ok(())
-}
-
-/// The part a recorded step changed, when the step names one. Steps
-/// recorded before a folder could hold several parts name none.
-pub fn part_of_commit(project_dir: &Path, commit_hash: &str) -> Option<String> {
-    let body = run_git(project_dir, &["log", "-1", "--format=%b", commit_hash]).ok()?;
-    body.lines()
-        .find_map(|line| line.strip_prefix("part: "))
-        .map(|part| part.trim().to_string())
-        .filter(|part| !part.is_empty())
 }
 
 /// Checkout a specific commit (for undo/redo). Uses detached HEAD
@@ -334,62 +311,6 @@ mod tests {
         assert_eq!(versions[1].summary, "Create initial box");
 
         assert_eq!(v2.commit_hash, versions[0].commit_hash);
-    }
-
-    #[test]
-    fn naming_a_part_leaves_no_trace_of_the_name_it_had_before() {
-        // The untitled file is committed history by the time it is named,
-        // so a rename on disk alone would leave it in the next step's tree
-        // and restoring that step would bring it back beside the part.
-        let dir = test_repo();
-        fs::write(dir.path().join("Untitled.py"), "box = Box(10, 10, 10)").unwrap();
-        create_microversion(dir.path(), "Make a box", "a box", "Untitled.py").unwrap();
-
-        fs::rename(
-            dir.path().join("Untitled.py"),
-            dir.path().join("bracket.py"),
-        )
-        .unwrap();
-        stage_part_rename(dir.path(), "Untitled.py", "bracket.py").unwrap();
-        let snapshot = super::create_snapshot(dir.path(), "Bracket v1", "bracket.py").unwrap();
-
-        let tracked = run_git(dir.path(), &["ls-tree", "--name-only", "HEAD"]).unwrap();
-        let tracked: Vec<&str> = tracked.lines().collect();
-        assert_eq!(tracked, vec!["bracket.py"]);
-        assert!(
-            run_git(dir.path(), &["status", "--short"])
-                .unwrap()
-                .trim()
-                .is_empty()
-        );
-
-        // And the step that did it names the part it left behind.
-        assert_eq!(
-            part_of_commit(dir.path(), &snapshot.commit_hash).as_deref(),
-            Some("bracket.py")
-        );
-    }
-
-    #[test]
-    fn a_step_records_which_part_of_the_folder_it_changed() {
-        // One folder, one history, several parts: a step has to say which
-        // part it belongs to or undo cannot reopen the right one.
-        let dir = test_repo();
-        fs::write(dir.path().join("bracket.py"), "box = Box(10, 10, 10)").unwrap();
-        fs::write(dir.path().join("housing.py"), "box = Box(1, 1, 1)").unwrap();
-
-        let bracket =
-            create_microversion(dir.path(), "Make a bracket", "a bracket", "bracket.py").unwrap();
-        let housing = super::create_snapshot(dir.path(), "Housing v1", "housing.py").unwrap();
-
-        assert_eq!(
-            part_of_commit(dir.path(), &bracket.commit_hash).as_deref(),
-            Some("bracket.py")
-        );
-        assert_eq!(
-            part_of_commit(dir.path(), &housing.commit_hash).as_deref(),
-            Some("housing.py")
-        );
     }
 
     #[test]

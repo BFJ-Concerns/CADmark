@@ -45,9 +45,6 @@ pub enum OrchestratorCommand {
     },
     /// The user changed the execution ceilings in settings.
     SetLimits(ExecutionLimits),
-    /// The user opened another part of the folder; subsequent reloads and
-    /// turns act on that script.
-    SetScript(String),
 }
 
 /// Results and progress sent from the worker back to the UI thread.
@@ -281,10 +278,6 @@ pub fn spawn_orchestrator(
                         } => orchestrator.handle_minimum_distance(&model, first, second),
                         OrchestratorCommand::SetLimits(limits) => {
                             orchestrator.executor.limits = limits;
-                            continue;
-                        }
-                        OrchestratorCommand::SetScript(filename) => {
-                            orchestrator.script_filename = filename;
                             continue;
                         }
                     };
