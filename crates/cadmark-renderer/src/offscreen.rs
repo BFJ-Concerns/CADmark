@@ -318,10 +318,12 @@ mod tests {
         scene
             .camera
             .frame_bounds(bounds, width as f32 / height as f32);
+        // Light grey, well away from both the shaded faces and the dark
+        // edge colour, so each is countable in the readback.
         let clear = wgpu::Color {
-            r: 0.1,
-            g: 0.1,
-            b: 0.1,
+            r: 0.6,
+            g: 0.6,
+            b: 0.6,
             a: 1.0,
         };
 
@@ -341,7 +343,7 @@ mod tests {
         // The clear colour is what an empty render leaves; anything else
         // is the model. It must occupy a real share of the frame — a
         // model in a corner or clipped away would not.
-        let background = [26u8, 26, 26];
+        let background = [153u8, 153, 153];
         let is_model = |pixel: &[u8]| {
             pixel[0].abs_diff(background[0]) > 6
                 || pixel[1].abs_diff(background[1]) > 6
@@ -376,6 +378,25 @@ mod tests {
             levels.len() > 8,
             "only {} distinct luminance levels — the render is not shaded",
             levels.len()
+        );
+
+        // Edges drawn, not just shaded faces: the wireframe overlay
+        // paints its own dark colour, which no face shade reaches.
+        let edge = [26u8, 26, 31];
+        let edge_pixels = image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| {
+                p[0].abs_diff(edge[0]) <= 2
+                    && p[1].abs_diff(edge[1]) <= 2
+                    && p[2].abs_diff(edge[2]) <= 2
+            })
+            .count();
+        assert!(
+            edge_pixels > 50,
+            "only {edge_pixels} edge-coloured pixels — the wireframe overlay is missing"
         );
     }
 
