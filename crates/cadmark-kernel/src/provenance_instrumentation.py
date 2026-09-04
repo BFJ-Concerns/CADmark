@@ -173,6 +173,10 @@ class _CadmarkSession:
         self.tombstones = []
         # shape -> {"candidates": [...], "allow_partner": bool}
         self.registry = _CadmarkShapeTable()
+        # Located default-rotate results share a TShape with their retained
+        # receiver, so only an explicit subsequent move may carry their
+        # provenance to a new placement.
+        self.location_only_transforms = _CadmarkShapeTable()
         self.originals = []
         self.final_maps = {}
         self._next_operation_id = 1
@@ -383,7 +387,31 @@ class _CadmarkSession:
         candidate = {"operation_id": operation_id, "relation": "Modified"}
         for _kind, shapes in self.topology(self.unwrap(result)):
             for shape in shapes:
+                self.location_only_transforms.slot(shape, lambda: True)
                 self.register(shape, [candidate])
+
+    def has_location_only_transform(self, shape):
+        return any(
+            self.location_only_transforms.get(member) is not None
+            for _kind, members in self.topology(self.unwrap(shape))
+            for member in members
+        )
+
+    def capture_location_transport(self, original, result):
+        """Carry a located default-rotate result to one later placement.
+
+        This is deliberately exact-location transport rather than partner
+        fallback: the retained receiver has the same partner topology but was
+        not rotated.
+        """
+        inputs_by_kind = dict(self.topology(self.unwrap(original)))
+        for kind, outputs in self.topology(self.unwrap(result)):
+            for output in outputs:
+                candidates = []
+                for input_shape in inputs_by_kind[kind]:
+                    if output.IsPartner(input_shape):
+                        candidates.extend(self.lookup(input_shape))
+                self.register(output, candidates, replace=True)
 
     def capture_active_semantic_relation(
         self, result, source_line, operation, api_class, replace=False
@@ -396,7 +424,7 @@ class _CadmarkSession:
                     shape, [candidate], allow_partner=True, replace=replace
                 )
 
-    def capture_history(self, builder, result, operation, api_class):
+    def capture_history(self, builder, result, operation, api_class, allow_partner=False):
         operation_id = self.new_operation(
             builder._cadmark_source_line, operation, api_class
         )
@@ -434,6 +462,7 @@ class _CadmarkSession:
                     self.register(
                         output,
                         [{"operation_id": operation_id, "relation": selected}],
+                        allow_partner=allow_partner,
                         replace=True,
                     )
         return operation_id
@@ -485,7 +514,6 @@ class _CadmarkSession:
             source_line, semantic_operation, semantic_api_class = semantic
             if adapter == "primitive":
                 if semantic_operation == "LocationPattern":
-                    self.capture_primitive(builder, result, operation, api_class)
                     self.capture_active_semantic_relation(
                         result,
                         source_line,
@@ -511,7 +539,11 @@ class _CadmarkSession:
                 builder._cadmark_source_line = source_line
                 try:
                     self.capture_history(
-                        builder, result, semantic_operation, semantic_api_class
+                        builder,
+                        result,
+                        semantic_operation,
+                        semantic_api_class,
+                        allow_partner=True,
                     )
                 finally:
                     builder._cadmark_source_line = original_line
@@ -641,6 +673,24 @@ class _CadmarkSession:
         setattr(shape, method_name, transform)
         self.originals.append((shape, method_name, original))
 
+    def install_location_transport_hook(self):
+        module = _cadmark_importlib.import_module("build123d.topology.shape_core")
+        shape = module.Shape
+        original = shape.moved
+        session = self
+
+        def moved(instance, *args, **kwargs):
+            result = original(instance, *args, **kwargs)
+            if (
+                session.active_semantic() is None
+                and session.has_location_only_transform(instance)
+            ):
+                session.capture_location_transport(instance, result)
+            return result
+
+        shape.moved = moved
+        self.originals.append((shape, "moved", original))
+
     def install_generic_mirror_hook(self):
         module = _cadmark_importlib.import_module("build123d.operations_generic")
         build123d = _cadmark_importlib.import_module("build123d")
@@ -683,6 +733,7 @@ class _CadmarkSession:
             self.install_transform_hook("mirror", "Mirror")
             self.install_transform_hook("rotate", "Rotate")
             self.install_transform_hook("scale", "Scale")
+            self.install_location_transport_hook()
             self.install_generic_mirror_hook()
         except Exception:
             originals = self.originals or installed
