@@ -44,8 +44,16 @@ fn turn_chat_message(
     let mut message = response_message.to_string();
     match before {
         Some(before) => match after.describe_change_from(before) {
-            Some(change) => message.push_str(&format!("\n\nModel change: {change}.")),
-            None => message.push_str("\n\nModel unchanged: same volume, size and face count."),
+            Some(change) => message.push_str(&format!(
+                "\n\nModel change: {change}. Before: {}. After: {}.",
+                before.describe(),
+                after.describe()
+            )),
+            None => message.push_str(&format!(
+                "\n\nModel unchanged. Before: {}. After: {}.",
+                before.describe(),
+                after.describe()
+            )),
         },
         None => message.push_str(&format!("\n\nModel: {}.", after.describe())),
     }
@@ -1276,16 +1284,22 @@ mod tests {
     }
 
     #[test]
-    fn edit_reports_the_measured_change_or_its_absence() {
+    fn unchanged_edit_reports_measurements_before_and_after() {
         let before = summary(1000.0, 6);
-        let changed = turn_chat_message("Added a hole", Some(&before), &summary(900.0, 9));
-        assert!(changed.starts_with(
-            "Added a hole\n\nModel change: faces 6 to 9; volume 1000 to 900 mm³ (-10.0%)"
-        ));
         let same = turn_chat_message("Renamed a parameter", Some(&before), &before);
         assert_eq!(
             same,
-            "Renamed a parameter\n\nModel unchanged: same volume, size and face count."
+            "Renamed a parameter\n\nModel unchanged. Before: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm. After: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm."
+        );
+    }
+
+    #[test]
+    fn changed_edit_reports_every_measurement_before_and_after() {
+        let before = summary(1000.0, 6);
+        let message = turn_chat_message("Added a hole", Some(&before), &summary(900.0, 9));
+        assert_eq!(
+            message,
+            "Added a hole\n\nModel change: faces 6 to 9; volume 1000 to 900 mm³ (-10.0%). Before: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm. After: 9 faces, volume 900 mm³, 10 × 10 × 10 mm."
         );
     }
 }
