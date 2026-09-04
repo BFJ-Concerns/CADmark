@@ -1642,16 +1642,16 @@ with BuildPart() as part:
         assert_operation_relation(
             &result,
             SemanticOperation::Shell,
-            ProvenanceRelation::Generated,
+            ProvenanceRelation::Modified,
             5,
             |element| matches!(element, TopologyElement::Face(_)),
         );
         assert_operation_relation(
             &result,
             SemanticOperation::Shell,
-            ProvenanceRelation::Modified,
+            ProvenanceRelation::GeneratedDescendant,
             5,
-            |element| matches!(element, TopologyElement::Face(_)),
+            |element| matches!(element, TopologyElement::Edge(_)),
         );
         assert_bridge_consumers(&result);
     }
@@ -1661,23 +1661,17 @@ with BuildPart() as part:
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
-    Box(10, 10, 10)
-    thicken(part.faces().sort_by(Axis.Z)[-1], amount=3, mode=Mode.REPLACE)
+    with BuildSketch():
+        Rectangle(10, 10)
+    thicken(amount=3)
 "#);
         let result = result.unwrap();
         assert_operation_relation(
             &result,
             SemanticOperation::Thicken,
             ProvenanceRelation::Generated,
-            5,
+            6,
             |element| matches!(element, TopologyElement::Face(_)),
-        );
-        assert_operation_relation(
-            &result,
-            SemanticOperation::Thicken,
-            ProvenanceRelation::Generated,
-            5,
-            |element| matches!(element, TopologyElement::Edge(_)),
         );
         assert_bridge_consumers(&result);
     }
