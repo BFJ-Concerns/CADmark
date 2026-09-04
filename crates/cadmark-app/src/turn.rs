@@ -875,6 +875,7 @@ mod tests {
         ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
+            sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
             form: ModelForm::Sketch(cadmark_core::sketch::SketchProfile {
                 plane: cadmark_core::sketch::SketchPlane {
@@ -916,6 +917,7 @@ mod tests {
         ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
+            sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
             form: ModelForm::Solid(cadmark_kernel::protocol::SolidResult {
                 summary: ModelSummary {
@@ -1496,10 +1498,13 @@ mod tests {
 
     #[tokio::test]
     async fn every_comment_anchor_reaches_the_model_and_the_last_good_script_wins() {
-        use cadmark_core::geometry::{EdgeId, FaceId, GeometryContext, TopologyElement};
+        use cadmark_core::geometry::{
+            EdgeId, FaceId, GeometryContext, PickedElement, TopologyElement,
+        };
         use cadmark_core::ledger::LedgerValue;
         let anchor = |element: TopologyElement| GeometryContext {
-            element,
+            sketch: Default::default(),
+            element: PickedElement::Solid(element),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
             source_context: String::new(),

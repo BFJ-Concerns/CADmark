@@ -14,4 +14,5 @@ pub mod mesh;
 pub mod message;
 pub mod pending_comment;
 pub mod sketch;
+pub mod sketch_lineage;
 pub mod version;

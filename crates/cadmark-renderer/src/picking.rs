@@ -4,16 +4,24 @@
 // Faces, edges, and vertices occupy distinct ID ranges so the type
 // and index can be recovered from a single pixel readback.
 
-use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
+use cadmark_core::geometry::{
+    EdgeId, FaceId, PickedElement, SketchElement, SketchElementKind, TopologyElement, VertexId,
+};
 
 /// ID ranges for each element type in the picking pass.
 /// Face IDs:  1..EDGE_OFFSET-1
 /// Edge IDs:  EDGE_OFFSET..VERTEX_OFFSET-1
-/// Vertex IDs: VERTEX_OFFSET..
+/// Vertex IDs: VERTEX_OFFSET..SKETCH_CURVE_OFFSET-1
+/// Sketch curve IDs: SKETCH_CURVE_OFFSET..SKETCH_CORNER_OFFSET-1
+/// Sketch corner IDs: SKETCH_CORNER_OFFSET..SKETCH_REGION_OFFSET-1
+/// Sketch region IDs: SKETCH_REGION_OFFSET..
 ///
 /// ID 0 = background (no element).
 const EDGE_OFFSET: u32 = 100_000;
 const VERTEX_OFFSET: u32 = 200_000;
+const SKETCH_CURVE_OFFSET: u32 = 300_000;
+const SKETCH_CORNER_OFFSET: u32 = 400_000;
+const SKETCH_REGION_OFFSET: u32 = 500_000;
 
 /// Encode a topology element as a picking ID for the colour buffer.
 pub fn encode_picking_id(element: &TopologyElement) -> u32 {
@@ -33,9 +41,41 @@ pub fn decode_picking_id(id: u32) -> Option<TopologyElement> {
         Some(TopologyElement::Face(FaceId(id - 1)))
     } else if id < VERTEX_OFFSET {
         Some(TopologyElement::Edge(EdgeId(id - EDGE_OFFSET - 1)))
-    } else {
+    } else if id < SKETCH_CURVE_OFFSET {
         Some(TopologyElement::Vertex(VertexId(id - VERTEX_OFFSET - 1)))
+    } else {
+        // A sketch element: not part of the solid's topology, so the
+        // solid-only decoder declines it rather than inventing a vertex.
+        None
     }
+}
+
+/// Encode anything the user can click — solid topology or a drawn sketch
+/// element — as a picking ID.
+pub fn encode_pick(element: &PickedElement) -> u32 {
+    match element {
+        PickedElement::Solid(element) => encode_picking_id(element),
+        PickedElement::Sketch(SketchElement { kind, index }) => match kind {
+            SketchElementKind::Curve => SKETCH_CURVE_OFFSET + *index + 1,
+            SketchElementKind::Corner => SKETCH_CORNER_OFFSET + *index + 1,
+            SketchElementKind::Region => SKETCH_REGION_OFFSET + *index + 1,
+        },
+    }
+}
+
+/// Decode a picking ID into whatever the user clicked.
+pub fn decode_pick(id: u32) -> Option<PickedElement> {
+    if id < SKETCH_CURVE_OFFSET {
+        return decode_picking_id(id).map(PickedElement::Solid);
+    }
+    let (kind, index) = if id < SKETCH_CORNER_OFFSET {
+        (SketchElementKind::Curve, id - SKETCH_CURVE_OFFSET - 1)
+    } else if id < SKETCH_REGION_OFFSET {
+        (SketchElementKind::Corner, id - SKETCH_CORNER_OFFSET - 1)
+    } else {
+        (SketchElementKind::Region, id - SKETCH_REGION_OFFSET - 1)
+    };
+    Some(PickedElement::Sketch(SketchElement { kind, index }))
 }
 
 /// Encode a picking ID as RGBA bytes for the colour attachment.
@@ -144,6 +184,44 @@ mod tests {
     #[test]
     fn background_decodes_to_none() {
         assert_eq!(decode_picking_id(0), None);
+    }
+
+    #[test]
+    fn sketch_elements_roundtrip_in_their_own_ranges() {
+        for kind in [
+            SketchElementKind::Curve,
+            SketchElementKind::Corner,
+            SketchElementKind::Region,
+        ] {
+            for index in [0, 1, 99_998] {
+                let element = PickedElement::Sketch(SketchElement { kind, index });
+                assert_eq!(decode_pick(encode_pick(&element)), Some(element));
+            }
+        }
+    }
+
+    #[test]
+    fn solid_and_sketch_ranges_never_collide() {
+        let solid = [
+            TopologyElement::Face(FaceId(3)),
+            TopologyElement::Edge(EdgeId(3)),
+            TopologyElement::Vertex(VertexId(3)),
+        ];
+        for element in solid {
+            let id = encode_picking_id(&element);
+            assert_eq!(
+                decode_pick(id),
+                Some(PickedElement::Solid(element.clone())),
+                "solid IDs still decode as solid topology",
+            );
+        }
+        // A sketch pixel is not a very high vertex index: the solid-only
+        // decoder must decline it.
+        let sketch = encode_pick(&PickedElement::Sketch(SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 0,
+        }));
+        assert_eq!(decode_picking_id(sketch), None);
     }
 
     #[test]

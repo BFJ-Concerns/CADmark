@@ -9,6 +9,7 @@ use cadmark_core::ledger::{
     LedgerValue, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation,
     SourceRef,
 };
+use cadmark_core::sketch_lineage::SketchLineageLedger;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
@@ -124,11 +125,12 @@ pub(crate) fn finalise(
     session: &InstrumentationSession,
     shape: &Bound<'_, PyAny>,
     source: &str,
-) -> Result<(RawProvenance, ProvenanceLedger), ProvenanceError> {
+) -> Result<(RawProvenance, ProvenanceLedger, SketchLineageLedger), ProvenanceError> {
     let capture = session.inner.bind(py).call_method1("finalise", (shape,))?;
     let raw = parse_capture(&capture)?;
     let ledger = build_ledger(&raw, source)?;
-    Ok((raw, ledger))
+    let sketch_lineage = crate::sketch_lineage::build_ledger(&capture, &raw.operations, source)?;
+    Ok((raw, ledger, sketch_lineage))
 }
 
 pub(crate) fn restore(
@@ -567,7 +569,7 @@ with BuildPart() as part:
             else {
                 panic!("the probe script builds a solid");
             };
-            let (raw, ledger) = finalise(py, &session, &shape, source).unwrap();
+            let (raw, ledger, _sketch_lineage) = finalise(py, &session, &shape, source).unwrap();
             restore(py, &session).unwrap();
 
             assert!(!raw.tombstones.is_empty());

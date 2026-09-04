@@ -102,6 +102,17 @@ _cadmark_manifest = (
     ("build123d.topology.shape_core", "ShapeUpgrade_UnifySameDomain", _cadmark_expected_cleanup, None, "cleanup"),
 )
 
+# The build123d base classes every stock sketch face and curve object is
+# built through. Labelling their construction gives each sketch edge, corner
+# and region the user line that drew it; subclasses reach the label through
+# their own `super().__init__`, so the whole stock sketch idiom is covered
+# without naming each object class.
+_cadmark_sketch_bases = (
+    ("build123d.objects_sketch", "BaseSketchObject"),
+    ("build123d.objects_curve", "BaseLineObject"),
+)
+
+
 # Builder methods that receive input shapes after construction.
 _cadmark_input_methods = (
     "SetArguments",
@@ -122,6 +133,12 @@ _cadmark_kind_enum = {
     "face": _cadmark_face,
     "edge": _cadmark_edge,
     "vertex": _cadmark_vertex,
+}
+# What a sketch object's own topology is called where the user points at it.
+_cadmark_sketch_element_kinds = {
+    "face": "region",
+    "edge": "curve",
+    "vertex": "corner",
 }
 _cadmark_relation_priority = (
     "Generated",
@@ -178,9 +195,19 @@ class _CadmarkSession:
         # provenance to a new placement.
         self.location_only_transforms = _CadmarkShapeTable()
         self.originals = []
+        self.sketch_originals = []
         self.final_maps = {}
         self._next_operation_id = 1
         self.semantic_stack = []
+        # Sketch construction, labelled where it happens: one record per
+        # stock sketch object, and the shapes it drew keyed by identity.
+        self.sketches = []
+        self.sketch_registry = _CadmarkShapeTable()
+        self.sketch_elements = []
+        # Why an element has no sketch route, where an operation was asked
+        # and answered nothing. Ancestry always wins over a barrier.
+        self.sketch_barriers = _CadmarkShapeTable()
+        self._next_sketch_id = 1
 
     def user_line(self):
         frame = _cadmark_inspect.currentframe()
@@ -293,6 +320,129 @@ class _CadmarkSession:
                 record["candidates"] + candidates
             )
             record["allow_partner"] = record["allow_partner"] or allow_partner
+
+    # ── Sketch lineage ────────────────────────────────────────────────
+    #
+    # A sketch object's own topology is labelled at construction with the
+    # line that drew it. From there a label reaches final topology only
+    # where a maker answered: an input the builder directly reports as
+    # generating or modifying an output carries its sketch label onto that
+    # output. Containment is not a route — an element that merely lies on a
+    # face the sketch generated was not drawn by that curve — and neither is
+    # position, so where no maker answers, the element gets a barrier
+    # naming what was asked, and the consumer states an absence.
+
+    def register_sketch_object(self, instance):
+        shape = self.unwrap(instance)
+        if shape is None or not isinstance(shape, _cadmark_shape_type) or shape.IsNull():
+            return
+        topology = self.topology(shape)
+        if not any(shapes for _kind, shapes in topology):
+            return
+        sketch_id = self._next_sketch_id
+        self._next_sketch_id += 1
+        self.sketches.append(
+            {
+                "sketch_id": sketch_id,
+                "source_line": self.user_line(),
+                "object": type(instance).__name__,
+            }
+        )
+        for kind, shapes in topology:
+            for member in shapes:
+                self.sketch_registry.slot(member, set).add(sketch_id)
+                self.sketch_elements.append(
+                    {
+                        "kind": _cadmark_sketch_element_kinds[kind],
+                        "sketch_id": sketch_id,
+                    }
+                )
+
+    def sketch_lookup(self, shape):
+        """Sketch labels on this shape, by identity.
+
+        The exact shape first; failing that, the same underlying shape
+        moved or re-oriented, which is how a sketch object reaches its
+        plane. Both are construction identity — never proximity or size.
+        """
+        direct = self.sketch_registry.get(shape)
+        if direct:
+            return set(direct)
+        found = set()
+        for position in range(1, self.sketch_registry.index.Extent() + 1):
+            candidate = self.sketch_registry.index.FindKey(position)
+            if shape.IsPartner(candidate):
+                found |= self.sketch_registry.values[position - 1]
+        return found
+
+    def register_sketch_ancestry(self, shape, sketch_ids):
+        if not sketch_ids:
+            return
+        self.sketch_registry.slot(shape, set).update(sketch_ids)
+
+    def note_sketch_barrier(self, shape, barrier):
+        slot = self.sketch_barriers.slot(shape, lambda: [None])
+        slot[0] = barrier
+
+    @staticmethod
+    def direct_sources(reached):
+        """Input ordinals a maker reported for an output, by input kind.
+
+        Only the relations a maker stated of the shape itself: a
+        descendant relation says the output is contained by something the
+        input touched, which is not a claim that the input drew it.
+        """
+        sources = set()
+        for relation, input_kind, ordinal in reached:
+            if relation in ("Generated", "Modified"):
+                sources.add((input_kind, ordinal))
+        return sources
+
+    def carry_sketch_lineage(
+        self, result, inputs_by_kind, tables, barrier, identity_tables=None, strict=False
+    ):
+        """Move sketch labels from inputs to outputs across one operation.
+
+        Under `strict` — which is how a barrier step such as build123d's
+        clean-up runs — only exact shape identity carries a label, so a
+        label reaches an output solely when that output is the very shape
+        the step left alone. Elsewhere the looser partner identity moves a
+        label onto the same underlying shape relocated to its plane.
+        """
+        label_of = self.sketch_registry.get if strict else self.sketch_lookup
+        labelled_inputs = {
+            (kind, ordinal): set(labels)
+            for kind, inputs in inputs_by_kind.items()
+            for ordinal, shape in enumerate(inputs)
+            for labels in (label_of(shape) or (),)
+            if labels
+        }
+        if not labelled_inputs:
+            return
+        for kind, outputs in self.topology(result):
+            for output in outputs:
+                if label_of(output):
+                    continue
+                sketch_ids = set()
+                for source in self.direct_sources(tables[kind].get(output) or ()):
+                    sketch_ids |= labelled_inputs.get(source, set())
+                if identity_tables is not None:
+                    same = identity_tables[kind].get(output)
+                    if same is not None:
+                        sketch_ids |= labelled_inputs.get((kind, same), set())
+                if sketch_ids:
+                    self.register_sketch_ancestry(output, sketch_ids)
+                elif barrier is not None:
+                    self.note_sketch_barrier(output, barrier)
+
+    def sketch_state(self, shape):
+        sketch_ids = self.sketch_lookup(shape)
+        if sketch_ids:
+            return {"candidates": sorted(sketch_ids)}
+        barrier = self.sketch_barriers.get(shape)
+        if barrier is not None and barrier[0] is not None:
+            return {"barrier": barrier[0]}
+        return {}
 
     def new_operation(self, source_line, operation, api_class):
         operation_id = self._next_operation_id
@@ -461,6 +611,13 @@ class _CadmarkSession:
                         allow_partner=allow_partner,
                         replace=True,
                     )
+
+        self.carry_sketch_lineage(
+            result,
+            inputs_by_kind,
+            tables,
+            {"reason": "history_empty", "operation_id": operation_id},
+        )
         return operation_id
 
     def capture_sweep(self, builder, result, operation, api_class):
@@ -477,7 +634,7 @@ class _CadmarkSession:
                 if not self.lookup(output):
                     self.register(output, [candidate])
 
-    def capture_transport(self, builder, result, allow_partner):
+    def capture_transport(self, builder, result, allow_partner, barrier=None):
         inputs_by_kind = self.inputs_by_kind(builder._cadmark_inputs)
         input_tables = {kind: _CadmarkShapeTable() for kind in _cadmark_kinds}
         for kind, inputs in inputs_by_kind.items():
@@ -500,6 +657,18 @@ class _CadmarkSession:
                 if not candidates:
                     candidates.extend(self.lookup(output))
                 self.register(output, candidates, allow_partner=allow_partner)
+
+        # Transport keeps a sketch label only where the same shape came
+        # through. A merged output is a new shape whose maker answers
+        # nothing, and the clean-up step is the measured case of that.
+        self.carry_sketch_lineage(
+            result,
+            inputs_by_kind,
+            tables,
+            barrier,
+            identity_tables=input_tables,
+            strict=barrier is not None,
+        )
 
     def capture(self, builder, result, operation, adapter, api_class):
         result = self.unwrap(result)
@@ -557,7 +726,12 @@ class _CadmarkSession:
         elif adapter == "copy":
             self.capture_transport(builder, result, allow_partner=True)
         elif adapter == "cleanup":
-            self.capture_transport(builder, result, allow_partner=False)
+            self.capture_transport(
+                builder,
+                result,
+                allow_partner=False,
+                barrier={"reason": "clean_up"},
+            )
 
     def wrap(self, original, operation, adapter, api_class):
         session = self
@@ -704,6 +878,45 @@ class _CadmarkSession:
         self.originals.append((module, "mirror", original))
         self.originals.append((build123d, "mirror", original_export))
 
+    def wrap_sketch_base(self, original_init):
+        session = self
+
+        def init(instance, *args, **kwargs):
+            original_init(instance, *args, **kwargs)
+            session.register_sketch_object(instance)
+
+        return init
+
+    def install_sketch_labelling(self, bases=None):
+        bases = _cadmark_sketch_bases if bases is None else bases
+        installed = []
+        try:
+            for module_name, attribute in bases:
+                module = _cadmark_importlib.import_module(module_name)
+                base = getattr(module, attribute)
+                original_init = base.__init__
+                base.__init__ = self.wrap_sketch_base(original_init)
+                if base.__init__ is original_init:
+                    raise ProvenanceWrapperError(
+                        f"failed to label {module_name}.{attribute}"
+                    )
+                installed.append((base, original_init))
+            self.sketch_originals = installed
+        except Exception:
+            for base, original_init in reversed(installed):
+                base.__init__ = original_init
+            raise
+
+    def restore_sketch_labelling(self):
+        failures = []
+        for base, original_init in reversed(self.sketch_originals):
+            try:
+                base.__init__ = original_init
+            except Exception:
+                failures.append(base.__name__)
+        self.sketch_originals = []
+        return failures
+
     def install(self, manifest=None):
         manifest = _cadmark_manifest if manifest is None else manifest
         installed = []
@@ -722,6 +935,7 @@ class _CadmarkSession:
                         f"failed to replace {module_name}.{attribute}"
                     )
                 installed.append((module, attribute, original))
+            self.install_sketch_labelling()
             self.originals = installed
             self.install_location_hook()
             self.install_transform_hook("mirror", "Mirror")
@@ -737,7 +951,7 @@ class _CadmarkSession:
             raise
 
     def restore(self):
-        failures = []
+        failures = self.restore_sketch_labelling()
         for module, attribute, original in reversed(self.originals):
             try:
                 setattr(module, attribute, original)
@@ -764,6 +978,8 @@ class _CadmarkSession:
             "edges": [],
             "vertices": [],
             "tombstones": list(self.tombstones),
+            "sketches": list(self.sketches),
+            "sketch_elements": list(self.sketch_elements),
         }
         for kind, output_name in (
             ("face", "faces"),
@@ -775,7 +991,8 @@ class _CadmarkSession:
                     {
                         "candidates": self.lookup(
                             final_shape, partner_fallback=True
-                        )
+                        ),
+                        "sketch": self.sketch_state(final_shape),
                     }
                 )
         return result
