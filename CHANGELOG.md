@@ -21,6 +21,11 @@ All notable changes to this project will be documented in this file.
   the first save asks for its name, which becomes its file name, after which
   the same key names a version
 - Design steps record which part they changed, so undo reopens that part
+- Multi-part scripts render every distinct completed `BuildPart` and top-level
+  `Part`, `Solid`, or `Compound` binding; aliases of one shape are de-duplicated.
+  Rebind one name when constructing a part in stages. They provide a dedicated
+  whole-part picker and export one selected part or all parts from retained
+  worker BREP files
 
 ### Changed
 - New conversation control archives the current chat before starting a blank

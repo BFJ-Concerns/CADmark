@@ -372,15 +372,11 @@ pub(crate) fn minimum_distance(
 /// The traversal collection and index the measurement helper looks an element
 /// up by. A part names no such collection: distance between whole parts is a
 /// relationship between parts, which the commission places outside CADmark.
-fn element_reference(
-    element: &TopologyElement,
-) -> Result<(&'static str, u32), MeasurementError> {
+fn element_reference(element: &TopologyElement) -> Result<(&'static str, u32), MeasurementError> {
     match element {
         TopologyElement::Face(id) => Ok(("face", id.0)),
         TopologyElement::Edge(id) => Ok(("edge", id.0)),
         TopologyElement::Vertex(id) => Ok(("vertex", id.0)),
-        TopologyElement::Part(_) => {
-            Err(MeasurementError::NotMeasurable(element.display_label()))
-        }
+        TopologyElement::Part(_) => Err(MeasurementError::NotMeasurable(element.display_label())),
     }
 }

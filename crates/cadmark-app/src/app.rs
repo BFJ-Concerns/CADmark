@@ -13,7 +13,7 @@ use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryContext, GeometryDescriptors, MinimumDistance, ScreenPosition, SelectionState,
+    GeometryContext, GeometryDescriptors, MinimumDistance, PartId, ScreenPosition, SelectionState,
     TopologyElement,
 };
 use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
@@ -41,7 +41,7 @@ use crate::turn::{
     reference_image_count, reference_images,
 };
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
-use crate::validity::{describe_validity, export_decision, export_warning};
+use crate::validity::{ExportDecision, describe_validity, export_decision, export_warning};
 use crate::viewport::{
     PickTransition, ViewportCallback, ViewportResources, completed_pick_transition,
     viewport_clear_colour,
@@ -186,6 +186,9 @@ pub struct CadmarkApp {
     /// pending pick request. Consumed in the same frame to build the
     /// paint callback.
     pending_pick: Option<(f32, f32)>,
+    /// The next viewport click selects a whole completed part rather than
+    /// the face, edge or vertex under the cursor.
+    part_selection_mode: bool,
     /// Absolute screen position of the in-flight pick, preserved
     /// across frames so the overlay can be positioned when the readback
     /// arrives.
@@ -255,6 +258,7 @@ impl CadmarkApp {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
+            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
@@ -805,7 +809,7 @@ impl CadmarkApp {
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
-                res.set_mesh(&rs.device, Some(&model.mesh));
+                res.set_parts(&rs.device, &model.parts);
                 res.clear_picks();
             }
         }
@@ -827,6 +831,8 @@ impl CadmarkApp {
         self.minimum_distance = None;
         self.renderer.selected_id = 0;
         self.renderer.hover_id = 0;
+        self.renderer.selected_part_id = 0;
+        self.renderer.hover_part_id = 0;
         self.highlighted_line = None;
         self.candidate_line = None;
         self.renderer.highlight_ids.clear();
@@ -848,7 +854,7 @@ impl CadmarkApp {
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
-                res.set_mesh(&rs.device, None);
+                res.set_parts(&rs.device, &[]);
                 res.clear_picks();
             }
         }
@@ -928,6 +934,22 @@ impl CadmarkApp {
         }
     }
 
+    /// Write one part of the model beside the script.
+    fn export_part(&mut self, id: u32, format: ExportFormat) {
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        match project.request_part_export(id, format) {
+            Ok(path) => {
+                self.status = Some(Status::info(format!(
+                    "Exporting part to {}\u{2026}",
+                    path.display()
+                )))
+            }
+            Err(error) => self.status = Some(Status::error(error)),
+        }
+    }
+
     /// Open a path with the system's default handler, reporting failure in
     /// the status bar.
     fn open_externally(&mut self, path: &Path, what: &str) {
@@ -967,9 +989,52 @@ impl CadmarkApp {
         }
     }
 
+    /// Picking ID of the part whose local face and edge numbering the
+    /// current selection belongs to, so a tint applies within that part only.
+    fn active_part_picking_id(&self) -> u32 {
+        self.project()
+            .and_then(|project| project.active_model_part_id)
+            .map(|id| {
+                cadmark_renderer::picking::encode_picking_id(&TopologyElement::Part(PartId(id)))
+            })
+            .unwrap_or(0)
+    }
+
+    /// Take a whole part as the selection, and make its own topology tables
+    /// the domain later face and edge picks resolve against.
+    fn select_whole_part(&mut self, id: PartId) {
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        let Some(part) = project.select_model_part(id.0) else {
+            self.status = Some(Status::error("Selected part is no longer available"));
+            return;
+        };
+        let description = format!(
+            "Selected {} \u{2014} {}",
+            part.name,
+            part.summary.describe()
+        );
+        if let Some(rs) = &self.wgpu_render_state {
+            let mut renderer = rs.renderer.write();
+            if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
+                res.set_active_part(id.0);
+            }
+        }
+        self.clear_selection();
+        self.selection = SelectionState::Selected(TopologyElement::Part(id));
+        self.renderer.selected_id =
+            cadmark_renderer::picking::encode_picking_id(&TopologyElement::Part(id));
+        self.status = Some(Status::info(description));
+    }
+
     /// Handle a completed pick — resolve to selection and open the spatial
     /// comment overlay, or add the element to an open comment.
     fn handle_pick_result(&mut self, element: TopologyElement, screen_pos: (f32, f32)) {
+        if let TopologyElement::Part(id) = element {
+            self.select_whole_part(id);
+            return;
+        }
         let Some(project) = self.project.as_ref() else {
             return;
         };
@@ -995,6 +1060,7 @@ impl CadmarkApp {
         );
         self.selection = SelectionState::Selected(element.clone());
         self.renderer.selected_id = cadmark_renderer::picking::encode_picking_id(&element);
+        self.renderer.selected_part_id = self.active_part_picking_id();
         self.highlighted_line = context.provenance.resolved().map(|entry| entry.source.line);
         if !self.overlay.toggle_anchor(context.clone()) {
             self.overlay.open(
@@ -1030,6 +1096,7 @@ impl CadmarkApp {
         self.hover_readback_pending = hover_pending;
         if let Some(id) = hover {
             self.renderer.hover_id = id;
+            self.renderer.hover_part_id = self.active_part_picking_id();
         }
         match completed_pick_transition(completed, &mut self.pick_in_flight) {
             PickTransition::Waiting => {}
@@ -1291,7 +1358,21 @@ impl CadmarkApp {
                     .and_then(|model| model.bounds);
             }
             ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
+            ToolbarAction::PickPart => {
+                self.part_selection_mode = true;
+                self.status = Some(Status::info("Click a part to select it"));
+            }
             ToolbarAction::Export(format) => self.export(format),
+            ToolbarAction::ExportPart(id, format) => self.export_part(id, format),
+            ToolbarAction::ExportAll(format) => {
+                let ids: Vec<u32> = self
+                    .project()
+                    .map(|project| project.model_parts.iter().map(|part| part.id).collect())
+                    .unwrap_or_default();
+                for id in ids {
+                    self.export_part(id, format);
+                }
+            }
             ToolbarAction::OpenSettings => self.open_settings(),
             ToolbarAction::ToggleProjection => {
                 let next = match self.renderer.camera.projection() {
@@ -1332,6 +1413,19 @@ impl CadmarkApp {
                     })
                     .collect();
                 let part_name = project.part().display_name();
+                let model_parts: Vec<(u32, String, bool)> = project
+                    .model_parts
+                    .iter()
+                    .map(|part| {
+                        (
+                            cadmark_renderer::picking::encode_picking_id(&TopologyElement::Part(
+                                PartId(part.id),
+                            )),
+                            part.name.clone(),
+                            export_decision(&part.validity) == ExportDecision::Ready,
+                        )
+                    })
+                    .collect();
                 let state = ToolbarState {
                     project_dir: &project.dir,
                     script_filename: project.part_file_name(),
@@ -1341,6 +1435,7 @@ impl CadmarkApp {
                     recent_projects: &recent,
                     controls_enabled: project.busy.is_none(),
                     has_model: project.model.is_some(),
+                    model_parts: &model_parts,
                     code_visible: self.code_visible,
                     orthographic: self.renderer.camera.projection() == Projection::Orthographic,
                     export_warning: export_warning.as_deref(),
@@ -1638,6 +1733,10 @@ impl CadmarkApp {
                 .pending_pick
                 .take()
                 .map(|(x, y)| to_pixels(egui::vec2(x, y)));
+            let part_pick_request = self.part_selection_mode.then_some(pick_request).flatten();
+            if part_pick_request.is_some() {
+                self.part_selection_mode = false;
+            }
             let hover_request = hover_local.map(to_pixels).filter(|&pixel| {
                 let probe = (pixel, self.renderer.camera.clone());
                 if self.last_hover_probe.as_ref() == Some(&probe) {
@@ -1659,6 +1758,7 @@ impl CadmarkApp {
                     simple_uniforms: self.renderer.simple_uniforms(aspect),
                     markers: self.renderer.markers.clone(),
                     pick_request,
+                    part_pick_request,
                     hover_request,
                     viewport_size,
                     clear_colour: viewport_clear_colour(self.renderer.target_is_srgb),
@@ -2120,6 +2220,7 @@ mod tests {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
+            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,

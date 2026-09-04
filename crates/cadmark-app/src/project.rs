@@ -55,6 +55,21 @@ pub struct LoadedModel {
     pub validity: Vec<SolidValidity>,
 }
 
+/// One completed part of the model on screen. Part IDs are the worker's
+/// ordered execution identities; names are the script bindings shown to the
+/// user. Each part carries its own provenance and topology tables, because
+/// face, edge and vertex numbering restarts within every part.
+pub struct LoadedPart {
+    pub id: u32,
+    pub name: String,
+    pub summary: ModelSummary,
+    pub ledger: ProvenanceLedger,
+    pub descriptors: GeometryDescriptors,
+    pub model: ModelFile,
+    /// Per-solid kernel validity retained for the export gate.
+    pub validity: Vec<SolidValidity>,
+}
+
 /// What the worker thread is doing, for the status bar and chat.
 #[derive(Debug, Clone)]
 pub enum Busy {
@@ -100,6 +115,11 @@ pub struct Project {
     pub identification: Box<dyn IdentificationStrategy>,
     /// The model on screen, if a script has executed successfully.
     pub model: Option<LoadedModel>,
+    /// Every part the executed script defines, in execution order.
+    pub model_parts: Vec<LoadedPart>,
+    /// The part whose face, edge and vertex IDs the current ledger and
+    /// descriptors belong to.
+    pub active_model_part_id: Option<u32>,
     /// The source that produced the model on screen.
     pub script_source: Option<String>,
     /// Whether the script exists on disk, whether or not it runs.
@@ -181,6 +201,8 @@ impl Project {
             ledger: ProvenanceLedger::new(),
             identification: Box::new(NullIdentification),
             model: None,
+            model_parts: Vec::new(),
+            active_model_part_id: None,
             script_source: None,
             has_script: false,
             script_mtime: None,
@@ -355,6 +377,48 @@ impl Project {
         Ok(path)
     }
 
+    /// Write one part of the model next to the script, from the BREP the
+    /// worker retained for it, without re-running the script.
+    pub fn request_part_export(
+        &mut self,
+        id: u32,
+        format: ExportFormat,
+    ) -> Result<PathBuf, String> {
+        let part = self
+            .model_parts
+            .iter()
+            .find(|part| part.id == id)
+            .ok_or("selected part no longer exists")?;
+        let decision = export_decision(&part.validity);
+        if decision != ExportDecision::Ready {
+            return Err(export_warning(&decision).expect("non-ready decision has warning"));
+        }
+        let (model, name) = (part.model.clone(), part.name.clone());
+        let stem = parts::part_display_name(self.part.file_name());
+        let path = self
+            .dir
+            .join(format!("{stem}-{name}.{}", format.extension()));
+        self.send(OrchestratorCommand::Export {
+            model,
+            format,
+            path: path.clone(),
+        })?;
+        self.exports_in_flight += 1;
+        Ok(path)
+    }
+
+    /// Make one part's local topology IDs the active selection domain after
+    /// it has been picked as a whole.
+    pub fn select_model_part(&mut self, id: u32) -> Option<&LoadedPart> {
+        let part = self.model_parts.iter().find(|part| part.id == id)?;
+        self.ledger = part.ledger.clone();
+        self.identification = Box::new(MeasuredIdentification {
+            descriptors: part.descriptors.clone(),
+        });
+        self.active_model_part_id = Some(id);
+        self.model_parts.iter().find(|part| part.id == id)
+    }
+
     /// Ask the retained worker model for the closest separation of two picked elements.
     pub fn request_minimum_distance(
         &mut self,
@@ -393,7 +457,26 @@ impl Project {
             model.mesh.vertices.len(),
             model.ledger.len(),
         );
-        let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
+        let bounds = Bounds3::from_positions(
+            model
+                .parts
+                .iter()
+                .flat_map(|part| part.mesh.vertices.iter().map(|vertex| vertex.position)),
+        );
+        self.model_parts = model
+            .parts
+            .iter()
+            .map(|part| LoadedPart {
+                id: part.id,
+                name: part.name.clone(),
+                summary: part.summary.clone(),
+                ledger: part.ledger.clone(),
+                descriptors: part.descriptors.clone(),
+                model: part.model.clone(),
+                validity: part.validity.clone(),
+            })
+            .collect();
+        self.active_model_part_id = self.model_parts.last().map(|part| part.id);
         self.ledger = model.ledger;
         self.identification = Box::new(MeasuredIdentification {
             descriptors: model.descriptors.clone(),
@@ -416,6 +499,8 @@ impl Project {
         self.ledger.clear();
         self.identification = Box::new(NullIdentification);
         self.model = None;
+        self.model_parts.clear();
+        self.active_model_part_id = None;
     }
 
     /// Persist the conversation beside the script.
@@ -505,6 +590,56 @@ fn fresh_conversation(dir: &Path, conversation: &mut Conversation) -> Result<Pat
 mod tests {
     use super::*;
 
+    /// A project with no worker behind it: the receiver stands in for the
+    /// orchestrator so a command can be read back off the channel.
+    fn project_for_test(dir: PathBuf) -> (Project, mpsc::Receiver<OrchestratorCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (_result_tx, result_rx) = mpsc::channel();
+        let project = Project {
+            parts: Vec::new(),
+            part: OpenPart::Named("bracket.py".to_string()),
+            dir,
+            cmd_tx,
+            result_rx,
+            history: VersionHistory::new(),
+            conversation: Conversation::new(),
+            ai_model: None,
+            busy: None,
+            ledger: ProvenanceLedger::new(),
+            identification: Box::new(NullIdentification),
+            model: None,
+            model_parts: Vec::new(),
+            active_model_part_id: None,
+            script_source: None,
+            has_script: false,
+            script_mtime: None,
+            script_checked_at: Instant::now(),
+            script_modified_on_disk: false,
+            exports_in_flight: 0,
+            measurements_in_flight: 0,
+        };
+        (project, cmd_rx)
+    }
+
+    fn part_for_export_test(model: ModelFile, validity: Vec<SolidValidity>) -> LoadedPart {
+        LoadedPart {
+            id: 7,
+            name: "bracket".to_string(),
+            summary: ModelSummary {
+                volume: 1.0,
+                bounds_min: [0.0; 3],
+                bounds_max: [1.0; 3],
+                face_count: 1,
+                edge_count: 1,
+                vertex_count: 1,
+            },
+            ledger: ProvenanceLedger::new(),
+            descriptors: GeometryDescriptors::default(),
+            model,
+            validity,
+        }
+    }
+
     #[test]
     fn a_conversation_saved_in_the_project_is_there_when_it_reopens() {
         let dir = tempfile::tempdir().unwrap();
@@ -547,5 +682,56 @@ mod tests {
             std::fs::read_to_string(script).unwrap(),
             "part = Box(10, 10, 10)"
         );
+    }
+
+    #[test]
+    fn exporting_a_part_sends_the_brep_the_worker_retained_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut project, cmd_rx) = project_for_test(dir.path().to_path_buf());
+        let kept_brep = ModelFile(PathBuf::from("/worker-scratch/bracket.brep"));
+        project.model_parts.push(part_for_export_test(
+            kept_brep.clone(),
+            vec![SolidValidity {
+                valid: true,
+                closed: true,
+            }],
+        ));
+
+        let path = project.request_part_export(7, ExportFormat::Stl).unwrap();
+
+        assert_eq!(project.exports_in_flight, 1);
+        match cmd_rx.recv().unwrap() {
+            OrchestratorCommand::Export {
+                model,
+                format,
+                path: command_path,
+            } => {
+                assert_eq!(model, kept_brep);
+                assert_eq!(format, ExportFormat::Stl);
+                assert_eq!(command_path, path);
+            }
+            _ => panic!("part export must send an export command"),
+        }
+    }
+
+    #[test]
+    fn an_unclosed_part_is_refused_before_any_export_command_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut project, cmd_rx) = project_for_test(dir.path().to_path_buf());
+        project.model_parts.push(part_for_export_test(
+            ModelFile(PathBuf::from("/worker-scratch/bracket.brep")),
+            vec![SolidValidity {
+                valid: true,
+                closed: false,
+            }],
+        ));
+
+        let error = project
+            .request_part_export(7, ExportFormat::Stl)
+            .unwrap_err();
+
+        assert!(error.contains("Cannot export"), "unexpected error: {error}");
+        assert_eq!(project.exports_in_flight, 0);
+        assert!(cmd_rx.try_recv().is_err());
     }
 }
