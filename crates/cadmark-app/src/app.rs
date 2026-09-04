@@ -86,12 +86,26 @@ fn record_tool_start(
 
 /// The chat line for a completed turn: the AI's summary, then what
 /// measurably changed so an edit that did more than asked is visible.
-fn turn_chat_message(
-    response_message: &str,
-    before: Option<&cadmark_core::geometry::ModelSummary>,
-    after: &cadmark_core::geometry::ModelSummary,
-) -> String {
+/// What a finished turn reports about the geometry it produced: a solid
+/// compared with the solid before it, or a sketch described in its own
+/// terms, because a profile has nothing to compare a volume against.
+enum TurnGeometry<'a> {
+    Solid {
+        before: Option<&'a cadmark_core::geometry::ModelSummary>,
+        after: &'a cadmark_core::geometry::ModelSummary,
+    },
+    Sketch(&'a cadmark_core::sketch::SketchProfile),
+}
+
+fn turn_chat_message(response_message: &str, geometry: TurnGeometry<'_>) -> String {
     let mut message = response_message.to_string();
+    let (before, after) = match geometry {
+        TurnGeometry::Solid { before, after } => (before, after),
+        TurnGeometry::Sketch(sketch) => {
+            message.push_str(&format!("\n\n{}.", sketch.describe()));
+            return message;
+        }
+    };
     match before {
         Some(before) => match after.describe_change_from(before) {
             Some(change) => message.push_str(&format!(
@@ -196,6 +210,10 @@ pub struct CadmarkApp {
     last_hover_probe: Option<((u32, u32), Camera)>,
     /// Whether a mesh has been uploaded to the GPU.
     has_mesh: bool,
+    /// Whether anything at all is drawn — a solid, a sketch, or both.
+    /// The placeholder and the view gizmo follow this; picking follows
+    /// `has_mesh`, which a sketch does not set.
+    has_geometry: bool,
     wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
     /// What the worker thread renders for the AI: the mesh, camera and
     /// viewport size this thread last showed.
@@ -255,6 +273,7 @@ impl CadmarkApp {
             hover_readback_pending: false,
             last_hover_probe: None,
             has_mesh: false,
+            has_geometry: false,
             wgpu_render_state,
             scene,
             status,
@@ -496,7 +515,10 @@ impl CadmarkApp {
         let Some(project) = self.project.as_mut() else {
             return false;
         };
-        let summary_before = project.model.as_ref().map(|model| model.summary.clone());
+        let summary_before = project
+            .model
+            .as_ref()
+            .and_then(|model| model.summary().cloned());
         let response = project.conversation.push(Message::ai_response(""));
         match project.start_turn(input, history) {
             Ok(_cancel) => {
@@ -620,8 +642,15 @@ impl CadmarkApp {
                     } else {
                         &reply
                     },
-                    turn.summary_before.as_ref(),
-                    &model.summary,
+                    match &model.form {
+                        cadmark_kernel::protocol::ModelForm::Solid(solid) => TurnGeometry::Solid {
+                            before: turn.summary_before.as_ref(),
+                            after: &solid.summary,
+                        },
+                        cadmark_kernel::protocol::ModelForm::Sketch(sketch) => {
+                            TurnGeometry::Sketch(sketch)
+                        }
+                    },
                 );
                 if let Some(message) = conversation.message_mut(turn.response) {
                     message.text = text;
@@ -793,27 +822,65 @@ impl CadmarkApp {
                 " ({untraced} elements have no traceable source line)"
             ));
         }
-        status.push_str(&format!(" \u{2014} {}", describe_validity(&model.validity)));
+        status.push_str(&format!(
+            " \u{2014} {}",
+            match &model.form {
+                cadmark_kernel::protocol::ModelForm::Solid(solid) =>
+                    describe_validity(&solid.validity),
+                // A sketch is not an invalid solid; it is not a solid
+                // yet, and the status line says which.
+                cadmark_kernel::protocol::ModelForm::Sketch(sketch) => sketch.describe(),
+            }
+        ));
         self.status = Some(Status::info(status));
 
         // Picking IDs belong to the model they were assigned for.
         self.clear_selection();
+        let sketch = match &model.form {
+            cadmark_kernel::protocol::ModelForm::Solid(_) => None,
+            cadmark_kernel::protocol::ModelForm::Sketch(sketch) => Some(sketch.clone()),
+        };
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
-                res.set_mesh(&rs.device, Some(&model.mesh));
+                match &sketch {
+                    // A sketch-only result leaves the solid last built on
+                    // the GPU so it can be ghosted behind the profile.
+                    Some(sketch) => res.set_sketch(&rs.device, Some(sketch)),
+                    None => {
+                        res.set_mesh(&rs.device, Some(&model.mesh));
+                        res.set_sketch(&rs.device, None);
+                    }
+                }
                 res.clear_picks();
             }
         }
-        self.has_mesh = true;
+        // Only a solid is pickable: the ghosted mesh belongs to an
+        // earlier script, and this model's ledger cannot explain it.
+        self.has_mesh = sketch.is_none();
+        self.has_geometry = true;
+        self.renderer.ghost_solid = sketch.is_some();
         // A new mesh under a resting cursor must be picked afresh.
         self.last_hover_probe = None;
         let mesh = std::sync::Arc::new(model.mesh.clone());
         let bounds = self
             .project_mut()
             .and_then(|project| project.install_model(model, source));
-        self.scene.set_mesh(Some((mesh, bounds)));
+        match &sketch {
+            Some(sketch) => self
+                .scene
+                .set_sketch(Some((std::sync::Arc::new(sketch.clone()), bounds))),
+            None => {
+                self.scene.set_sketch(None);
+                self.scene.set_mesh(Some((mesh, bounds)));
+            }
+        }
         if let Some(bounds) = bounds {
+            // A sketch is read face-on and flat: the plane it was drawn
+            // on decides the view, and the framing follows it.
+            if let Some(sketch) = &sketch {
+                self.renderer.camera.view_plane_face_on(sketch.plane.normal);
+            }
             self.pending_camera_bounds = Some(bounds);
         }
     }
@@ -835,7 +902,10 @@ impl CadmarkApp {
             project.clear_model();
         }
         self.scene.set_mesh(None);
+        self.scene.set_sketch(None);
         self.has_mesh = false;
+        self.has_geometry = false;
+        self.renderer.ghost_solid = false;
         self.pending_pick = None;
         self.pick_in_flight = None;
         self.clear_selection();
@@ -843,6 +913,7 @@ impl CadmarkApp {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
                 res.set_mesh(&rs.device, None);
+                res.set_sketch(&rs.device, None);
                 res.clear_picks();
             }
         }
@@ -1242,10 +1313,15 @@ impl CadmarkApp {
                 }
             }
             ToolbarAction::FitView => {
-                self.pending_camera_bounds = self
-                    .project()
-                    .and_then(|project| project.model.as_ref())
-                    .and_then(|model| model.bounds);
+                let model = self.project().and_then(|project| project.model.as_ref());
+                // Fitting a sketch returns to the flat view of its own
+                // plane, which is how it was first shown.
+                let plane_normal = model.and_then(|model| model.sketch())
+                    .map(|sketch| sketch.plane.normal);
+                self.pending_camera_bounds = model.and_then(|model| model.bounds);
+                if let Some(normal) = plane_normal {
+                    self.renderer.camera.view_plane_face_on(normal);
+                }
             }
             ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
             ToolbarAction::Export(format) => self.export(format),
@@ -1279,7 +1355,7 @@ impl CadmarkApp {
                 let export_warning = project
                     .model
                     .as_ref()
-                    .and_then(|model| export_warning(&export_decision(&model.validity)));
+                    .and_then(|model| export_warning(&export_decision(model.validity())));
                 let part_options: Vec<PartOption> = project
                     .parts()
                     .iter()
@@ -1413,7 +1489,7 @@ impl CadmarkApp {
                         summary: self
                             .project()
                             .and_then(|project| project.model.as_ref())
-                            .map(|model| &model.summary),
+                            .and_then(|model| model.summary()),
                         selection,
                         measurement: measurement.as_deref(),
                     },
@@ -1622,11 +1698,11 @@ impl CadmarkApp {
             );
             ui.painter().add(callback);
 
-            if !self.has_mesh {
+            if !self.has_geometry {
                 self.paint_viewport_placeholder(ui, rect);
             }
 
-            if self.has_mesh {
+            if self.has_geometry {
                 let view = self.renderer.camera.view_matrix();
                 let axes =
                     std::array::from_fn(|axis| [view[axis][0], view[axis][1], view[axis][2]]);
@@ -1895,7 +1971,7 @@ mod tests {
         CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
         SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
         VersionDialog, ai_services, grounded_comments, measurement_pair, measurement_readout,
-        pending_markers, record_tool_start, stage_pending_comment, turn_chat_message,
+        TurnGeometry, pending_markers, record_tool_start, stage_pending_comment, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2058,6 +2134,7 @@ mod tests {
             hover_readback_pending: false,
             last_hover_probe: None,
             has_mesh: false,
+            has_geometry: false,
             wgpu_render_state: None,
             scene: SceneHandle::new(),
             status: None,
@@ -2085,7 +2162,13 @@ mod tests {
 
     #[test]
     fn first_model_reports_its_measurements() {
-        let message = turn_chat_message("Made a box", None, &summary(1000.0, 6));
+        let message = turn_chat_message(
+            "Made a box",
+            TurnGeometry::Solid {
+                before: None,
+                after: &summary(1000.0, 6),
+            },
+        );
         assert_eq!(
             message,
             "Made a box\n\nModel: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm."
@@ -2095,7 +2178,13 @@ mod tests {
     #[test]
     fn unchanged_edit_reports_measurements_before_and_after() {
         let before = summary(1000.0, 6);
-        let same = turn_chat_message("Renamed a parameter", Some(&before), &before);
+        let same = turn_chat_message(
+            "Renamed a parameter",
+            TurnGeometry::Solid {
+                before: Some(&before),
+                after: &before,
+            },
+        );
         assert_eq!(
             same,
             "Renamed a parameter\n\nModel unchanged. Before: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm. After: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm."
@@ -2105,7 +2194,13 @@ mod tests {
     #[test]
     fn changed_edit_reports_every_measurement_before_and_after() {
         let before = summary(1000.0, 6);
-        let message = turn_chat_message("Added a hole", Some(&before), &summary(900.0, 9));
+        let message = turn_chat_message(
+            "Added a hole",
+            TurnGeometry::Solid {
+                before: Some(&before),
+                after: &summary(900.0, 9),
+            },
+        );
         assert_eq!(
             message,
             "Added a hole\n\nModel change: faces 6 to 9; volume 1000 to 900 mm³ (-10.0%). Before: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm. After: 9 faces, volume 900 mm³, 10 × 10 × 10 mm."
