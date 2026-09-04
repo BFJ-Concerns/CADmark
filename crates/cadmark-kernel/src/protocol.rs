@@ -99,10 +99,15 @@ mod tests {
         };
         let line = serde_json::to_string(&request).unwrap();
         assert!(!line.contains('\n'));
-        assert_eq!(serde_json::from_str::<WorkerRequest>(&line).unwrap(), request);
+        assert_eq!(
+            serde_json::from_str::<WorkerRequest>(&line).unwrap(),
+            request
+        );
 
         let mut ledger = ProvenanceLedger::new();
-        ledger.record_face(FaceId(0), LedgerValue::Untraced).unwrap();
+        ledger
+            .record_face(FaceId(0), LedgerValue::Untraced)
+            .unwrap();
         let reply = WorkerReply::Executed(Box::new(ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger,

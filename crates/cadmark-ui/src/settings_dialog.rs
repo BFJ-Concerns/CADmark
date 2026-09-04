@@ -92,7 +92,11 @@ impl SettingsDialog {
                 );
                 ui.add_space(8.0);
 
-                ui.label(egui::RichText::new("AI provider").strong().color(theme::TEXT_STRONG));
+                ui.label(
+                    egui::RichText::new("AI provider")
+                        .strong()
+                        .color(theme::TEXT_STRONG),
+                );
                 ui.label(
                     egui::RichText::new(
                         "Any OpenAI-compatible endpoint: OpenAI, a gateway in front of Claude \
@@ -135,15 +139,27 @@ impl SettingsDialog {
                         );
                         ui.end_row();
                     });
-                ui.checkbox(&mut form.accepts_images, "The model reads images (enables the render and reference-image tools)");
-                ui.checkbox(&mut form.allow_insecure_http, "Allow a plain-HTTP endpoint (local servers)");
+                ui.checkbox(
+                    &mut form.accepts_images,
+                    "The model reads images (enables the render and reference-image tools)",
+                );
+                ui.checkbox(
+                    &mut form.allow_insecure_http,
+                    "Allow a plain-HTTP endpoint (local servers)",
+                );
 
                 ui.add_space(12.0);
-                ui.label(egui::RichText::new("Script limits").strong().color(theme::TEXT_STRONG));
                 ui.label(
-                    egui::RichText::new("A script that runs past either ceiling is stopped and the AI is told.")
-                        .small()
-                        .color(theme::TEXT_MUTED),
+                    egui::RichText::new("Script limits")
+                        .strong()
+                        .color(theme::TEXT_STRONG),
+                );
+                ui.label(
+                    egui::RichText::new(
+                        "A script that runs past either ceiling is stopped and the AI is told.",
+                    )
+                    .small()
+                    .color(theme::TEXT_MUTED),
                 );
                 egui::Grid::new("settings_limits")
                     .num_columns(2)

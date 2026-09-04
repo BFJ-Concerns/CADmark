@@ -82,7 +82,9 @@ impl SettingsStore {
         match std::fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents)
                 .map_err(|error| format!("{} is not readable: {error}", path.display())),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(UserSettings::default()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(UserSettings::default())
+            }
             Err(error) => Err(format!("could not read {}: {error}", path.display())),
         }
     }

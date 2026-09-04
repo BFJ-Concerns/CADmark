@@ -283,7 +283,8 @@ impl Project {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let contents = serde_json::to_string(&self.conversation).expect("conversation serialises");
+            let contents =
+                serde_json::to_string(&self.conversation).expect("conversation serialises");
             std::fs::write(&path, contents)
         };
         if let Err(error) = write() {

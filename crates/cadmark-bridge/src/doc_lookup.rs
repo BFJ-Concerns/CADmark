@@ -140,8 +140,13 @@ mod tests {
     #[tokio::test]
     async fn a_failed_lookup_tells_the_model_so() {
         use crate::openai_compatible::recording::{provider_failure, recording_server};
-        let (base_url, _, server) =
-            recording_server(vec![provider_failure(500, "server_error", "boom", "exploded")]).await;
+        let (base_url, _, server) = recording_server(vec![provider_failure(
+            500,
+            "server_error",
+            "boom",
+            "exploded",
+        )])
+        .await;
         let client = crate::config::AiConfiguration {
             base_url,
             model: "m".into(),

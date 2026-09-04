@@ -629,10 +629,7 @@ fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 }
 
 /// Upload a tessellated mesh to GPU buffers.
-pub fn upload_mesh(
-    device: &wgpu::Device,
-    mesh: &cadmark_core::mesh::TessellatedMesh,
-) -> GpuMesh {
+pub fn upload_mesh(device: &wgpu::Device, mesh: &cadmark_core::mesh::TessellatedMesh) -> GpuMesh {
     use wgpu::util::DeviceExt;
 
     // Build GPU vertices with face IDs.

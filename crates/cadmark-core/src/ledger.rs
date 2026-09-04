@@ -451,9 +451,14 @@ mod tests {
                 }),
             )
             .unwrap();
-        ledger.record_edge(EdgeId(0), LedgerValue::Untraced).unwrap();
+        ledger
+            .record_edge(EdgeId(0), LedgerValue::Untraced)
+            .unwrap();
         let json = serde_json::to_string(&ledger).unwrap();
-        assert_eq!(serde_json::from_str::<ProvenanceLedger>(&json).unwrap(), ledger);
+        assert_eq!(
+            serde_json::from_str::<ProvenanceLedger>(&json).unwrap(),
+            ledger
+        );
     }
 
     #[test]
