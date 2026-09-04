@@ -13,6 +13,9 @@ use std::time::Instant;
 use cadmark_core::geometry::GeometryContext;
 use cadmark_core::ledger::LedgerValue;
 use cadmark_core::message::{ContextUsage, Conversation, Message, MessageKind, ToolActivity};
+use cadmark_core::pending_comment::{
+    PendingAnchor, PendingComment, PendingCommentId, PendingComments,
+};
 
 use crate::theme;
 
@@ -60,6 +63,12 @@ pub enum ChatAction {
     None,
     /// The user submitted this text.
     Send(String),
+    /// Submit every pending spatial comment with optional chat text as one turn.
+    SendPending {
+        chat: Option<String>,
+    },
+    /// Remove one unsent spatial-comment card.
+    RemovePending(PendingCommentId),
     /// The user asked for the running turn to stop.
     Cancel,
 }
@@ -109,6 +118,7 @@ impl ChatPane {
         ui: &mut egui::Ui,
         conversation: &Conversation,
         context: ContextUsage,
+        pending: &mut PendingComments,
     ) -> ChatAction {
         // The input sits in a bottom panel so it is laid out first and the
         // messages take whatever height remains: however tall the input
@@ -121,10 +131,10 @@ impl ChatPane {
                 bottom: 0,
             }))
             .show_separator_line(false)
-            .show_inside(ui, |ui| self.show_input(ui))
+            .show_inside(ui, |ui| self.show_input(ui, pending))
             .inner;
 
-        egui::CentralPanel::default()
+        let remove = egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show_inside(ui, |ui| {
                 egui::TopBottomPanel::top("chat_context_usage")
@@ -133,13 +143,20 @@ impl ChatPane {
                     .show_inside(ui, |ui| show_context_usage(ui, context));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
-                    .show_inside(ui, |ui| self.show_messages(ui, conversation));
-            });
+                    .show_inside(ui, |ui| self.show_messages(ui, conversation, pending))
+                    .inner
+            })
+            .inner;
 
-        action
+        remove.map_or(action, ChatAction::RemovePending)
     }
 
-    fn show_messages(&mut self, ui: &mut egui::Ui, conversation: &Conversation) {
+    fn show_messages(
+        &mut self,
+        ui: &mut egui::Ui,
+        conversation: &Conversation,
+        pending: &mut PendingComments,
+    ) -> Option<PendingCommentId> {
         let new_message = conversation.len() != self.seen_messages;
         self.seen_messages = conversation.len();
 
@@ -154,6 +171,14 @@ impl ChatPane {
                 for message in conversation.messages() {
                     show_message(ui, message, width);
                 }
+                // Pending cards follow history so bottom sticking keeps a
+                // newly staged card in view rather than hiding it above it.
+                let mut remove = None;
+                for comment in pending.comments_mut() {
+                    if show_pending_comment(ui, comment, width) {
+                        remove = Some(comment.id);
+                    }
+                }
 
                 match &self.activity {
                     ChatActivity::Idle => {}
@@ -164,13 +189,15 @@ impl ChatPane {
                     ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
                 }
                 ui.add_space(4.0);
-            });
+                remove
+            })
+            .inner
     }
 
     /// The input box and the send row under it. The box grows with its
     /// text up to a cap, then scrolls inside itself. Typing is never
     /// blocked by a running turn: the text waits for the turn to end.
-    fn show_input(&mut self, ui: &mut egui::Ui) -> ChatAction {
+    fn show_input(&mut self, ui: &mut egui::Ui, pending: &PendingComments) -> ChatAction {
         let mut action = ChatAction::None;
         let turn_running = matches!(self.activity, ChatActivity::Turn(_));
         let busy = self.activity != ChatActivity::Idle;
@@ -234,6 +261,12 @@ impl ChatPane {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let has_text = !self.input_text.trim().is_empty();
+                let sending_pending = !pending.is_empty();
+                let can_submit = if sending_pending {
+                    pending.can_send()
+                } else {
+                    has_text
+                };
                 if turn_running
                     && ui
                         .add(egui::Button::new(
@@ -245,12 +278,25 @@ impl ChatPane {
                     action = ChatAction::Cancel;
                 }
                 let send = ui.add_enabled(
-                    can_send && has_text,
-                    egui::Button::new(egui::RichText::new("Send").color(theme::TEXT_STRONG))
-                        .fill(theme::ACCENT.gamma_multiply(0.55)),
+                    can_send && can_submit,
+                    egui::Button::new(
+                        egui::RichText::new(if sending_pending {
+                            format!("Send {} comments", pending.comments().len())
+                        } else {
+                            "Send".to_string()
+                        })
+                        .color(theme::TEXT_STRONG),
+                    )
+                    .fill(theme::ACCENT.gamma_multiply(0.55)),
                 );
-                if (send.clicked() || enter_sent) && can_send && has_text {
-                    action = ChatAction::Send(self.input_text.trim().to_string());
+                if (send.clicked() || enter_sent) && can_send && can_submit {
+                    action = if sending_pending {
+                        ChatAction::SendPending {
+                            chat: has_text.then(|| self.input_text.trim().to_string()),
+                        }
+                    } else {
+                        ChatAction::Send(self.input_text.trim().to_string())
+                    };
                     self.input_text.clear();
                     self.focus_input = true;
                 }
@@ -285,6 +331,75 @@ fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
         }
     });
     ui.add_space(4.0);
+}
+
+fn marker_colour(comment: &PendingComment) -> egui::Color32 {
+    let [red, green, blue, alpha] = comment.marker_colour();
+    egui::Color32::from_rgba_unmultiplied(
+        (red * 255.0) as u8,
+        (green * 255.0) as u8,
+        (blue * 255.0) as u8,
+        (alpha * 255.0) as u8,
+    )
+}
+
+fn pending_anchor_label(anchor: &PendingAnchor) -> String {
+    match anchor {
+        PendingAnchor::Live(context) => spatial_chip(context),
+        PendingAnchor::Lost { element } => format!("{} · lost", element.display_label()),
+    }
+}
+
+fn pending_comment_text_id(id: PendingCommentId) -> egui::Id {
+    egui::Id::new(("pending_comment", id.0))
+}
+
+/// Render one editable unsent card. Returns true when the user removes it.
+fn show_pending_comment(ui: &mut egui::Ui, comment: &mut PendingComment, width: f32) -> bool {
+    let colour = marker_colour(comment);
+    let frame = theme::tinted_card(colour);
+    let inner = width - frame.total_margin().sum().x;
+    let mut remove = false;
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+        frame.show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_max_width(inner * 0.85);
+                ui.horizontal_wrapped(|ui| {
+                    theme::chip(ui, &format!("Comment {}", comment.marker_number), colour);
+                    for anchor in &comment.anchors {
+                        let label = pending_anchor_label(anchor);
+                        ui.label(egui::RichText::new(label).small().color(theme::TEXT_MUTED));
+                    }
+                });
+                ui.add(
+                    egui::TextEdit::multiline(&mut comment.text)
+                        .id(pending_comment_text_id(comment.id))
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.horizontal(|ui| {
+                    if comment
+                        .anchors
+                        .iter()
+                        .any(|anchor| matches!(anchor, PendingAnchor::Lost { .. }))
+                    {
+                        ui.label(
+                            egui::RichText::new("Re-point lost geometry before sending")
+                                .small()
+                                .color(theme::ERROR),
+                        );
+                    }
+                    if ui
+                        .button(egui::RichText::new("Remove").color(theme::ERROR))
+                        .clicked()
+                    {
+                        remove = true;
+                    }
+                });
+            });
+        });
+    });
+    remove
 }
 
 /// "looking up build123d docs · 1m 12s · last event 3s ago".
@@ -563,7 +678,7 @@ mod tests {
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
-    use cadmark_core::message::ToolActivity;
+    use cadmark_core::message::{Conversation, ToolActivity};
 
     use super::*;
 
@@ -657,5 +772,69 @@ mod tests {
             last_event: now - std::time::Duration::from_secs(9),
         };
         assert_eq!(turn_status_line(&quiet), "thinking · 1m 15s · quiet for 9s");
+    }
+
+    #[test]
+    fn editing_a_surviving_card_through_its_text_edit_preserves_marker_pairing() {
+        let mut pending = PendingComments::default();
+        let first = pending.add("round this".into(), vec![untraced_face(1)]);
+        let removed = pending.add("remove this comment".into(), vec![untraced_face(2)]);
+        let third = pending.add("chamfer this".into(), vec![untraced_face(3)]);
+        pending.remove(removed).expect("the middle card exists");
+        let third_colour = pending.comments()[1].marker_colour();
+
+        let context = egui::Context::default();
+        context.memory_mut(|memory| memory.request_focus(pending_comment_text_id(third)));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            events: vec![egui::Event::Text(" more".into())],
+            ..Default::default()
+        };
+        let mut pane = ChatPane::new();
+        pane.focus_input = false;
+        let conversation = Conversation::new();
+        let mut action = ChatAction::None;
+        let _ = context.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                action = pane.show(
+                    ui,
+                    &conversation,
+                    cadmark_core::message::ContextUsage {
+                        conversation_tokens: 0,
+                        reference_image_tokens: 0,
+                        window_tokens: 128_000,
+                    },
+                    &mut pending,
+                );
+            });
+        });
+
+        assert_eq!(action, ChatAction::None);
+        assert_eq!(
+            pending
+                .comments()
+                .iter()
+                .map(|comment| (comment.id, comment.marker_number, comment.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(first, 1, "round this"), (third, 3, "chamfer this more")]
+        );
+        assert_eq!(
+            pending.comments()[1].marker_colour(),
+            third_colour,
+            "editing through the card must not replace its marker pairing"
+        );
+    }
+
+    fn untraced_face(face: u32) -> GeometryContext {
+        GeometryContext {
+            element: TopologyElement::Face(FaceId(face)),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
+        }
     }
 }

@@ -59,6 +59,8 @@ All notable changes to this project will be documented in this file.
   could be made to a sketch profile or to the solid, the reply says which
   one it is taking before the script runs, and what it said stays in the
   chat above the tool calls
+- Spatial comments stay as editable, removable pending cards and send together
+  with chat text as one turn; their viewport highlights share each card's colour
 - Coherent dark theme shared by every panel: one accent colour for
   selection in the viewport and spatial comments in chat, three text
   levels, card-based messages
