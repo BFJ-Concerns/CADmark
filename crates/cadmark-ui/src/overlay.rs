@@ -477,7 +477,7 @@ mod tests {
                 ..Default::default()
             };
             input.events.push(egui::Event::PointerMoved(pointer));
-            ctx.run(input, |ctx| {
+            let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     super::show_candidate_choices(ui, anchors, &mut hovered);
                 });
@@ -523,7 +523,7 @@ mod tests {
                 pressed,
                 modifiers: Default::default(),
             });
-            ctx.run(input, |ctx| {
+            let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     super::show_candidate_choices(ui, anchors, &mut hovered);
                 });
