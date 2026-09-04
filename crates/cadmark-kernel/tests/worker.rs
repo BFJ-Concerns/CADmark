@@ -169,29 +169,41 @@ fn assert_round_trip(
     }
 }
 
-#[test]
-fn exports_round_trip_as_closed_solids_at_their_original_scale() {
+fn assert_worker_export_round_trip(format: ExportFormat) {
     let (project, script, mut worker) = project_with_script(CURVED_PART);
     let source = worker
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
     assert!(source.is_printable(), "source model must be a closed solid");
 
-    for format in ExportFormat::ALL {
-        let path = project
-            .path()
-            .join(format!("round-trip.{}", format.extension()));
-        worker
-            .export(&source.model, format, &path, roomy())
-            .unwrap_or_else(|error| panic!("{} export failed: {error}", format.label()));
-        let imported = import_export(&path, format);
-        assert_round_trip(
-            format,
-            source.summary.volume,
-            source.summary.size(),
-            imported,
-        );
-    }
+    let path = project
+        .path()
+        .join(format!("round-trip.{}", format.extension()));
+    worker
+        .export(&source.model, format, &path, roomy())
+        .unwrap_or_else(|error| panic!("{} export failed: {error}", format.label()));
+    let imported = import_export(&path, format);
+    assert_round_trip(
+        format,
+        source.summary.volume,
+        source.summary.size(),
+        imported,
+    );
+}
+
+#[test]
+fn step_export_round_trips_as_a_closed_solid_at_its_original_scale() {
+    assert_worker_export_round_trip(ExportFormat::Step);
+}
+
+#[test]
+fn stl_export_round_trips_as_a_closed_solid_at_its_original_scale() {
+    assert_worker_export_round_trip(ExportFormat::Stl);
+}
+
+#[test]
+fn three_mf_export_round_trips_as_a_closed_solid_at_its_original_scale() {
+    assert_worker_export_round_trip(ExportFormat::ThreeMf);
 }
 
 #[test]
