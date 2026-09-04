@@ -58,7 +58,9 @@ pub fn selection_measurement(
                 format!("Length {} mm", compact(edge.length))
             }
         }),
-        TopologyElement::Vertex(_) => None,
+        // A part's own measurements are its summary, shown elsewhere; the
+        // status bar reports what a picked element within one measures.
+        TopologyElement::Part(_) | TopologyElement::Vertex(_) => None,
     }
 }
 

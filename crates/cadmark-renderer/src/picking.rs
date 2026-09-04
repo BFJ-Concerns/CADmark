@@ -4,20 +4,23 @@
 // Faces, edges, and vertices occupy distinct ID ranges so the type
 // and index can be recovered from a single pixel readback.
 
-use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
+use cadmark_core::geometry::{EdgeId, FaceId, PartId, TopologyElement, VertexId};
 
 /// ID ranges for each element type in the picking pass.
 /// Face IDs:  1..EDGE_OFFSET-1
 /// Edge IDs:  EDGE_OFFSET..VERTEX_OFFSET-1
-/// Vertex IDs: VERTEX_OFFSET..
+/// Vertex IDs: VERTEX_OFFSET..PART_OFFSET-1
+/// Part IDs: PART_OFFSET..
 ///
 /// ID 0 = background (no element).
 const EDGE_OFFSET: u32 = 100_000;
 const VERTEX_OFFSET: u32 = 200_000;
+const PART_OFFSET: u32 = 300_000;
 
 /// Encode a topology element as a picking ID for the colour buffer.
 pub fn encode_picking_id(element: &TopologyElement) -> u32 {
     match element {
+        TopologyElement::Part(PartId(id)) => PART_OFFSET + *id + 1,
         TopologyElement::Face(FaceId(id)) => *id + 1,
         TopologyElement::Edge(EdgeId(id)) => EDGE_OFFSET + *id + 1,
         TopologyElement::Vertex(VertexId(id)) => VERTEX_OFFSET + *id + 1,
@@ -33,8 +36,12 @@ pub fn decode_picking_id(id: u32) -> Option<TopologyElement> {
         Some(TopologyElement::Face(FaceId(id - 1)))
     } else if id < VERTEX_OFFSET {
         Some(TopologyElement::Edge(EdgeId(id - EDGE_OFFSET - 1)))
-    } else {
+    } else if id < PART_OFFSET {
         Some(TopologyElement::Vertex(VertexId(id - VERTEX_OFFSET - 1)))
+    } else if id == PART_OFFSET {
+        None
+    } else {
+        Some(TopologyElement::Part(PartId(id - PART_OFFSET - 1)))
     }
 }
 
@@ -139,6 +146,20 @@ mod tests {
         let id = encode_picking_id(&vertex);
         let decoded = decode_picking_id(id);
         assert_eq!(decoded, Some(vertex));
+    }
+
+    #[test]
+    fn part_ids_use_their_own_range_at_every_boundary() {
+        assert_eq!(
+            decode_picking_id(PART_OFFSET - 1),
+            Some(TopologyElement::Vertex(VertexId(
+                PART_OFFSET - VERTEX_OFFSET - 2
+            )))
+        );
+        assert_eq!(decode_picking_id(PART_OFFSET), None);
+        let part = TopologyElement::Part(PartId(0));
+        assert_eq!(encode_picking_id(&part), PART_OFFSET + 1);
+        assert_eq!(decode_picking_id(PART_OFFSET + 1), Some(part));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
 
-use crate::protocol::{ExecutedModel, ModelFile};
+use crate::protocol::{ExecutedModel, ExecutedPart, ModelFile};
 
 #[derive(Error, Debug)]
 pub enum ExecutionError {
@@ -243,23 +243,40 @@ fn execute_script_source_named(
                 keys.join(", "),
             );
 
-            let shape = crate::tessellation::find_result_shape(&globals)?;
-            let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
-            let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
-            validate_tessellation_ids(&mesh, &ledger)?;
-            let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
-            let (descriptors, summary) =
-                crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
-            log::info!("Model measured: {}", summary.describe());
-            let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
-            let model = keep_model(py, &shape, scratch_dir)?;
+            let shapes = crate::tessellation::find_result_shapes(&globals)?;
+            let mut parts = Vec::with_capacity(shapes.len());
+            for (id, (name, shape)) in shapes.into_iter().enumerate() {
+                let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
+                let mesh = crate::tessellation::tessellate_shape(py, &globals, &shape)?;
+                validate_tessellation_ids(&mesh, &ledger)?;
+                let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
+                let (descriptors, summary) =
+                    crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
+                let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
+                let model = keep_model(py, &shape, scratch_dir)?;
+                log::info!("Part {name} measured: {}", summary.describe());
+                parts.push(ExecutedPart {
+                    id: id as u32,
+                    name,
+                    mesh,
+                    ledger,
+                    descriptors,
+                    summary,
+                    validity,
+                    model,
+                });
+            }
+            let legacy = parts
+                .last()
+                .expect("result discovery returned at least one shape");
             Ok(ExecutedModel {
-                mesh,
-                ledger,
-                descriptors,
-                summary,
-                validity,
-                model,
+                mesh: legacy.mesh.clone(),
+                ledger: legacy.ledger.clone(),
+                descriptors: legacy.descriptors.clone(),
+                summary: legacy.summary.clone(),
+                validity: legacy.validity.clone(),
+                model: legacy.model.clone(),
+                parts,
             })
         })();
 
@@ -498,9 +515,11 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                         (source, "<cadmark-maker-history-probe>", "exec"),
                     )?;
                     builtins.call_method1("exec", (&code, &globals, &globals))?;
-                    let shape = crate::tessellation::find_result_shape(&globals)?;
+                    let (_, shape) = crate::tessellation::find_result_shapes(&globals)?
+                        .pop()
+                        .expect("result discovery returned at least one shape");
                     let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
-                    let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
+                    let mesh = crate::tessellation::tessellate_shape(py, &globals, &shape)?;
                     validate_tessellation_ids(&mesh, &ledger)?;
                     let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
                     let (descriptors, summary) =
@@ -540,6 +559,9 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                             summary,
                             validity,
                             model,
+                            // The probe inspects one shape's maker history;
+                            // per-part discovery is exercised by its own tests.
+                            parts: Vec::new(),
                         },
                         queries,
                     ))
@@ -1409,9 +1431,9 @@ with BuildPart() as part:
         for context in resolved_contexts(&result) {
             let expected_relation = match context.element {
                 TopologyElement::Face(_) => ProvenanceRelation::Generated,
-                TopologyElement::Edge(_) | TopologyElement::Vertex(_) => {
-                    ProvenanceRelation::GeneratedDescendant
-                }
+                TopologyElement::Part(_)
+                | TopologyElement::Edge(_)
+                | TopologyElement::Vertex(_) => ProvenanceRelation::GeneratedDescendant,
             };
             let provenance = entry(&context);
             assert_eq!(provenance.operation, SemanticOperation::Revolve);

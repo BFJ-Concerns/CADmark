@@ -62,6 +62,7 @@ impl IdentificationStrategy for MeasuredIdentification {
     fn identify(&self, element: &TopologyElement) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         match element {
+            TopologyElement::Part(_) => {}
             TopologyElement::Face(id) => {
                 if let Some(face) = self.descriptors.face(*id) {
                     map.insert("surface".into(), face.surface_type.clone());
@@ -109,6 +110,7 @@ pub fn resolve_context(
 ) -> Result<GeometryContext, MissingElement> {
     // Step 1: Provenance lookup.
     let provenance = match element {
+        TopologyElement::Part(_) => None,
         TopologyElement::Face(id) => ledger.lookup_face(*id),
         TopologyElement::Edge(id) => ledger.lookup_edge(*id),
         TopologyElement::Vertex(id) => ledger.lookup_vertex(*id),

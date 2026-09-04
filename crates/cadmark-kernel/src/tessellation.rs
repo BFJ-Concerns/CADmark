@@ -158,13 +158,13 @@ else:
 _cadmark_tess_result = _cadmark_tessellate(_cadmark_ocp_shape)
 ";
 
-/// Extract and tessellate the result shape from a script's namespace.
-pub fn tessellate_from_namespace(
+/// Tessellate a particular discovered result while reusing the script
+/// namespace that owns the helper functions.
+pub(crate) fn tessellate_shape(
     py: Python<'_>,
     namespace: &Bound<'_, PyDict>,
+    shape: &Bound<'_, PyAny>,
 ) -> Result<TessellatedMesh, TessellationError> {
-    let shape = find_result_shape(namespace)?;
-
     namespace
         .set_item("_cadmark_result_shape", &shape)
         .map_err(TessellationError::Python)?;
@@ -209,16 +209,15 @@ pub(crate) fn unwrap_shape<'py>(
     }
 }
 
-/// The 3D result of a script, whichever build123d idiom wrote it: a
-/// completed `BuildPart`'s part, or a `Part`, `Solid`, or `Compound` of
-/// solids bound at the top level (algebra mode, the direct API). When
-/// several qualify, the one bound last wins — the conventional "result"
-/// of a script is its final assignment. A script whose only output is a
-/// sketch or a line has reached no solid yet; that is reported as such
-/// rather than as an error, so the caller can show the profile.
-pub(crate) fn find_result_shape<'py>(
+/// Discover every completed top-level solid in source binding order. A shape
+/// can arrive through a completed `BuildPart`, algebra mode, or the direct API.
+/// Repeated bindings of the same shape are aliases, not extra parts; the last
+/// alias supplies the user-facing binding name. Python has already resolved
+/// repeated bindings of one name before this point, so staged construction
+/// should rebind that name rather than leave intermediate shapes bound.
+pub(crate) fn find_result_shapes<'py>(
     namespace: &Bound<'py, PyDict>,
-) -> Result<Bound<'py, PyAny>, TessellationError> {
+) -> Result<Vec<(String, Bound<'py, PyAny>)>, TessellationError> {
     let mut namespace_debug = Vec::new();
     let mut solids: Vec<(String, Bound<'py, PyAny>)> = Vec::new();
     let mut flat_outputs = Vec::new();
@@ -241,7 +240,7 @@ pub(crate) fn find_result_shape<'py>(
         match type_name.as_str() {
             "BuildPart" => {
                 if let Some(part) = get_non_none_attr(&value, "part")? {
-                    solids.push((name, part));
+                    add_discovered_shape(&mut solids, name, part)?;
                 }
             }
             // Builders hold their result in `_obj`. The public `sketch` and
@@ -259,7 +258,7 @@ pub(crate) fn find_result_shape<'py>(
                 }
             }
             "Part" | "Solid" | "Compound" if has_non_none_attr(&value, "wrapped")? => {
-                solids.push((name, value));
+                add_discovered_shape(&mut solids, name, value)?;
             }
             _ => {}
         }
@@ -272,11 +271,8 @@ pub(crate) fn find_result_shape<'py>(
     };
     log::debug!("Script namespace contents: {namespace_debug}");
 
-    // Dict iteration is insertion order, so the last qualifying binding is
-    // the script's final result.
-    if let Some((name, shape)) = solids.pop() {
-        log::debug!("Result shape is `{name}`");
-        return Ok(shape);
+    if !solids.is_empty() {
+        return Ok(solids);
     }
 
     if !flat_outputs.is_empty() {
@@ -293,6 +289,37 @@ pub(crate) fn find_result_shape<'py>(
         "Expected a 3D result at the top level of the script: a completed `BuildPart`, \
          or a `Part`, `Solid`, or `Compound` bound to a name. Namespace contents: {namespace_debug}"
     )))
+}
+
+fn add_discovered_shape<'py>(
+    solids: &mut Vec<(String, Bound<'py, PyAny>)>,
+    name: String,
+    shape: Bound<'py, PyAny>,
+) -> Result<(), TessellationError> {
+    for (existing_name, existing_shape) in solids.iter_mut() {
+        if same_shape(existing_shape, &shape)? {
+            *existing_name = name;
+            return Ok(());
+        }
+    }
+    solids.push((name, shape));
+    Ok(())
+}
+
+fn same_shape(
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
+) -> Result<bool, TessellationError> {
+    if left.as_ptr() == right.as_ptr() {
+        return Ok(true);
+    }
+    match (
+        get_non_none_attr(left, "wrapped")?,
+        get_non_none_attr(right, "wrapped")?,
+    ) {
+        (Some(left), Some(right)) => Ok(left.as_ptr() == right.as_ptr()),
+        _ => Ok(false),
+    }
 }
 
 fn is_internal_namespace_name(name: &str) -> bool {
@@ -413,17 +440,25 @@ class BuildSketch:
         namespace
     }
 
+    fn discover<'py>(
+        namespace: &Bound<'py, PyDict>,
+    ) -> Result<Vec<(String, Bound<'py, PyAny>)>, TessellationError> {
+        find_result_shapes(namespace)
+    }
+
     #[test]
-    fn a_completed_build_part_is_the_result() {
+    fn production_discovery_keeps_a_completed_build_part() {
         Python::with_gil(|py| {
             let namespace = namespace_from(py, c"part = BuildPart(Part())");
-            let shape = find_result_shape(&namespace).unwrap();
-            assert_eq!(shape.get_type().name().unwrap(), "Part");
+            let shapes = discover(&namespace).unwrap();
+            assert_eq!(shapes.len(), 1);
+            assert_eq!(shapes[0].0, "part");
+            assert_eq!(shapes[0].1.get_type().name().unwrap(), "Part");
         });
     }
 
     #[test]
-    fn algebra_and_direct_api_results_are_accepted_and_the_last_binding_wins() {
+    fn production_discovery_keeps_distinct_builder_direct_and_algebra_parts() {
         Python::with_gil(|py| {
             for script in [
                 c"result = Part()",
@@ -431,15 +466,50 @@ class BuildSketch:
                 c"result = Compound()",
             ] {
                 let namespace = namespace_from(py, script);
-                find_result_shape(&namespace).unwrap();
+                assert_eq!(discover(&namespace).unwrap().len(), 1);
             }
             let namespace = namespace_from(py, c"first = Part()\nsecond = Solid()");
-            let shape = find_result_shape(&namespace).unwrap();
-            assert_eq!(shape.get_type().name().unwrap(), "Solid");
-            // A completed BuildPart bound earlier loses to a later Part.
+            let shapes = discover(&namespace).unwrap();
+            assert_eq!(
+                shapes
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                ["first", "second"]
+            );
             let namespace = namespace_from(py, c"bp = BuildPart(Part())\nfinal = Compound()");
-            let shape = find_result_shape(&namespace).unwrap();
-            assert_eq!(shape.get_type().name().unwrap(), "Compound");
+            let shapes = discover(&namespace).unwrap();
+            assert_eq!(
+                shapes
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+                ["bp", "final"]
+            );
+        });
+    }
+
+    #[test]
+    fn production_discovery_coalesces_an_alias_without_losing_other_parts() {
+        Python::with_gil(|py| {
+            let namespace = namespace_from(
+                py,
+                c"bracket = BuildPart(Part())\ncap = BuildPart(Part())\nresult = cap.part",
+            );
+            let shapes = discover(&namespace).unwrap();
+            assert_eq!(shapes.len(), 2);
+            assert_eq!(shapes[0].0, "bracket");
+            assert_eq!(shapes[1].0, "result");
+        });
+    }
+
+    #[test]
+    fn production_discovery_keeps_the_final_value_of_a_rebound_name() {
+        Python::with_gil(|py| {
+            let namespace = namespace_from(py, c"part = Part()\npart = Part()");
+            let shapes = discover(&namespace).unwrap();
+            assert_eq!(shapes.len(), 1);
+            assert_eq!(shapes[0].0, "part");
         });
     }
 
@@ -452,7 +522,7 @@ class BuildSketch:
                 c"f = Face()",
             ] {
                 let namespace = namespace_from(py, script);
-                let err = find_result_shape(&namespace).unwrap_err();
+                let err = discover(&namespace).unwrap_err();
                 assert!(
                     matches!(err, TessellationError::UnsupportedScriptOutput(_)),
                     "{script:?}"
@@ -466,7 +536,7 @@ class BuildSketch:
     fn reports_missing_result_when_no_shape_exists() {
         Python::with_gil(|py| {
             let namespace = namespace_from(py, c"value = 42");
-            let err = find_result_shape(&namespace).unwrap_err();
+            let err = discover(&namespace).unwrap_err();
             assert!(matches!(err, TessellationError::NoShape(_)));
             assert!(err.to_string().contains("Expected a 3D result"));
             assert!(err.to_string().contains("value: int"));
@@ -477,7 +547,7 @@ class BuildSketch:
     fn tessellation_injects_result_shape_before_running_helper_code() {
         Python::with_gil(|py| {
             let namespace = namespace_from(py, c"part = BuildPart(Part())");
-            let shape = find_result_shape(&namespace).unwrap();
+            let (_, shape) = discover(&namespace).unwrap().pop().unwrap();
             namespace.set_item("_cadmark_result_shape", &shape).unwrap();
             let err = py.run(TESSELLATE_CODE, Some(&namespace), None).unwrap_err();
             assert!(!err.to_string().contains("_cadmark_result_shape"));
@@ -501,7 +571,7 @@ BRepMesh_IncrementalMesh = object()
 math = __import__('math')
 ",
             );
-            let err = find_result_shape(&namespace).unwrap_err();
+            let err = discover(&namespace).unwrap_err();
             let msg = err.to_string();
             assert!(msg.contains("value: int"));
             assert!(!msg.contains("BRepMesh_IncrementalMesh"));
