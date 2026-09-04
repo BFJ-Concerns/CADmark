@@ -5,6 +5,7 @@
 
 pub mod camera;
 pub mod mesh;
+pub mod offscreen;
 pub mod picking;
 pub mod pipeline;
 pub mod viewport;

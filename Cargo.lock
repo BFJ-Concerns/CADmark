@@ -639,6 +639,7 @@ dependencies = [
  "env_logger",
  "log",
  "open",
+ "png",
  "rfd",
  "serde",
  "serde_json",
@@ -710,7 +711,6 @@ dependencies = [
  "cadmark-core",
  "chrono",
  "egui",
- "image",
  "log",
  "serde_json",
 ]
@@ -1969,8 +1969,6 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
- "zune-core",
- "zune-jpeg",
 ]
 
 [[package]]
