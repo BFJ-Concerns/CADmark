@@ -19,6 +19,9 @@ use cadmark_renderer::pipeline::Renderer;
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
+use cadmark_ui::reference_images::{
+    ReferenceImageView, ReferenceImagesAction, ReferenceImagesPanel,
+};
 use cadmark_ui::settings_dialog::{SettingsAction, SettingsDialog, SettingsForm};
 use cadmark_ui::status::{Status, StatusView};
 use cadmark_ui::toolbar::{self, ToolbarAction, ToolbarState};
@@ -26,8 +29,10 @@ use cadmark_ui::version_dialog::{VersionDialog, VersionDialogAction};
 use cadmark_ui::view_gizmo::GizmoAction;
 
 use crate::orchestrator::OrchestratorResult;
-use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
-use crate::turn::{TurnEvent, TurnInput, TurnOutcome, reference_images};
+use crate::project::{
+    Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL, reference_image_files, reference_images,
+};
+use crate::turn::{TurnEvent, TurnInput, TurnOutcome};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::viewport::{
     PickTransition, ViewportCallback, ViewportResources, completed_pick_transition,
@@ -71,6 +76,7 @@ pub struct CadmarkApp {
     settings: UserSettings,
     settings_store: Option<SettingsStore>,
     chat: ChatPane,
+    reference_images: ReferenceImagesPanel,
     overlay: OverlayState,
     renderer: Renderer,
     selection: SelectionState,
@@ -82,6 +88,10 @@ pub struct CadmarkApp {
     settings_dialog: SettingsDialog,
     /// A folder picker running on its own thread reports here.
     folder_pick_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// A reference-image picker running on its own thread reports here.
+    reference_image_pick_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// Avoid repeating the same availability notice for every turn.
+    reference_images_unavailable_noted: bool,
     /// Bounds to frame once the viewport aspect ratio is known.
     pending_camera_bounds: Option<Bounds3>,
     /// Local click coordinates (relative to viewport rect) for the
@@ -142,6 +152,7 @@ impl CadmarkApp {
             settings,
             settings_store,
             chat: ChatPane::new(),
+            reference_images: ReferenceImagesPanel,
             overlay: OverlayState::default(),
             renderer: Renderer::new(),
             selection: SelectionState::None,
@@ -151,6 +162,8 @@ impl CadmarkApp {
             version_dialog: VersionDialog::default(),
             settings_dialog: SettingsDialog::default(),
             folder_pick_rx: None,
+            reference_image_pick_rx: None,
+            reference_images_unavailable_noted: false,
             pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
@@ -205,6 +218,7 @@ impl CadmarkApp {
         );
         self.chat = ChatPane::new();
         self.chat.ai_available = self.project.ai_model.is_some();
+        self.reference_images_unavailable_noted = false;
         self.status = None;
         self.turn = None;
         self.clear_loaded_model();
@@ -239,17 +253,74 @@ impl CadmarkApp {
         self.folder_pick_rx = Some(rx);
     }
 
+    /// Show the system image picker without pausing the frame loop.
+    fn pick_reference_image(&mut self) {
+        if self.reference_image_pick_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("cadmark-reference-image-picker".into())
+            .spawn(move || {
+                let choice = rfd::FileDialog::new()
+                    .set_title("Attach a reference image")
+                    .add_filter("Images", &["png", "jpg", "jpeg"])
+                    .pick_file();
+                let _ = tx.send(choice);
+            })
+            .expect("failed to spawn the reference-image picker thread");
+        self.reference_image_pick_rx = Some(rx);
+    }
+
+    fn poll_reference_image_picker(&mut self) {
+        let Some(rx) = &self.reference_image_pick_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Some(path)) => {
+                self.reference_image_pick_rx = None;
+                match self.project.attach_reference_image(&path) {
+                    Ok(name) => {
+                        self.status = Some(Status::info(format!("Attached reference image {name}")))
+                    }
+                    Err(error) => self.status = Some(Status::error(error)),
+                }
+            }
+            Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
+                self.reference_image_pick_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
     // ── Turns ─────────────────────────────────────────────────────
+
+    /// Load reference images for a turn, making a text-only model's limit
+    /// explicit in the chat rather than quietly sending an unsupported input.
+    fn reference_images_for_turn(&mut self) -> Vec<cadmark_bridge::backend::ImageData> {
+        let images = reference_images(&self.project.dir);
+        if images.is_empty() || self.project.ai_accepts_images {
+            return images;
+        }
+        if !self.reference_images_unavailable_noted {
+            self.project.conversation.push(Message::notice(
+                "Reference images are attached but unavailable to the configured text-only model.",
+            ));
+            self.reference_images_unavailable_noted = true;
+        }
+        Vec::new()
+    }
 
     /// Send a chat message: one turn with this text and no anchors.
     fn send_chat_message(&mut self, text: String) {
         let history = self.project.conversation.clone();
         self.project.conversation.push(Message::user_chat(&text));
+        let images = self.reference_images_for_turn();
         self.start_turn(
             TurnInput {
                 chat: Some(text),
                 comments: Vec::new(),
-                images: reference_images(&self.project.dir),
+                images,
             },
             history,
             Vec::new(),
@@ -263,11 +334,12 @@ impl CadmarkApp {
             .project
             .conversation
             .push(Message::spatial_comment(&text, anchors.clone()));
+        let images = self.reference_images_for_turn();
         self.start_turn(
             TurnInput {
                 chat: None,
                 comments: vec![GroundedComment { text, anchors }],
-                images: reference_images(&self.project.dir),
+                images,
             },
             history,
             vec![id],
@@ -932,6 +1004,8 @@ impl CadmarkApp {
 
     fn show_chat(&mut self, ctx: &egui::Context) {
         let mut action = ChatAction::None;
+        let mut reference_action = ReferenceImagesAction::None;
+        let reference_images = reference_image_views(&self.project.dir);
         egui::SidePanel::right("chat_panel")
             .resizable(true)
             .default_width(380.0)
@@ -941,6 +1015,8 @@ impl CadmarkApp {
                     .inner_margin(egui::Margin::symmetric(10, 8)),
             )
             .show(ctx, |ui| {
+                reference_action = self.reference_images.show(ui, &reference_images);
+                ui.separator();
                 self.chat.activity = match &self.project.busy {
                     None => ChatActivity::Idle,
                     Some(Busy::Building) => ChatActivity::Building,
@@ -961,6 +1037,9 @@ impl CadmarkApp {
             ChatAction::Send(text) => self.send_chat_message(text),
             ChatAction::Cancel => self.project.cancel_turn(),
             ChatAction::None => {}
+        }
+        if reference_action == ReferenceImagesAction::Attach {
+            self.pick_reference_image();
         }
     }
 
@@ -1196,9 +1275,23 @@ fn ai_services(
     cadmark_bridge::build_ai_services(ai, credential).map_err(|error| error.to_string())
 }
 
+/// Load project-local files into the borrowed display model expected by the
+/// UI. The turn path reads the same directory independently as `ImageData`.
+fn reference_image_views(project_dir: &Path) -> Vec<ReferenceImageView> {
+    reference_image_files(project_dir)
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?.to_string();
+            let bytes = std::fs::read(path).ok()?;
+            Some(ReferenceImageView { name, bytes })
+        })
+        .collect()
+}
+
 impl eframe::App for CadmarkApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_results(ctx);
+        self.poll_reference_image_picker();
         self.project.watch_script();
         self.consume_pick_result();
 
@@ -1207,6 +1300,7 @@ impl eframe::App for CadmarkApp {
             || self.project.exports_in_flight > 0
             || self.pick_in_flight.is_some()
             || self.folder_pick_rx.is_some()
+            || self.reference_image_pick_rx.is_some()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }

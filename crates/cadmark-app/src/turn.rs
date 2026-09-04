@@ -151,9 +151,14 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
     ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
         let mut items = history_items(conversation);
+        let images = self
+            .model
+            .accepts_images()
+            .then(|| input.images.clone())
+            .unwrap_or_default();
         items.push(ModelItem::User {
             text: render_input(input),
-            images: input.images.clone(),
+            images,
         });
         let tools = tools_for(self.model.accepts_images());
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
@@ -526,34 +531,6 @@ fn describe_view(view: RenderView) -> &'static str {
         RenderView::Bottom => "bottom",
         RenderView::Isometric => "isometric view",
     }
-}
-
-/// Reference images the model reads with every turn: one per file in the
-/// project folder's `references/` directory.
-pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
-    let mut images = Vec::new();
-    let Ok(entries) = std::fs::read_dir(project_dir.join("references")) else {
-        return images;
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect();
-    paths.sort();
-    for path in paths {
-        let media_type = match path.extension().and_then(|ext| ext.to_str()) {
-            Some("png") => "image/png",
-            Some("jpg" | "jpeg") => "image/jpeg",
-            _ => continue,
-        };
-        if let Ok(bytes) = std::fs::read(&path) {
-            images.push(ImageData {
-                media_type: media_type.to_string(),
-                bytes,
-            });
-        }
-    }
-    images
 }
 
 #[cfg(test)]
@@ -1063,6 +1040,63 @@ mod tests {
         assert!(matches!(
             &second.items[3],
             ModelItem::User { text, images } if text.contains("top") && images.len() == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn reference_images_reach_an_image_model_on_every_request() {
+        let mut model = ScriptedModel::new([lookup("c1", "box dimensions"), text("Done.")]);
+        model.accepts_images = true;
+        let mut harness = Harness::with_script(None, FakeExecutor::new([]));
+        let input = TurnInput {
+            chat: Some("Recreate this bracket".into()),
+            comments: Vec::new(),
+            images: vec![ImageData {
+                media_type: "image/png".into(),
+                bytes: vec![9, 8, 7],
+            }],
+        };
+
+        assert_eq!(
+            harness.run(&model, input, CancelFlag::new()).await,
+            TurnOutcome::Answered
+        );
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "the lookup caused a second provider request"
+        );
+        for request in requests.iter() {
+            assert!(matches!(
+                request.items.first(),
+                Some(ModelItem::User { images, .. })
+                    if images.len() == 1 && images[0].media_type == "image/png" && images[0].bytes == [9, 8, 7]
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn reference_images_are_not_sent_to_a_text_only_model() {
+        let model = ScriptedModel::new([text("I cannot inspect images.")]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([]));
+        let input = TurnInput {
+            chat: Some("Recreate this bracket".into()),
+            comments: Vec::new(),
+            images: vec![ImageData {
+                media_type: "image/jpeg".into(),
+                bytes: vec![4, 5, 6],
+            }],
+        };
+
+        assert_eq!(
+            harness.run(&model, input, CancelFlag::new()).await,
+            TurnOutcome::Answered
+        );
+        let requests = model.requests.lock().unwrap();
+        assert!(matches!(
+            requests[0].items.first(),
+            Some(ModelItem::User { images, .. }) if images.is_empty()
         ));
     }
 

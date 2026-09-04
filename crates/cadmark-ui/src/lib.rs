@@ -8,6 +8,7 @@
 pub mod chat;
 pub mod code_panel;
 pub mod overlay;
+pub mod reference_images;
 pub mod settings_dialog;
 pub mod status;
 pub mod theme;
