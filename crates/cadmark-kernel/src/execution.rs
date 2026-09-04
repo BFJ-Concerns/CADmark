@@ -244,7 +244,8 @@ fn execute_script_source_named(
             );
 
             let shape = crate::tessellation::find_result_shape(&globals)?;
-            let (_raw, ledger, sketch_lineage) = crate::provenance::finalise(py, &session, &shape, source)?;
+            let (_raw, ledger, sketch_lineage) =
+                crate::provenance::finalise(py, &session, &shape, source)?;
             let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
             validate_tessellation_ids(&mesh, &ledger)?;
             let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
@@ -377,10 +378,10 @@ mod tests {
     use cadmark_core::geometry::{
         EdgeId, FaceId, SketchElement, SketchElementKind, TopologyElement, VertexId,
     };
-    use cadmark_core::sketch_lineage::{NoSketchRoute, SketchLineage};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
+    use cadmark_core::sketch_lineage::{NoSketchRoute, SketchLineage};
 
     fn activate_test_runtime() {
         discover_and_activate_venv().expect("test virtual environment should activate");
@@ -503,7 +504,8 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                     )?;
                     builtins.call_method1("exec", (&code, &globals, &globals))?;
                     let shape = crate::tessellation::find_result_shape(&globals)?;
-                    let (_raw, ledger, sketch_lineage) = crate::provenance::finalise(py, &session, &shape, source)?;
+                    let (_raw, ledger, sketch_lineage) =
+                        crate::provenance::finalise(py, &session, &shape, source)?;
                     let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
                     validate_tessellation_ids(&mesh, &ledger)?;
                     let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
@@ -997,8 +999,9 @@ with BuildPart() as part:
         let result = result.unwrap();
         let elements = result.sketch_lineage.elements();
         assert!(
-            elements.iter().all(|(_, source)| source.source.line == 5
-                && source.object == "Rectangle"),
+            elements
+                .iter()
+                .all(|(_, source)| source.source.line == 5 && source.object == "Rectangle"),
             "every sketch element comes from the rectangle: {elements:?}",
         );
         // A rectangle draws one region, four curves and four corners.
