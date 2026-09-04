@@ -730,6 +730,124 @@ with BuildPart() as part:
         assert_bridge_consumers(&result);
     }
 
+    // This matrix is deliberately at `run(source)`: it exercises the same
+    // build123d call path, wrapper installation, finalisation, and consumer
+    // ledger that CADmark uses.  It is a characterisation probe, not a
+    // sketch-lineage implementation; an operation's absence from the final
+    // ledger is the result to investigate and record rather than a reason to
+    // manufacture a substitute route.
+    #[test]
+    fn sketch_prism_history_reaches_the_consumer_ledger() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+"#);
+        let result = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Extrude);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn sketch_revolve_history_reaches_the_consumer_ledger() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch(Plane.XZ):
+        with Locations((6, 0)):
+            Rectangle(4, 4)
+    revolve(axis=Axis.Z)
+"#);
+        let result = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Revolve);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn sketch_loft_history_reaches_the_consumer_ledger() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch(Plane.XY):
+        Rectangle(6, 6)
+    with BuildSketch(Plane.XY.offset(8)):
+        Circle(2)
+    loft()
+"#);
+        let result = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Loft);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn sketch_sweep_history_reaches_the_consumer_ledger() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildLine() as path:
+        Polyline((0, 0, 0), (0, 0, 10), (5, 0, 15))
+    with BuildSketch(Plane.XZ):
+        Circle(1)
+    sweep(path=path.line)
+"#);
+        let result = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Sweep);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn sketch_fillet_history_reaches_the_consumer_ledger() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+    fillet(part.edges().filter_by(Axis.Z), radius=1)
+"#);
+        let result = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Fillet);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn sketch_boolean_chain_history_reaches_the_consumer_ledger() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+    with Locations((5, 0, 0)):
+        Box(10, 10, 5, mode=Mode.SUBTRACT)
+    with Locations((7, 0, 0)):
+        Box(5, 5, 5)
+"#);
+        let result = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::BooleanCut);
+        assert_contains_operation(&result, SemanticOperation::BooleanFuse);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn default_cleanup_and_following_boolean_preserve_sketch_lineage() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(20, 10)
+    extrude(amount=5)
+    with Locations((5, 0, 0)):
+        Box(10, 10, 5, mode=Mode.SUBTRACT)
+"#);
+        let result = result.unwrap();
+        assert_contains_operation(&result, SemanticOperation::Extrude);
+        assert_contains_operation(&result, SemanticOperation::BooleanCut);
+        assert_bridge_consumers(&result);
+    }
+
     #[test]
     fn real_sketch_cut_extrude_through_box_resolves_all_surviving_topology() {
         let (_scratch, result) = run(r#"from build123d import *
