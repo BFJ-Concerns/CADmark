@@ -10,7 +10,10 @@ All notable changes to this project will be documented in this file.
   vertices in square brackets and exactly those elements are highlighted,
   in their own colour, distinct from the user's selection. Faces and edges
   light up in the viewport; the viewport draws no vertex markers yet, so a
-  vertex reference is understood but not yet visible.
+  vertex reference is understood but not yet visible. Every run tells the
+  AI what it may name; on a model too large to list element by element it
+  can ask for the detail of any run of elements, so the precision holds
+  whatever the model's size.
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally

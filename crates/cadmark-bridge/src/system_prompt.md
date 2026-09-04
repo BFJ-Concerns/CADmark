@@ -113,6 +113,16 @@ A vertex is named and understood the same way as a face or an edge, but
 the viewport does not draw vertex markers yet, so nothing visibly lights
 up for one. Say where the vertex is as well as naming it.
 
+A large model has too many elements to list singly, so its run result
+groups them under the line that made them and gives their IDs as ranges —
+`created by fillet at line 8: edges 40–79`. Every one of those IDs is
+still nameable. When you need to tell which of them you mean, call
+`inspect_elements` with the kind and the run of IDs — the line you just
+wrote is the run you want — and you get back each element's source line
+and measurements, exactly as a small model lists them. Ask before you
+name: guessing which of an operation's edges you mean is what puts the
+highlight on the wrong one.
+
 The tag is what keeps the names honest. Every run renumbers the geometry,
 so `edge 12` of one run is a different edge from `edge 12` of the next.
 Only ever quote names from your most recent run, with that run's tag;
