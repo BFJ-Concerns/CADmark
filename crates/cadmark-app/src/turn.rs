@@ -189,6 +189,11 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             }];
         }
         let request = render_input(input);
+        let images = self
+            .model
+            .accepts_images()
+            .then(|| input.images.clone())
+            .unwrap_or_default();
         // The curated example library for the operations this request
         // names, carried before the user's words so the request itself
         // stays last.
@@ -198,7 +203,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         });
         items.push(ModelItem::User {
             text: request,
-            images: input.images.clone(),
+            images,
         });
         let tools = tools_for(self.model.accepts_images());
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
@@ -606,52 +611,6 @@ fn describe_view(view: RenderView) -> &'static str {
         RenderView::Top => "top",
         RenderView::Bottom => "bottom",
         RenderView::Isometric => "isometric view",
-    }
-}
-
-/// Reference images the model reads with every turn: one per file in the
-/// project folder's `references/` directory.
-pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
-    let mut images = Vec::new();
-    let Ok(entries) = std::fs::read_dir(project_dir.join("references")) else {
-        return images;
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect();
-    paths.sort();
-    for path in paths {
-        let Some(media_type) = reference_image_media_type(&path) else {
-            continue;
-        };
-        if let Ok(bytes) = std::fs::read(&path) {
-            images.push(ImageData {
-                media_type: media_type.to_string(),
-                bytes,
-            });
-        }
-    }
-    images
-}
-
-/// Count reference images without opening them. The frame loop needs this for
-/// occupancy display, while a turn alone pays to load their bytes.
-pub fn reference_image_count(project_dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(project_dir.join("references")) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| reference_image_media_type(&entry.path()).is_some())
-        .count()
-}
-
-fn reference_image_media_type(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("png") => Some("image/png"),
-        Some("jpg" | "jpeg") => Some("image/jpeg"),
-        _ => None,
     }
 }
 
@@ -1095,21 +1054,12 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_includes_reference_images_found_in_the_project() {
-        let project = tempfile::tempdir().unwrap();
-        let references = project.path().join("references");
-        std::fs::create_dir(&references).unwrap();
-        std::fs::write(
-            references.join("bracket.png"),
-            "image bytes are not opened for counting",
-        )
-        .unwrap();
+    fn context_usage_includes_reference_images() {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("x".repeat(300)));
 
         let without_images = context_usage(&conversation, 0, 1_000);
-        let with_images =
-            context_usage(&conversation, reference_image_count(project.path()), 1_000);
+        let with_images = context_usage(&conversation, 1, 1_000);
 
         assert_eq!(with_images.conversation_tokens, 75);
         assert_eq!(with_images.reference_image_tokens, REFERENCE_IMAGE_TOKENS);
@@ -1496,6 +1446,66 @@ mod tests {
             &second.items[4],
             ModelItem::User { text, images } if text.contains("top") && images.len() == 1
         ));
+    }
+
+    #[tokio::test]
+    async fn reference_images_reach_an_image_model_on_every_request() {
+        let mut model = ScriptedModel::new([lookup("c1", "box dimensions"), text("Done.")]);
+        model.accepts_images = true;
+        let mut harness = Harness::with_script(None, FakeExecutor::new([]));
+        let input = TurnInput {
+            chat: Some("Recreate this bracket".into()),
+            comments: Vec::new(),
+            images: vec![ImageData {
+                media_type: "image/png".into(),
+                bytes: vec![9, 8, 7],
+            }],
+            context_window_tokens: crate::user_settings::DEFAULT_CONTEXT_WINDOW_TOKENS,
+        };
+
+        assert_eq!(
+            harness.run(&model, input, CancelFlag::new()).await,
+            TurnOutcome::Answered
+        );
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "the lookup caused a second provider request"
+        );
+        for request in requests.iter() {
+            assert!(request.items.iter().any(|item| matches!(
+                item,
+                ModelItem::User { images, .. }
+                    if images.len() == 1 && images[0].media_type == "image/png" && images[0].bytes == [9, 8, 7]
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn reference_images_are_not_sent_to_a_text_only_model() {
+        let model = ScriptedModel::new([text("I cannot inspect images.")]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([]));
+        let input = TurnInput {
+            chat: Some("Recreate this bracket".into()),
+            comments: Vec::new(),
+            images: vec![ImageData {
+                media_type: "image/jpeg".into(),
+                bytes: vec![4, 5, 6],
+            }],
+            context_window_tokens: crate::user_settings::DEFAULT_CONTEXT_WINDOW_TOKENS,
+        };
+
+        assert_eq!(
+            harness.run(&model, input, CancelFlag::new()).await,
+            TurnOutcome::Answered
+        );
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[0].items.iter().all(|item| match item {
+            ModelItem::User { images, .. } => images.is_empty(),
+            ModelItem::Assistant { .. } | ModelItem::ToolResult { .. } => true,
+            ModelItem::ToolCall(_) => false,
+        }));
     }
 
     #[test]

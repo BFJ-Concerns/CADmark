@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use cadmark_bridge::AiServices;
+use cadmark_bridge::backend::{ImageData, TurnModel};
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
@@ -25,6 +26,89 @@ use crate::validity::{ExportDecision, export_decision, export_warning};
 
 /// The one script a project folder holds at present.
 pub const SCRIPT_FILENAME: &str = "part.py";
+
+/// The project-local directory containing images shown to the model.
+pub const REFERENCE_IMAGES_DIR: &str = "references";
+
+/// One project-local reference image, retained for both model input and chat
+/// previews until the project is reopened or another image is attached.
+#[derive(Clone)]
+pub struct ReferenceImage {
+    pub name: String,
+    pub data: ImageData,
+}
+
+/// Reference images the model reads with every turn, ordered by filename.
+pub fn reference_images(project_dir: &Path) -> Vec<ReferenceImage> {
+    let mut images = Vec::new();
+    let Ok(entries) = std::fs::read_dir(project_dir.join(REFERENCE_IMAGES_DIR)) else {
+        return images;
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    for path in paths {
+        let media_type = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("png") => "image/png",
+            Some("jpg" | "jpeg") => "image/jpeg",
+            _ => continue,
+        };
+        if let Ok(bytes) = std::fs::read(&path) {
+            images.push(ReferenceImage {
+                name: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("reference image")
+                    .to_string(),
+                data: ImageData {
+                    media_type: media_type.to_string(),
+                    bytes,
+                },
+            });
+        }
+    }
+    images
+}
+
+/// Persist `source` under a project's reference-image directory.
+pub fn attach_reference_image(project_dir: &Path, source: &Path) -> Result<String, String> {
+    let extension = source
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .filter(|extension| matches!(extension.as_str(), "png" | "jpg" | "jpeg"))
+        .ok_or_else(|| "Choose a PNG or JPEG reference image".to_string())?;
+    let stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .ok_or_else(|| "The image file needs a name".to_string())?;
+    let directory = project_dir.join(REFERENCE_IMAGES_DIR);
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create the reference-image folder: {error}"))?;
+
+    let mut number = 1;
+    let destination = loop {
+        let candidate = if number == 1 {
+            directory.join(format!("{stem}.{extension}"))
+        } else {
+            directory.join(format!("{stem}-{number}.{extension}"))
+        };
+        if !candidate.exists() {
+            break candidate;
+        }
+        number += 1;
+    };
+    std::fs::copy(source, &destination)
+        .map_err(|error| format!("Could not attach {}: {error}", source.display()))?;
+    Ok(destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("reference image")
+        .to_string())
+}
 
 /// Where the conversation is kept, inside the project folder.
 const CONVERSATION_FILENAME: &str = ".cadmark/conversation.json";
@@ -70,6 +154,8 @@ impl Busy {
 /// An open project folder.
 pub struct Project {
     pub dir: PathBuf,
+    /// Images loaded once from the project folder for turns and previews.
+    pub reference_images: Vec<ReferenceImage>,
     cmd_tx: mpsc::Sender<OrchestratorCommand>,
     result_rx: mpsc::Receiver<OrchestratorResult>,
     pub history: VersionHistory,
@@ -77,6 +163,8 @@ pub struct Project {
     /// The AI model in use, for the toolbar badge; absent when AI is
     /// unavailable and the reason is in the conversation.
     pub ai_model: Option<String>,
+    /// Whether the configured model can receive reference images.
+    pub ai_accepts_images: bool,
     pub busy: Option<Busy>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: ProvenanceLedger,
@@ -105,6 +193,7 @@ impl Project {
     /// conversation, start a worker, and ask for the script to be built.
     pub fn open(dir: PathBuf, ai: Result<AiServices, String>, limits: ExecutionLimits) -> Self {
         let dir = dir.canonicalize().unwrap_or(dir);
+        let reference_images = reference_images(&dir);
 
         if let Err(e) = crate::git_ops::ensure_repo(&dir) {
             log::error!("Failed to initialise git repo in {}: {e}", dir.display());
@@ -118,15 +207,18 @@ impl Project {
                  project folder and recorded as a design step.",
             ));
         }
-        let ai_model = match &ai {
-            Ok(services) => Some(services.model.model_name().to_string()),
+        let (ai_model, ai_accepts_images) = match &ai {
+            Ok(services) => (
+                Some(services.model.model_name().to_string()),
+                services.model.accepts_images(),
+            ),
             Err(reason) => {
                 log::warn!("{reason}");
                 conversation.push(Message::notice(format!(
                     "AI is unavailable: {reason}. The model still loads, and you can edit \
                      {SCRIPT_FILENAME} by hand and press Rebuild."
                 )));
-                None
+                (None, false)
             }
         };
         let (cmd_tx, result_rx) =
@@ -142,11 +234,13 @@ impl Project {
 
         let mut project = Self {
             dir,
+            reference_images,
             cmd_tx,
             result_rx,
             history,
             conversation,
             ai_model,
+            ai_accepts_images,
             busy: None,
             ledger: ProvenanceLedger::new(),
             identification: Box::new(NullIdentification),
@@ -165,6 +259,13 @@ impl Project {
 
     pub fn script_path(&self) -> PathBuf {
         self.dir.join(SCRIPT_FILENAME)
+    }
+
+    /// Persist `source` under this project's reference-image directory.
+    pub fn attach_reference_image(&mut self, source: &Path) -> Result<String, String> {
+        let name = attach_reference_image(&self.dir, source)?;
+        self.reference_images = reference_images(&self.dir);
+        Ok(name)
     }
 
     /// Hand a command to the worker.
@@ -438,5 +539,29 @@ mod tests {
             std::fs::read_to_string(script).unwrap(),
             "part = Box(10, 10, 10)"
         );
+    }
+
+    #[test]
+    fn attached_images_are_copied_into_the_project_and_loaded_after_reopen() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("bracket.png");
+        std::fs::write(&source, [1, 2, 3, 4]).unwrap();
+
+        assert_eq!(
+            attach_reference_image(project_dir.path(), &source).unwrap(),
+            "bracket.png"
+        );
+        let destination = project_dir
+            .path()
+            .join(REFERENCE_IMAGES_DIR)
+            .join("bracket.png");
+
+        let images = reference_images(project_dir.path());
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].name, "bracket.png");
+        assert_eq!(images[0].data.media_type, "image/png");
+        assert_eq!(images[0].data.bytes, [1, 2, 3, 4]);
+        assert!(destination.exists());
     }
 }
