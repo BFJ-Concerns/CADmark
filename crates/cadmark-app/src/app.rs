@@ -29,6 +29,7 @@ use crate::orchestrator::OrchestratorResult;
 use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
 use crate::turn::{TurnEvent, TurnInput, TurnOutcome, reference_images};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
+use crate::validity::describe_validity;
 use crate::viewport::{
     PickTransition, ViewportCallback, ViewportResources, completed_pick_transition,
     viewport_clear_colour,
@@ -520,9 +521,7 @@ impl CadmarkApp {
                 " ({untraced} elements have no traceable source line)"
             ));
         }
-        if !model.is_printable() {
-            status.push_str(" \u{2014} not a closed valid solid");
-        }
+        status.push_str(&format!(" \u{2014} {}", describe_validity(&model.validity)));
         self.status = Some(Status::info(status));
 
         // Picking IDs belong to the model they were assigned for.

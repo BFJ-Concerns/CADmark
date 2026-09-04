@@ -30,6 +30,8 @@ use cadmark_core::message::{Conversation, MessageKind};
 use cadmark_kernel::protocol::ExecutedModel;
 use cadmark_kernel::worker::WorkerError;
 
+use crate::validity::describe_validity;
+
 /// What the user sent to start a turn: any chat text, the pending
 /// comments with their anchors, and the project's reference images.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -477,18 +479,8 @@ fn describe_model(model: &ExecutedModel) -> String {
         "Executed successfully. Model: {}.",
         model.summary.describe()
     );
-    match model.validity.len() {
-        0 => text.push_str(" No solid was produced."),
-        1 => text.push_str(if model.is_printable() {
-            " The solid is closed and valid."
-        } else {
-            " The solid is NOT a closed valid solid; it will not print."
-        }),
-        n => text.push_str(&format!(
-            " {n} solids; {} closed and valid.",
-            model.validity.iter().filter(|v| v.is_printable()).count()
-        )),
-    }
+    text.push(' ');
+    text.push_str(&describe_validity(&model.validity));
     let untraced = model.ledger.untraced_count();
     if untraced > 0 {
         text.push_str(&format!(
