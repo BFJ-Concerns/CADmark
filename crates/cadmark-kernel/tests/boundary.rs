@@ -180,20 +180,30 @@ fn code_only(source: &str) -> Vec<String> {
     lines
 }
 
-fn contains_identifier(code: &str, identifier: &str) -> bool {
+fn contains_unqualified_identifier(code: &str, identifier: &str) -> bool {
     code.match_indices(identifier).any(|(start, _)| {
-        let before = code[..start].chars().next_back();
+        let before = code[..start].chars().rev().find(|ch| !ch.is_whitespace());
         let after = code[start + identifier.len()..].chars().next();
-        !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+        before != Some(':')
+            && !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
             && !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
     })
 }
 
-fn starts_use_statement(line: &str) -> bool {
-    let line = line.trim_start();
+fn starts_plain_use_statement(line: &str) -> bool {
     line.starts_with("use ")
         || line.starts_with("pub use ")
         || (line.starts_with("pub(") && line.contains(") use "))
+}
+
+fn starts_use_statement(line: &str) -> bool {
+    let line = line.trim_start();
+    if starts_plain_use_statement(line) {
+        return true;
+    }
+    line.strip_prefix("#[")
+        .and_then(|attribute| attribute.split_once(']'))
+        .is_some_and(|(_, statement)| starts_plain_use_statement(statement.trim_start()))
 }
 
 /// Local names made available by a SemanticOperation use declaration in this
@@ -271,9 +281,9 @@ fn operation_in_pattern(
     }) {
         return Some(variant);
     }
-    imported
-        .iter()
-        .find_map(|(local, variant)| contains_identifier(pattern, local).then(|| variant.clone()))
+    imported.iter().find_map(|(local, variant)| {
+        contains_unqualified_identifier(pattern, local).then(|| variant.clone())
+    })
 }
 
 /// Returns the operation variant when a line branches on it. Match arms only
@@ -415,6 +425,9 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
     let alias_import = imported_operation_variants(&code_only(
         "use cadmark_core::ledger::SemanticOperation::Fillet as Round;",
     ));
+    let attribute_import = imported_operation_variants(&code_only(
+        "#[allow(dead_code)] use cadmark_core::ledger::SemanticOperation::Fillet;",
+    ));
     let data_only = code_only(
         "let cause = describe(\n    cadmark_core::ledger::SemanticOperation::Fillet,\n);",
     );
@@ -467,9 +480,13 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
         Some("Fillet".to_owned())
     );
     assert_eq!(
-        operation_branch_on_line("Corner::Fillet => render(),", &no_imports, false),
+        operation_branch_on_line("Fillet => render(),", &attribute_import, false),
+        Some("Fillet".to_owned())
+    );
+    assert_eq!(
+        operation_branch_on_line("Corner::Fillet => render(),", &single_import, false),
         None,
-        "a data-only operation reference does not make another enum's variant a kernel branch"
+        "an imported operation does not make another enum's qualified variant a kernel branch"
     );
     assert_eq!(
         operation_branch_on_line("Self::Fillet => render(),", &no_imports, false),
