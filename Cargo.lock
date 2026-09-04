@@ -710,6 +710,7 @@ dependencies = [
  "cadmark-core",
  "chrono",
  "egui",
+ "image",
  "log",
  "serde_json",
 ]
@@ -1968,6 +1969,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
