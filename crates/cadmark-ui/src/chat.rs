@@ -587,7 +587,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
-        chosen_candidate: None,
+            chosen_candidate: None,
         };
         assert_eq!(spatial_chip(&resolved), "face 1 · line 7");
         let ambiguous = GeometryContext {
@@ -596,7 +596,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
-        chosen_candidate: None,
+            chosen_candidate: None,
         };
         assert_eq!(spatial_chip(&ambiguous), "edge 2 · lines 3/9");
         let untraced = GeometryContext {
@@ -605,7 +605,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
-        chosen_candidate: None,
+            chosen_candidate: None,
         };
         assert_eq!(spatial_chip(&untraced), "edge 2 · untraced");
     }

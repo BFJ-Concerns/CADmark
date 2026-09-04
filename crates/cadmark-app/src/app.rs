@@ -1704,7 +1704,10 @@ fn standard_view(view: toolbar::StandardView) -> StandardView {
 /// The footprint is taken whole. Vertices are carried even though no pass
 /// draws them, so the highlight set says what the ledger says rather than
 /// what the renderer currently happens to consume.
-fn candidate_highlight_ids(ledger: &cadmark_core::ledger::ProvenanceLedger, operation_id: u64) -> Vec<u32> {
+fn candidate_highlight_ids(
+    ledger: &cadmark_core::ledger::ProvenanceLedger,
+    operation_id: u64,
+) -> Vec<u32> {
     cadmark_core::candidates::candidate_footprint(ledger, operation_id)
         .iter()
         .map(cadmark_renderer::picking::encode_picking_id)
@@ -1835,8 +1838,8 @@ mod tests {
     use super::{
         CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
         SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, candidate_highlight_ids, measurement_pair,
-        measurement_readout, record_tool_start, turn_chat_message,
+        VersionDialog, ai_services, candidate_highlight_ids, measurement_pair, measurement_readout,
+        record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2060,7 +2063,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: vec![],
-        chosen_candidate: None,
+            chosen_candidate: None,
         };
         let first = anchor(1);
         let second = anchor(4);
@@ -2426,7 +2429,6 @@ mod tests {
         );
         assert!(!candidate_highlight_ids(&ledger, 1).is_empty());
     }
-
 
     /// C28's start view and part-name dialog are reached only from this
     /// file. A merge that drops those modules and this file's calls to them
