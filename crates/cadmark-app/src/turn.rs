@@ -23,15 +23,17 @@ use cadmark_bridge::backend::{
 use cadmark_bridge::examples;
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
 use cadmark_bridge::tools::{
-    LOOKUP_DOCS, LookupDocsArgs, RENDER_VIEW, RUN_SCRIPT, RenderView, RenderViewArgs,
-    RunScriptArgs, tools_for, unavailable_tools_note,
+    INSPECT_ELEMENTS, InspectElementsArgs, LOOKUP_DOCS, LookupDocsArgs, RENDER_VIEW, RUN_SCRIPT,
+    RenderView, RenderViewArgs, RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
+use cadmark_core::geometry::TopologyElement;
 use cadmark_core::mesh::TessellatedMesh;
 use cadmark_core::message::{ContextUsage, Conversation, MessageKind};
 use cadmark_kernel::protocol::ExecutedModel;
 use cadmark_kernel::worker::WorkerError;
 
+use crate::geometry_reference::{self, ExecutionTag, ReferenceScope};
 use crate::validity::describe_validity;
 
 /// What the user sent to start a turn: any chat text, the pending
@@ -81,9 +83,14 @@ pub enum TurnEvent {
         model: Box<ExecutedModel>,
         source: String,
     },
+    GeometryReferenced {
+        elements: Vec<TopologyElement>,
+    },
     /// The earlier conversation has been replaced by this model-written
     /// account before the next request could approach its context limit.
-    ConversationCondensed { summary: String },
+    ConversationCondensed {
+        summary: String,
+    },
 }
 
 /// How a turn ended.
@@ -212,6 +219,9 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
+        // Assigned by the only exit from the loop that reaches the reply;
+        // every other exit returns.
+        let final_reply;
 
         loop {
             if self.cancel.is_cancelled() {
@@ -257,6 +267,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 });
             }
             if response.tool_calls.is_empty() {
+                final_reply = response.text;
                 break;
             }
 
@@ -270,34 +281,37 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     arguments: call.arguments.clone(),
                 });
                 let mut rendered = None;
-                let (output, failed) = match self.run_tool(&call, &mut attempt, &mut emit).await {
-                    ToolRun::Output { output, failed } => (output, failed),
-                    ToolRun::Rendered { image } => {
-                        rendered = Some(image);
-                        ("rendered; the image follows".to_string(), false)
-                    }
-                    ToolRun::Built {
-                        code,
-                        model,
-                        summary,
-                    } => {
-                        // Before the event: the UI thread shows this mesh
-                        // a frame later, and a render may be asked for in
-                        // this same response.
-                        self.render.model_built(&model.mesh);
-                        emit(TurnEvent::ModelBuilt {
-                            model: model.clone(),
-                            source: code.clone(),
-                        });
-                        let output = describe_model(&model);
-                        last_good = Some((code, model, summary));
-                        last_failure = None;
-                        (output, false)
-                    }
-                    ToolRun::Abort(outcome) => {
-                        return self.abort(original.as_deref(), outcome);
-                    }
-                };
+                let built = last_good.as_ref().map(|(_, model, _)| &**model);
+                let (output, failed) =
+                    match self.run_tool(&call, built, &mut attempt, &mut emit).await {
+                        ToolRun::Output { output, failed } => (output, failed),
+                        ToolRun::Rendered { image } => {
+                            rendered = Some(image);
+                            ("rendered; the image follows".to_string(), false)
+                        }
+                        ToolRun::Built {
+                            code,
+                            model,
+                            summary,
+                        } => {
+                            // Before the event: the UI thread shows this mesh
+                            // a frame later, and a render may be asked for in
+                            // this same response.
+                            self.render.model_built(&model.mesh);
+                            emit(TurnEvent::ModelBuilt {
+                                model: model.clone(),
+                                source: code.clone(),
+                            });
+                            let tag = geometry_reference::execution_tag(&model);
+                            let output = describe_model(&model, &tag);
+                            last_good = Some((code, model, summary));
+                            last_failure = None;
+                            (output, false)
+                        }
+                        ToolRun::Abort(outcome) => {
+                            return self.abort(original.as_deref(), outcome);
+                        }
+                    };
                 if failed && call.name == RUN_SCRIPT {
                     last_failure = Some(output.clone());
                 }
@@ -324,6 +338,21 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 }
             }
         }
+
+        // What the reply pointed at. The scope is this turn's own
+        // execution where there was one — provenance is rebuilt by every
+        // run, so an ID is only meaningful against the ledger that
+        // assigned it. With nothing executed, only the elements the user
+        // pointed at this turn can be resolved; anything else, including
+        // an ID quoted from an earlier turn, resolves to nothing.
+        let anchors = anchored_elements(input);
+        let scope = match &last_good {
+            Some((_, model, _)) => ReferenceScope::Model { model },
+            None => ReferenceScope::Anchors(&anchors),
+        };
+        emit(TurnEvent::GeometryReferenced {
+            elements: geometry_reference::resolve_references(&final_reply, &scope),
+        });
 
         match last_good {
             Some((code, model, summary)) => {
@@ -374,9 +403,12 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         }
     }
 
+    /// Run one tool call. `built` is the model this turn's last successful
+    /// execution produced, which the geometry tools answer from.
     async fn run_tool(
         &mut self,
         call: &ToolCall,
+        built: Option<&ExecutedModel>,
         attempt: &mut u32,
         emit: &mut (impl FnMut(TurnEvent) + Send),
     ) -> ToolRun {
@@ -424,6 +456,38 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 ToolRun::Output {
                     output: answer,
                     failed: false,
+                }
+            }
+            INSPECT_ELEMENTS => {
+                let args: InspectElementsArgs = match serde_json::from_value(call.arguments.clone())
+                {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                emit(TurnEvent::Phase(
+                    "looking at the geometry in detail".to_string(),
+                ));
+                match built {
+                    // The tag is recomputed from the model in hand, so
+                    // the names this answer offers are only ever the
+                    // current execution's own.
+                    Some(model) => ToolRun::Output {
+                        output: geometry_reference::describe_run(
+                            model,
+                            &geometry_reference::execution_tag(model),
+                            args.kind,
+                            args.first,
+                            args.last,
+                        ),
+                        failed: false,
+                    },
+                    None => ToolRun::Output {
+                        output: "Nothing has been executed this turn, so there are no elements \
+                                 to detail. Run the script first; its result lists what you can \
+                                 ask about."
+                            .to_string(),
+                        failed: true,
+                    },
                 }
             }
             RENDER_VIEW => {
@@ -575,7 +639,7 @@ pub fn context_usage(
 }
 
 /// What the model reads after a successful execution.
-fn describe_model(model: &ExecutedModel) -> String {
+fn describe_model(model: &ExecutedModel, tag: &ExecutionTag) -> String {
     let mut text = format!(
         "Executed successfully. Model: {}.",
         model.summary.describe()
@@ -588,13 +652,27 @@ fn describe_model(model: &ExecutedModel) -> String {
             " {untraced} elements came from operations CADmark cannot trace."
         ));
     }
+    // The inventory the reply's references are written from: the model can
+    // only name an element whose ID it has been given.
+    text.push_str(&geometry_reference::describe_elements(model, tag));
     text
+}
+
+/// Every element the user's comments in this turn anchored.
+fn anchored_elements(input: &TurnInput) -> Vec<TopologyElement> {
+    input
+        .comments
+        .iter()
+        .flat_map(|comment| comment.anchors.iter())
+        .map(|anchor| anchor.element.clone())
+        .collect()
 }
 
 fn describe_tool(name: &str) -> &str {
     match name {
         RUN_SCRIPT => "run the script",
         LOOKUP_DOCS => "look up the docs",
+        INSPECT_ELEMENTS => "look at the geometry in detail",
         RENDER_VIEW => "look at the render",
         other => other,
     }
@@ -684,8 +762,14 @@ mod tests {
 
     use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
     use cadmark_bridge::backend::{DeltaSink, ModelResponse};
-    use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
-    use cadmark_core::ledger::ProvenanceLedger;
+    use cadmark_core::geometry::{
+        EdgeDescriptor, EdgeId, GeometryDescriptors, ModelSummary, SolidValidity, TopologyElement,
+        VertexId,
+    };
+    use cadmark_core::ledger::{
+        LedgerValue, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation,
+        SourceRef,
+    };
     use cadmark_core::limits::{ExecutionLimits, LimitHit};
     use cadmark_core::mesh::TessellatedMesh;
     use cadmark_core::message::Message;
@@ -726,8 +810,20 @@ mod tests {
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<ModelResponse, BackendError>> + Send + 'a>,
         > {
+            // A real model copies the tag out of the inventory it was
+            // just handed; a scripted one writes `{tag}` and the double
+            // does the copying, so the tag under test is always the one
+            // the product advertised.
+            let tag = tag_offered_by(&request);
             self.requests.lock().unwrap().push(request);
-            let next = self.responses.lock().unwrap().pop_front();
+            let next = self.responses.lock().unwrap().pop_front().map(|response| {
+                response.map(|mut response| {
+                    if let Some(tag) = &tag {
+                        response.text = response.text.replace("{tag}", tag);
+                    }
+                    response
+                })
+            });
             Box::pin(async move {
                 if cancel.is_cancelled() {
                     return Err(BackendError::Cancelled);
@@ -799,6 +895,24 @@ mod tests {
         }
     }
 
+    /// The execution tag the most recent tool result offered, as the
+    /// model would read it out of the inventory.
+    fn tag_offered_by(request: &ModelRequest) -> Option<String> {
+        request
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                ModelItem::ToolResult { output, .. } => output
+                    .split("this run's tag @")
+                    .nth(1)
+                    .map(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric()).next()),
+                _ => None,
+            })
+            .flatten()
+            .map(str::to_string)
+    }
+
     fn text(reply: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
             text: reply.to_string(),
@@ -813,6 +927,17 @@ mod tests {
                 id: id.to_string(),
                 name: RUN_SCRIPT.to_string(),
                 arguments: serde_json::json!({"code": code, "summary": summary}),
+            }],
+        })
+    }
+
+    fn inspect(id: &str, kind: &str, first: u32, last: u32) -> Result<ModelResponse, BackendError> {
+        Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                name: INSPECT_ELEMENTS.to_string(),
+                arguments: serde_json::json!({"kind": kind, "first": first, "last": last}),
             }],
         })
     }
@@ -835,6 +960,7 @@ mod tests {
         outcomes: Arc<Mutex<VecDeque<Result<(), WorkerError>>>>,
         executed: Arc<Mutex<Vec<String>>>,
         block_restoration: bool,
+        built: fn() -> ExecutedModel,
     }
 
     impl FakeExecutor {
@@ -843,6 +969,7 @@ mod tests {
                 outcomes: Arc::new(Mutex::new(outcomes.into_iter().collect())),
                 executed: Arc::new(Mutex::new(Vec::new())),
                 block_restoration: false,
+                built: sample_model,
             }
         }
 
@@ -857,12 +984,35 @@ mod tests {
         fn executed(&self) -> Vec<String> {
             self.executed.lock().unwrap().clone()
         }
+
+        fn building(mut self, built: fn() -> ExecutedModel) -> Self {
+            self.built = built;
+            self
+        }
     }
 
     fn sample_model() -> ExecutedModel {
+        let mut ledger = ProvenanceLedger::new();
+        for id in 0..4 {
+            ledger
+                .record_edge(EdgeId(id), sample_source(2, SemanticOperation::Box))
+                .unwrap();
+        }
+        ledger
+            .record_edge(EdgeId(4), sample_source(3, SemanticOperation::Fillet))
+            .unwrap();
+        ledger
+            .record_face(
+                cadmark_core::geometry::FaceId(0),
+                sample_source(2, SemanticOperation::Box),
+            )
+            .unwrap();
+        ledger
+            .record_vertex(VertexId(0), sample_source(2, SemanticOperation::Box))
+            .unwrap();
         ExecutedModel {
             mesh: TessellatedMesh::default(),
-            ledger: ProvenanceLedger::new(),
+            ledger,
             descriptors: GeometryDescriptors::default(),
             summary: ModelSummary {
                 volume: 1000.0,
@@ -880,6 +1030,49 @@ mod tests {
         }
     }
 
+    /// A model with more elements than one tool result lists singly: a box
+    /// on line 2 that made forty edges and a fillet on line 3 that made
+    /// forty more, each edge a different length. The run result groups
+    /// these into ID ranges, so naming one of the fillet's edges takes an
+    /// ask before it can be a reference.
+    fn large_model() -> ExecutedModel {
+        let mut model = sample_model();
+        model.ledger = ProvenanceLedger::new();
+        for id in 0..80 {
+            let (line, operation) = if id < 40 {
+                (2, SemanticOperation::Box)
+            } else {
+                (3, SemanticOperation::Fillet)
+            };
+            model
+                .ledger
+                .record_edge(EdgeId(id), sample_source(line, operation))
+                .unwrap();
+        }
+        model.descriptors.edges = (0..80)
+            .map(|id| EdgeDescriptor {
+                curve_type: "line".to_string(),
+                length: 10.0 + f64::from(id),
+                radius: None,
+                centre: [f64::from(id), 0.0, 0.0],
+                neighbours: Vec::new(),
+            })
+            .collect();
+        model
+    }
+
+    fn sample_source(line: u32, operation: SemanticOperation) -> LedgerValue {
+        LedgerValue::Resolved(ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation,
+            operation_id: u64::from(line),
+            relation: ProvenanceRelation::Generated,
+        })
+    }
+
     impl ScriptExecutor for FakeExecutor {
         fn execute(
             &mut self,
@@ -893,7 +1086,7 @@ mod tests {
                 std::fs::remove_file(script_path).unwrap();
                 std::fs::create_dir(script_path).unwrap();
             }
-            outcome.map(|()| sample_model())
+            outcome.map(|()| (self.built)())
         }
     }
 
@@ -1006,6 +1199,33 @@ mod tests {
 
         fn on_disk(&self) -> Option<String> {
             std::fs::read_to_string(&self.script).ok()
+        }
+
+        /// The elements the finished reply referred to.
+        fn references(&self) -> Vec<TopologyElement> {
+            self.events
+                .iter()
+                .find_map(|event| match event {
+                    TurnEvent::GeometryReferenced { elements } => Some(elements.clone()),
+                    _ => None,
+                })
+                .expect("every finished turn reports what its reply referred to")
+        }
+
+        /// Every tool call's output, in order, as the model read them.
+        fn tool_outputs(&self) -> Vec<String> {
+            self.events
+                .iter()
+                .filter_map(|event| match event {
+                    TurnEvent::ToolFinished { output, .. } => Some(output.clone()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The output of the last tool call, as the model read it.
+        fn last_tool_output(&self) -> String {
+            self.tool_outputs().pop().expect("a tool ran")
         }
 
         fn phases(&self) -> Vec<&str> {
@@ -1268,7 +1488,10 @@ mod tests {
             item,
             ModelItem::ToolResult { call_id, output } if call_id == "c3" && output.contains("closed and valid")
         )));
-        assert_eq!(last.tools.len(), 2, "no render tool for a text-only model");
+        assert!(
+            !last.tools.iter().any(|tool| tool.name == RENDER_VIEW),
+            "no render tool for a text-only model"
+        );
     }
 
     #[tokio::test]
@@ -1526,7 +1749,13 @@ mod tests {
             .await;
         assert_eq!(outcome, TurnOutcome::Answered);
         let requests = model.requests.lock().unwrap();
-        assert_eq!(requests[0].tools.len(), 3, "the render tool is offered");
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == RENDER_VIEW),
+            "the render tool is offered"
+        );
         let second = &requests[1];
         assert!(
             matches!(&second.items[3], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
@@ -1817,5 +2046,180 @@ mod tests {
         assert!(matches!(&items[1], ModelItem::ToolCall(call) if call.id == "c1"));
         assert!(matches!(&items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1"));
         assert!(matches!(&items[3], ModelItem::Assistant { text } if text == "Made a box."));
+    }
+
+    #[tokio::test]
+    async fn a_reply_referring_to_one_edge_of_a_line_highlights_that_edge_alone() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("Rounded [edge 1 @{tag}]; the other edges of that line are untouched."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        let outcome = harness
+            .run(&model, chat("round one edge"), CancelFlag::new())
+            .await;
+
+        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+        // Line 2 made edges 0 to 3; naming one of them highlights one.
+        assert_eq!(harness.references(), vec![TopologyElement::Edge(EdgeId(1))]);
+    }
+
+    #[tokio::test]
+    async fn on_a_model_too_large_to_list_singly_the_detail_is_asked_for_and_one_element_named() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1).fillet()", "Fillet"),
+            // The run result grouped line 3's edges into a range, so the
+            // model asks for that range before it can say which it means.
+            inspect("c2", "edge", 40, 79),
+            text("Rounded [edge 71 @{tag}], the 81 mm one."),
+        ]);
+        let mut harness =
+            Harness::with_script(None, FakeExecutor::new([Ok(())]).building(large_model));
+
+        let outcome = harness
+            .run(&model, chat("round the deepest edge"), CancelFlag::new())
+            .await;
+
+        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+        let outputs = harness.tool_outputs();
+        // The run result named the range and where to get its detail,
+        // not the elements themselves.
+        assert!(outputs[0].contains("created by fillet at line 3: edges 40–79"));
+        assert!(!outputs[0].contains("- [edge 71 "), "{}", outputs[0]);
+        // The ask returned it, measurement and all.
+        assert!(
+            outputs[1].contains("- [edge 71 @") && outputs[1].contains("length 81 mm"),
+            "{}",
+            outputs[1]
+        );
+        // And exactly the one element named is highlighted — not the
+        // forty its source line produced.
+        assert_eq!(
+            harness.references(),
+            vec![TopologyElement::Edge(EdgeId(71))]
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_for_detail_before_anything_is_built_answers_that_there_is_none() {
+        let model = ScriptedModel::new([inspect("c1", "edge", 0, 9), text("Nothing to point at.")]);
+        let mut harness = Harness::with_script(Some("OLD = 1"), FakeExecutor::new([]));
+
+        harness
+            .run(&model, chat("which edge is which?"), CancelFlag::new())
+            .await;
+
+        // Nothing is remembered across turns, so the tool has no ledger
+        // to answer from and says so rather than naming an element.
+        let answer = harness.last_tool_output();
+        assert!(
+            answer.contains("Nothing has been executed this turn"),
+            "{answer}"
+        );
+        assert!(!answer.contains("- ["), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_only_mentions_geometry_in_prose_highlights_nothing() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("I filleted the top edge of the box, near face 0 (edge 1 @{tag})."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("round one edge"), CancelFlag::new())
+            .await;
+
+        assert!(harness.references().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reference_to_an_element_the_model_does_not_have_highlights_nothing() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("Rounded [edge 40 @{tag}] and [vertex 9 @{tag}] and [edge 1]."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("round one edge"), CancelFlag::new())
+            .await;
+
+        assert!(harness.references().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_run_script_result_names_every_element_the_reply_can_reference() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("Done."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("make a box"), CancelFlag::new())
+            .await;
+
+        let output = harness.last_tool_output();
+        assert!(output.contains("Executed successfully."), "{output}");
+        assert!(output.contains("]: created by box at line 2"), "{output}");
+        assert!(
+            output.contains("]: created by fillet at line 3"),
+            "{output}"
+        );
+        let tag = output
+            .split("this run's tag @")
+            .nth(1)
+            .and_then(|rest| rest.split(|c: char| !c.is_ascii_alphanumeric()).next())
+            .expect("the inventory names the run's tag");
+        assert!(output.contains(&format!("[edge 1 @{tag}]")), "{output}");
+        assert!(output.contains(&format!("[edge 4 @{tag}]")), "{output}");
+        assert!(output.contains(&format!("[face 0 @{tag}]")), "{output}");
+        assert!(output.contains(&format!("[vertex 0 @{tag}]")), "{output}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_naming_a_vertex_highlights_that_vertex() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("The corner you asked about is [vertex 0 @{tag}]."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("which corner is that?"), CancelFlag::new())
+            .await;
+
+        assert_eq!(
+            harness.references(),
+            vec![TopologyElement::Vertex(VertexId(0))]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_execution_a_reply_can_only_refer_to_what_the_user_pointed_at() {
+        use cadmark_core::geometry::GeometryContext;
+        let model = ScriptedModel::new([text("[edge 2] is the one you mean, not [edge 3].")]);
+        let mut harness = Harness::with_script(Some("part = Box(1, 1, 1)"), FakeExecutor::new([]));
+        let input = TurnInput {
+            comments: vec![GroundedComment {
+                text: "which is this?".into(),
+                anchors: vec![GeometryContext {
+                    element: TopologyElement::Edge(EdgeId(2)),
+                    provenance: LedgerValue::Untraced,
+                    identification: Default::default(),
+                    source_context: String::new(),
+                    neighbours: Vec::new(),
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let outcome = harness.run(&model, input, CancelFlag::new()).await;
+
+        assert_eq!(outcome, TurnOutcome::Answered);
+        assert_eq!(harness.references(), vec![TopologyElement::Edge(EdgeId(2))]);
     }
 }

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+
+- The AI can point back at geometry: its reply names faces, edges and
+  vertices in square brackets and exactly those elements are highlighted,
+  in their own colour, distinct from the user's selection. Faces and edges
+  light up in the viewport; the viewport draws no vertex markers yet, so a
+  vertex reference is understood but not yet visible. Every run tells the
+  AI what it may name; on a model too large to list element by element it
+  can ask for the detail of any run of elements, so the precision holds
+  whatever the model's size.
 - Start view on launch: recent projects, opening a project folder, and
   creating a new one. Nothing is loaded until a project is chosen; a folder
   named on the command line still opens directly. Chat stays available there:

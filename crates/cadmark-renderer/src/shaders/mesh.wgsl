@@ -20,9 +20,19 @@ struct Uniforms {
     _pad2: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
+    highlight_colour: vec4<f32>,
+    highlight_ids: array<vec4<u32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+fn is_highlighted(id: u32) -> bool {
+    if id == 0u { return false; }
+    for (var slot = 0; slot < 8; slot++) {
+        if any(uniforms.highlight_ids[slot] == vec4<u32>(id)) { return true; }
+    }
+    return false;
+}
 
 struct Marker {
     element_id: u32,
@@ -114,6 +124,8 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     }
     if fid == uniforms.selected_id && uniforms.selected_id != 0u {
         colour = mix(colour, uniforms.selected_colour.rgb, uniforms.selected_colour.a);
+    } else if is_highlighted(fid) {
+        colour = mix(colour, uniforms.highlight_colour.rgb, uniforms.highlight_colour.a);
     } else if fid == uniforms.hover_id && uniforms.hover_id != 0u {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a);
     }

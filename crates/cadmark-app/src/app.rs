@@ -145,6 +145,8 @@ struct TurnRecord {
     summary_before: Option<cadmark_core::geometry::ModelSummary>,
     /// Messages before the active turn, which a condensation event may replace.
     history_len: usize,
+    /// The elements the reply referred to, applied after its model is shown.
+    references: Vec<TopologyElement>,
 }
 
 /// Top-level application state.
@@ -506,6 +508,7 @@ impl CadmarkApp {
                     comment_ids,
                     summary_before,
                     history_len,
+                    references: Vec::new(),
                 });
                 true
             }
@@ -544,6 +547,9 @@ impl CadmarkApp {
             TurnEvent::Text(text) => {
                 conversation.append_text(turn.response, &text);
                 project.note_turn_event(None);
+            }
+            TurnEvent::GeometryReferenced { elements } => {
+                turn.references = elements;
             }
             TurnEvent::ToolStarted {
                 call_id,
@@ -593,7 +599,11 @@ impl CadmarkApp {
             return;
         };
         project.busy = None;
-        let Some(turn) = self.turn.take() else { return };
+        let Some(mut turn) = self.turn.take() else {
+            return;
+        };
+        let references = std::mem::take(&mut turn.references);
+        let highlight = highlight_survives(&outcome);
         let dir = project.dir.clone();
         let script_filename = project.part_file_name().to_string();
         let conversation = &mut project.conversation;
@@ -669,6 +679,7 @@ impl CadmarkApp {
         if rebuild {
             self.restore_after_failed_turn();
         }
+        self.highlight_references(if highlight { references } else { Vec::new() });
         if let Some(project) = self.project() {
             project.save_conversation();
         }
@@ -681,6 +692,13 @@ impl CadmarkApp {
         if let Some(project) = self.project_mut() {
             project.request_reload();
         }
+    }
+
+    fn highlight_references(&mut self, elements: Vec<TopologyElement>) {
+        self.renderer.highlight_ids = elements
+            .iter()
+            .map(cadmark_renderer::picking::encode_picking_id)
+            .collect();
     }
 
     // ── Worker results ────────────────────────────────────────────
@@ -839,6 +857,7 @@ impl CadmarkApp {
         self.pending_pick = None;
         self.pick_in_flight = None;
         self.clear_selection();
+        self.renderer.highlight_ids.clear();
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
@@ -1881,6 +1900,13 @@ impl eframe::App for CadmarkApp {
     }
 }
 
+fn highlight_survives(outcome: &TurnOutcome) -> bool {
+    matches!(
+        outcome,
+        TurnOutcome::Completed { .. } | TurnOutcome::Answered
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{ErrorKind, Read, Write};
@@ -1900,8 +1926,9 @@ mod tests {
     use super::{
         CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
         SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, grounded_comments, measurement_pair, measurement_readout,
-        pending_markers, record_tool_start, stage_pending_comment, turn_chat_message,
+        VersionDialog, ai_services, grounded_comments, highlight_survives, measurement_pair,
+        measurement_readout, pending_markers, record_tool_start, stage_pending_comment,
+        turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2073,6 +2100,7 @@ mod tests {
                 comment_ids: vec![],
                 summary_before: None,
                 history_len: 1,
+                references: Vec::new(),
             }),
         }
     }
@@ -2087,6 +2115,15 @@ mod tests {
             edge_count: 0,
             vertex_count: 0,
         }
+    }
+
+    #[test]
+    fn only_a_turn_that_keeps_its_reply_keeps_its_highlight() {
+        assert!(highlight_survives(&TurnOutcome::Answered));
+        assert!(!highlight_survives(&TurnOutcome::Cancelled));
+        assert!(!highlight_survives(&TurnOutcome::Failed {
+            error: "the script did not run".to_string(),
+        }));
     }
 
     #[test]

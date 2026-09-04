@@ -29,6 +29,10 @@ pub struct SelectionStyle {
     pub selected_colour: [f32; 4],
     /// Hover highlight colour.
     pub hover_colour: [f32; 4],
+    /// Colour for elements the AI's reply referred to. Distinct from the
+    /// selection glow: the user's selection and the AI's references are
+    /// different sets and must not read as one.
+    pub highlight_colour: [f32; 4],
 }
 
 impl Default for SelectionStyle {
@@ -37,6 +41,7 @@ impl Default for SelectionStyle {
         Self {
             selected_colour: [0.12, 0.42, 1.0, 0.7],
             hover_colour: [0.3, 0.6, 1.0, 0.35],
+            highlight_colour: [1.0, 0.45, 0.05, 0.75],
         }
     }
 }
@@ -61,7 +66,12 @@ pub struct MeshUniforms {
     pub _pad2: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
+    pub highlight_colour: [f32; 4],
+    pub highlight_ids: [[u32; 4]; HIGHLIGHT_SLOTS],
 }
+
+pub const HIGHLIGHT_SLOTS: usize = 8;
+pub const MAX_HIGHLIGHTS: usize = HIGHLIGHT_SLOTS * 4;
 
 /// Uniforms for the picking shader (just view_proj).
 #[repr(C)]
@@ -651,6 +661,10 @@ pub struct Renderer {
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
+    /// Picking IDs of the elements the AI's last reply referred to.
+    /// Beyond `MAX_HIGHLIGHTS` the rest are not drawn, and an ID no drawn
+    /// geometry carries simply tints nothing.
+    pub highlight_ids: Vec<u32>,
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
@@ -665,6 +679,7 @@ impl Renderer {
             selection_style: SelectionStyle::default(),
             selected_id: 0,
             hover_id: 0,
+            highlight_ids: Vec::new(),
             target_is_srgb: false,
             markers: Vec::new(),
         }
@@ -692,6 +707,8 @@ impl Renderer {
             _pad2: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
+            highlight_colour: self.selection_style.highlight_colour,
+            highlight_ids: highlight_slots(&self.highlight_ids),
         }
     }
 
@@ -709,6 +726,17 @@ impl Default for Renderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Pack highlight IDs into the uniform's fixed slots, dropping any beyond
+/// what the shaders can read. Empty entries stay zero: the background ID,
+/// which no element carries.
+fn highlight_slots(ids: &[u32]) -> [[u32; 4]; HIGHLIGHT_SLOTS] {
+    let mut slots = [[0u32; 4]; HIGHLIGHT_SLOTS];
+    for (index, id) in ids.iter().take(MAX_HIGHLIGHTS).enumerate() {
+        slots[index / 4][index % 4] = *id;
+    }
+    slots
 }
 
 /// 4x4 matrix multiplication (column-major).
