@@ -120,6 +120,14 @@ pub fn create_snapshot(
     })
 }
 
+/// Stage a part's rename so the next step records the move rather than
+/// the new file beside the old one. Both paths are staged: the one that
+/// went and the one that arrived.
+pub fn stage_part_rename(project_dir: &Path, from: &str, to: &str) -> Result<(), GitError> {
+    run_git(project_dir, &["add", "-A", "--", from, to])?;
+    Ok(())
+}
+
 /// The part a recorded step changed, when the step names one. Steps
 /// recorded before a folder could hold several parts name none.
 pub fn part_of_commit(project_dir: &Path, commit_hash: &str) -> Option<String> {
@@ -326,6 +334,40 @@ mod tests {
         assert_eq!(versions[1].summary, "Create initial box");
 
         assert_eq!(v2.commit_hash, versions[0].commit_hash);
+    }
+
+    #[test]
+    fn naming_a_part_leaves_no_trace_of_the_name_it_had_before() {
+        // The untitled file is committed history by the time it is named,
+        // so a rename on disk alone would leave it in the next step's tree
+        // and restoring that step would bring it back beside the part.
+        let dir = test_repo();
+        fs::write(dir.path().join("Untitled.py"), "box = Box(10, 10, 10)").unwrap();
+        create_microversion(dir.path(), "Make a box", "a box", "Untitled.py").unwrap();
+
+        fs::rename(
+            dir.path().join("Untitled.py"),
+            dir.path().join("bracket.py"),
+        )
+        .unwrap();
+        stage_part_rename(dir.path(), "Untitled.py", "bracket.py").unwrap();
+        let snapshot = super::create_snapshot(dir.path(), "Bracket v1", "bracket.py").unwrap();
+
+        let tracked = run_git(dir.path(), &["ls-tree", "--name-only", "HEAD"]).unwrap();
+        let tracked: Vec<&str> = tracked.lines().collect();
+        assert_eq!(tracked, vec!["bracket.py"]);
+        assert!(
+            run_git(dir.path(), &["status", "--short"])
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+
+        // And the step that did it names the part it left behind.
+        assert_eq!(
+            part_of_commit(dir.path(), &snapshot.commit_hash).as_deref(),
+            Some("bracket.py")
+        );
     }
 
     #[test]

@@ -236,6 +236,13 @@ impl Project {
             return Err("This part already has a name".to_string());
         }
         let file_name = parts::name_untitled_part(&self.dir, typed)?;
+        // The untitled file may already be in the history; stage the move
+        // so the next step records a rename, not a second file.
+        if let Err(error) =
+            crate::git_ops::stage_part_rename(&self.dir, parts::UNTITLED_PART, &file_name)
+        {
+            log::warn!("Could not stage the part rename: {error}");
+        }
         self.part = OpenPart::Named(file_name.clone());
         self.refresh_parts();
         let _ = self.send(OrchestratorCommand::SetScript(file_name.clone()));
