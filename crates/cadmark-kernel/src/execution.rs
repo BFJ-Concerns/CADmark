@@ -979,7 +979,7 @@ with BuildPart() as part:
             .regions
             .iter()
             .flat_map(|region| {
-                region.indices.chunks_exact(3).map(|triangle| {
+                region.indices.as_chunks::<3>().0.iter().map(|triangle| {
                     let [a, b, c] = [
                         region.vertices[triangle[0] as usize],
                         region.vertices[triangle[1] as usize],
