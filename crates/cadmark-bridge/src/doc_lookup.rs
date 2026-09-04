@@ -264,20 +264,37 @@ mod tests {
             DOC_CORPUS.contains(OPERATIONS_REFERENCE),
             "lookup_docs payload no longer contains the operations reference"
         );
+        for (construct, anchor) in [
+            (
+                "Locations",
+                "`Locations` - Use this to define a specific location",
+            ),
+            (
+                "GridLocations",
+                "`GridLocations` - Arrange objects in a grid pattern",
+            ),
+            (
+                "PolarLocations",
+                "`PolarLocations` - Position objects in a circular pattern",
+            ),
+            (
+                "HexLocations",
+                "`HexLocations` - Arrange objects in a hexagonal grid",
+            ),
+            (
+                "rotate",
+                "**Rotation:** Rotate a shape around a specified axis",
+            ),
+            ("rotate API", "shape.rotate(Axis, angle_in_degrees)"),
+        ] {
+            assert!(
+                MOVING_OBJECTS_REFERENCE.contains(anchor),
+                "moving-objects reference is missing the documented {construct} entry"
+            );
+        }
         assert!(
-            MOVING_OBJECTS_REFERENCE
-                .contains("`Locations` - Use this to define a specific location")
-                && MOVING_OBJECTS_REFERENCE
-                    .contains("`GridLocations` - Arrange objects in a grid pattern")
-                && MOVING_OBJECTS_REFERENCE
-                    .contains("`PolarLocations` - Position objects in a circular pattern")
-                && MOVING_OBJECTS_REFERENCE
-                    .contains("`HexLocations` - Arrange objects in a hexagonal grid")
-                && MOVING_OBJECTS_REFERENCE
-                    .contains("**Rotation:** Rotate a shape around a specified axis")
-                && MOVING_OBJECTS_REFERENCE.contains("shape.rotate(Axis, angle_in_degrees)")
-                && DOC_CORPUS.contains(MOVING_OBJECTS_REFERENCE),
-            "lookup_docs payload is missing documented location patterns or rotate"
+            DOC_CORPUS.contains(MOVING_OBJECTS_REFERENCE),
+            "lookup_docs payload no longer contains the moving-objects reference"
         );
         for (construct, anchor) in [
             ("Shell", "*class *Shell("),
