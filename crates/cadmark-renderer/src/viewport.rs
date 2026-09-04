@@ -3,23 +3,26 @@
 // this module owns what each pass draws, so a new pass (a vertex-marker
 // pass, a section-plane pass) is added here and drawn from there.
 
-use crate::mesh::GpuMesh;
+use crate::mesh::{GpuMesh, GpuSketch};
 use crate::picking::{self, PickingPass};
 use crate::pipeline::RenderPipelines;
 
-/// Encode the shaded mesh and wireframe overlay into the offscreen colour
-/// target with depth. Runs every frame; with no mesh it only clears, so
-/// clearing the model leaves no stale render behind.
+/// Encode the shaded mesh, wireframe overlay and sketch profile into the
+/// offscreen colour target with depth. Runs every frame; with neither a
+/// mesh nor a sketch it only clears, so clearing the model leaves no
+/// stale render behind.
 pub fn render_scene(
     encoder: &mut wgpu::CommandEncoder,
     pipelines: &RenderPipelines,
     meshes: &[GpuMesh],
+    sketch: Option<&GpuSketch>,
     clear_colour: wgpu::Color,
 ) {
     render_scene_into(
         encoder,
         pipelines,
         meshes,
+        sketch,
         clear_colour,
         &pipelines.viewport_colour_view,
     );
@@ -33,6 +36,7 @@ pub fn render_scene_into(
     encoder: &mut wgpu::CommandEncoder,
     pipelines: &RenderPipelines,
     meshes: &[GpuMesh],
+    sketch: Option<&GpuSketch>,
     clear_colour: wgpu::Color,
     colour_target: &wgpu::TextureView,
 ) {
@@ -70,6 +74,24 @@ pub fn render_scene_into(
             pass.set_vertex_buffer(0, mesh.edge_vertex_buffer.slice(..));
             pass.draw(0..mesh.edge_vertex_count, 0..1);
         }
+    }
+
+    // The profile comes last, and its pipelines ignore depth, so the
+    // sketch reads in front of whatever solid was drawn behind it.
+    let Some(sketch) = sketch else {
+        return;
+    };
+    if sketch.fill_vertex_count > 0 {
+        pass.set_pipeline(&pipelines.sketch_fill_pipeline);
+        pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
+        pass.set_vertex_buffer(0, sketch.fill_vertex_buffer.slice(..));
+        pass.draw(0..sketch.fill_vertex_count, 0..1);
+    }
+    if sketch.curve_vertex_count > 0 {
+        pass.set_pipeline(&pipelines.sketch_curve_pipeline);
+        pass.set_bind_group(0, &pipelines.mesh_bind_group, &[]);
+        pass.set_vertex_buffer(0, sketch.curve_vertex_buffer.slice(..));
+        pass.draw(0..sketch.curve_vertex_count, 0..1);
     }
 }
 
@@ -415,7 +437,7 @@ mod tests {
                 highlight_count: 0,
                 _pad3: 0,
                 marker_count: 0,
-                _pad4: 0,
+                ghost: 0.0,
                 selected_part_id: crate::picking::encode_picking_id(&TopologyElement::Part(
                     PartId(1),
                 )),
@@ -453,6 +475,7 @@ mod tests {
             &mut encoder,
             &pipelines,
             &[near, far],
+            None,
             wgpu::Color::BLACK,
             &colour.create_view(&wgpu::TextureViewDescriptor::default()),
         );

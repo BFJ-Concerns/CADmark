@@ -8,11 +8,12 @@
 use std::sync::{Arc, Mutex};
 
 use cadmark_core::geometry::{PartId, TopologyElement};
+use cadmark_core::sketch::SketchProfile;
 use cadmark_kernel::protocol::ExecutedPart;
-use cadmark_renderer::mesh::GpuMesh;
+use cadmark_renderer::mesh::{GpuMesh, GpuSketch};
 use cadmark_renderer::picking::PickingPass;
 use cadmark_renderer::pipeline::{
-    MeshUniforms, RenderPipelines, SimpleUniforms, ViewportMarker, upload_mesh,
+    MeshUniforms, RenderPipelines, SimpleUniforms, ViewportMarker, upload_mesh, upload_sketch,
 };
 use cadmark_renderer::viewport::{
     copy_pick_pixel, decode_pick_result, render_part_picking, render_picking, render_scene,
@@ -26,6 +27,10 @@ pub struct ViewportResources {
     meshes: Vec<GpuMesh>,
     /// Part whose local face and edge IDs topology picking reads.
     active_part: Option<usize>,
+    /// The sketch profile on screen, when the design has reached only a
+    /// sketch. Nothing picks against it: sketch elements are not pick
+    /// targets.
+    sketch: Option<GpuSketch>,
     /// Pick attempt submitted through the independent readback encoder. Its
     /// marker proves whether those commands completed before bytes are trusted.
     pick_attempt: Option<PickAttempt>,
@@ -71,6 +76,7 @@ impl ViewportResources {
             next_submission_token: 1,
             retry_pick: None,
             pick_result: None,
+            sketch: None,
             hover: HoverPick::new(device),
             viewport_size: (w, h),
         }
@@ -87,6 +93,11 @@ impl ViewportResources {
 
     pub fn set_active_part(&mut self, id: u32) {
         self.active_part = self.meshes.get(id as usize).map(|_| id as usize);
+    }
+
+    /// Replace the sketch profile on the GPU.
+    pub fn set_sketch(&mut self, device: &wgpu::Device, sketch: Option<&SketchProfile>) {
+        self.sketch = sketch.map(|sketch| upload_sketch(device, sketch));
     }
 
     /// Forget every pending pick: the model they were for is gone.
@@ -484,7 +495,13 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         // The egui paint callback's render pass has no depth attachment,
         // so the scene is rendered here with its own depth texture, then
         // blitted in paint().
-        render_scene(encoder, &res.pipelines, &res.meshes, self.clear_colour);
+        render_scene(
+            encoder,
+            &res.pipelines,
+            &res.meshes,
+            res.sketch.as_ref(),
+            self.clear_colour,
+        );
 
         Vec::new()
     }

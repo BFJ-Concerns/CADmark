@@ -5,6 +5,7 @@
 // cancel stops the script, and a killed worker is replaced.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use cadmark_core::cancellation::CancelFlag;
@@ -12,6 +13,7 @@ use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
+use serde::Deserialize;
 
 /// The worker binary Cargo built for this test run.
 fn worker_binary() -> PathBuf {
@@ -53,6 +55,184 @@ const BOX: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box
 
 const SEPARATED_BOXES: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n    with Locations((20, 0, 0)):\n        Box(10, 10, 10)\n";
 
+// Curvature makes mesh faceting observable: unlike a box, a cylinder's mesh
+// round trip loses a small, measurable amount of volume.
+const CURVED_PART: &str =
+    "from build123d import *\n\nwith BuildPart() as part:\n    Cylinder(10, 10)\n";
+
+const STEP_RELATIVE_TOLERANCE: f64 = 0.000_1;
+const MESH_RELATIVE_TOLERANCE: f64 = 0.01;
+
+#[derive(Debug, Deserialize)]
+struct ImportedModel {
+    volume: f64,
+    size: [f64; 3],
+    closed: bool,
+    valid: Option<bool>,
+}
+
+/// Re-import one written file in a fresh Python process, outside the worker.
+/// STEP uses build123d's B-rep importer, STL its Lib3MF mesh reader, and 3MF
+/// is parsed independently with the Python standard library's ZIP and XML APIs.
+fn import_export(path: &Path, format: ExportFormat) -> ImportedModel {
+    let reader = r#"
+import json
+import sys
+
+path, format_name = sys.argv[1:]
+if format_name == "step":
+    from build123d import import_step
+    shapes = [import_step(path)]
+elif format_name == "stl":
+    from build123d import Mesher
+    shapes = Mesher().read(path)
+if format_name in ("step", "stl"):
+    assert len(shapes) == 1, f"expected one imported shape, got {len(shapes)}"
+    shape = shapes[0]
+    box = shape.bounding_box()
+    result = {
+        "volume": shape.volume,
+        "size": list(box.size),
+        "closed": shape.is_manifold,
+        "valid": shape.is_valid,
+    }
+elif format_name == "3mf":
+    import xml.etree.ElementTree as ET
+    from collections import Counter
+    from zipfile import ZipFile
+
+    with ZipFile(path) as archive:
+        model_name = next(name for name in archive.namelist() if name.endswith(".model"))
+        root = ET.fromstring(archive.read(model_name))
+    meshes = root.findall(".//{*}mesh")
+    assert len(meshes) == 1, f"expected one 3MF mesh, got {len(meshes)}"
+    mesh = meshes[0]
+    vertices = [
+        tuple(float(vertex.attrib[axis]) for axis in ("x", "y", "z"))
+        for vertex in mesh.findall("./{*}vertices/{*}vertex")
+    ]
+    triangles = [
+        tuple(int(triangle.attrib[index]) for index in ("v1", "v2", "v3"))
+        for triangle in mesh.findall("./{*}triangles/{*}triangle")
+    ]
+    assert vertices and triangles, "3MF mesh must contain vertices and triangles"
+    assert all(0 <= index < len(vertices) for triangle in triangles for index in triangle)
+    edges = Counter(
+        tuple(sorted((triangle[index], triangle[(index + 1) % 3])))
+        for triangle in triangles
+        for index in range(3)
+    )
+    volume = abs(sum(
+        vertices[a][0] * (vertices[b][1] * vertices[c][2] - vertices[b][2] * vertices[c][1])
+        + vertices[a][1] * (vertices[b][2] * vertices[c][0] - vertices[b][0] * vertices[c][2])
+        + vertices[a][2] * (vertices[b][0] * vertices[c][1] - vertices[b][1] * vertices[c][0])
+        for a, b, c in triangles
+    ) / 6.0)
+    result = {
+        "volume": volume,
+        "size": [max(vertex[axis] for vertex in vertices) - min(vertex[axis] for vertex in vertices) for axis in range(3)],
+        "closed": all(count == 2 for count in edges.values()),
+    }
+else:
+    raise ValueError(f"unknown format {format_name}")
+
+print(json.dumps(result))
+"#;
+    let output = Command::new(venv().join("bin/python"))
+        .arg("-c")
+        .arg(reader)
+        .arg(path)
+        .arg(format.extension())
+        .output()
+        .expect("the project Python runtime should launch an import reader");
+    assert!(
+        output.status.success(),
+        "the {} reader failed: {}",
+        format.label(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "the {} reader did not return measurements: {error}; stdout: {}",
+            format.label(),
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn relative_difference(actual: f64, expected: f64) -> f64 {
+    (actual - expected).abs() / expected.abs()
+}
+
+fn assert_round_trip(
+    format: ExportFormat,
+    source_volume: f64,
+    source_size: [f64; 3],
+    imported: ImportedModel,
+) {
+    let tolerance = match format {
+        ExportFormat::Step => STEP_RELATIVE_TOLERANCE,
+        ExportFormat::Stl | ExportFormat::ThreeMf => MESH_RELATIVE_TOLERANCE,
+    };
+    assert!(
+        imported.closed,
+        "{} import was not a closed solid",
+        format.label()
+    );
+    if let Some(valid) = imported.valid {
+        assert!(valid, "{} import was invalid", format.label());
+    }
+    assert!(
+        relative_difference(imported.volume, source_volume) <= tolerance,
+        "{} volume {} differed from source {} by more than {:.2}%",
+        format.label(),
+        imported.volume,
+        source_volume,
+        tolerance * 100.0,
+    );
+    for (axis, (actual, expected)) in imported.size.iter().zip(source_size).enumerate() {
+        assert!(
+            relative_difference(*actual, expected) <= tolerance,
+            "{} size on axis {axis} was {actual}, expected {expected} within {:.2}%",
+            format.label(),
+            tolerance * 100.0,
+        );
+    }
+}
+
+fn assert_worker_export_round_trip(format: ExportFormat) {
+    let (project, script, mut worker) = project_with_script(CURVED_PART);
+    let source = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    assert!(source.is_printable(), "source model must be a closed solid");
+    let solid = source.solid().expect("a solid result");
+
+    let path = project
+        .path()
+        .join(format!("round-trip.{}", format.extension()));
+    worker
+        .export(&solid.file, format, &path, roomy())
+        .unwrap_or_else(|error| panic!("{} export failed: {error}", format.label()));
+    let imported = import_export(&path, format);
+    assert_round_trip(format, solid.summary.volume, solid.summary.size(), imported);
+}
+
+#[test]
+fn step_export_round_trips_as_a_closed_solid_at_its_original_scale() {
+    assert_worker_export_round_trip(ExportFormat::Step);
+}
+
+#[test]
+fn stl_export_round_trips_as_a_closed_solid_at_its_original_scale() {
+    assert_worker_export_round_trip(ExportFormat::Stl);
+}
+
+#[test]
+fn three_mf_export_round_trips_as_a_closed_solid_at_its_original_scale() {
+    assert_worker_export_round_trip(ExportFormat::ThreeMf);
+}
+
 #[test]
 fn executes_a_script_and_exports_its_kept_model() {
     let (project, script, mut worker) = project_with_script(BOX);
@@ -60,13 +240,22 @@ fn executes_a_script_and_exports_its_kept_model() {
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
     assert_eq!(model.ledger.face_count(), 6);
-    assert_eq!(model.summary.face_count, 6);
+    assert_eq!(model.solid().expect("a solid result").summary.face_count, 6);
     assert!(model.is_printable());
-    assert!(model.model.0.is_file(), "model kept at {:?}", model.model);
+    assert!(
+        model.solid().expect("a solid result").file.0.is_file(),
+        "model kept at {:?}",
+        model.solid().expect("a solid result").file
+    );
 
     let export = project.path().join("part.stl");
     worker
-        .export(&model.model, ExportFormat::Stl, &export, roomy())
+        .export(
+            &model.solid().expect("a solid result").file,
+            ExportFormat::Stl,
+            &export,
+            roomy(),
+        )
         .unwrap();
     assert!(std::fs::metadata(&export).unwrap().len() > 0);
 }
@@ -80,7 +269,7 @@ fn measures_the_known_gap_between_faces_through_the_worker() {
 
     let measurement = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Face(FaceId(0)),
             TopologyElement::Face(FaceId(7)),
             roomy(),
@@ -102,7 +291,7 @@ fn measures_picked_edge_ids_in_the_topology_map_order() {
 
     let edge_distance = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Edge(EdgeId(0)),
             TopologyElement::Edge(EdgeId(11)),
             roomy(),
@@ -115,7 +304,7 @@ fn measures_picked_edge_ids_in_the_topology_map_order() {
 
     let error = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Edge(EdgeId(20)),
             TopologyElement::Edge(EdgeId(0)),
             roomy(),
@@ -137,7 +326,7 @@ fn measures_picked_vertex_ids_in_the_topology_map_order() {
 
     let vertex_distance = worker
         .minimum_distance(
-            &model.model,
+            &model.solid().expect("a solid result").file,
             TopologyElement::Vertex(VertexId(2)),
             TopologyElement::Vertex(VertexId(4)),
             roomy(),
@@ -182,21 +371,19 @@ fn execution_keeps_each_completed_part_with_its_own_measurements_and_brep() {
         .execute(&script, roomy(), &CancelFlag::new())
         .expect("two completed parts execute through the real worker");
 
-    assert_eq!(
-        executed.parts.len(),
-        2,
-        "both completed builders survive discovery"
-    );
-    assert_eq!(executed.parts[0].id, 0);
-    assert_eq!(executed.parts[0].name, "bracket");
-    assert_eq!(executed.parts[1].id, 1);
-    assert_eq!(executed.parts[1].name, "cap");
-    assert!(executed.parts[0].is_printable());
-    assert!(executed.parts[1].is_printable());
-    assert!((executed.parts[0].summary.volume - 200.0).abs() < 1e-6);
-    assert!((executed.parts[1].summary.volume - (45.0 * std::f64::consts::PI)).abs() < 1e-4);
-    assert_ne!(executed.parts[0].model, executed.parts[1].model);
-    assert!(executed.parts.iter().all(|part| part.model.0.is_file()));
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2, "both completed builders survive discovery");
+    assert_eq!(parts[0].id, 0);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].id, 1);
+    assert_eq!(parts[1].name, "cap");
+    assert!(parts[0].is_printable());
+    assert!(parts[1].is_printable());
+    assert!((parts[0].summary.volume - 200.0).abs() < 1e-6);
+    assert!((parts[1].summary.volume - (45.0 * std::f64::consts::PI)).abs() < 1e-4);
+    assert_ne!(parts[0].file, parts[1].file);
+    assert!(parts.iter().all(|part| part.file.0.is_file()));
 }
 
 #[test]
@@ -206,9 +393,11 @@ fn aliases_do_not_duplicate_or_hide_completed_builder_parts() {
     let executed = worker
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
-    assert_eq!(executed.parts.len(), 2);
-    assert_eq!(executed.parts[0].name, "bracket");
-    assert_eq!(executed.parts[1].name, "result");
+
+    let parts = &executed.solid().expect("a solid result").parts;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "result");
 }
 
 #[test]
@@ -219,10 +408,12 @@ fn independent_algebra_mode_solids_are_separate_parts() {
         .execute(&script, roomy(), &CancelFlag::new())
         .expect("independent algebra-mode solids execute through the real worker");
 
-    assert_eq!(executed.parts.len(), 2);
-    assert_eq!(executed.parts[0].name, "bracket");
-    assert_eq!(executed.parts[1].name, "cap");
-    assert_ne!(executed.parts[0].model, executed.parts[1].model);
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "cap");
+    assert_ne!(parts[0].file, parts[1].file);
 }
 
 #[test]
@@ -233,10 +424,12 @@ fn mixed_builder_and_algebra_mode_solids_are_separate_parts() {
         .execute(&script, roomy(), &CancelFlag::new())
         .expect("mixed builder and algebra-mode solids execute through the real worker");
 
-    assert_eq!(executed.parts.len(), 2);
-    assert_eq!(executed.parts[0].name, "bracket");
-    assert_eq!(executed.parts[1].name, "cap");
-    assert_ne!(executed.parts[0].model, executed.parts[1].model);
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "cap");
+    assert_ne!(parts[0].file, parts[1].file);
 }
 
 #[test]
@@ -247,9 +440,11 @@ fn rebinding_one_name_keeps_one_part_with_the_base_volume() {
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
 
-    assert_eq!(executed.parts.len(), 1);
-    assert_eq!(executed.parts[0].name, "part");
-    assert!((executed.parts[0].summary.volume - 1_858.628_330_588_459).abs() < 1e-6);
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].name, "part");
+    assert!((parts[0].summary.volume - 1_858.628_330_588_459).abs() < 1e-6);
 }
 
 #[test]
@@ -260,9 +455,11 @@ fn a_part_used_for_relative_placement_remains_a_second_part() {
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
 
-    assert_eq!(executed.parts.len(), 2);
-    assert_eq!(executed.parts[0].name, "bracket");
-    assert_eq!(executed.parts[1].name, "cap");
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "bracket");
+    assert_eq!(parts[1].name, "cap");
 }
 
 #[test]
@@ -273,8 +470,10 @@ fn an_alias_of_one_shape_is_one_part() {
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
 
-    assert_eq!(executed.parts.len(), 1);
-    assert_eq!(executed.parts[0].name, "alias");
+    let parts = &executed.solid().expect("a solid result").parts;
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0].name, "alias");
 }
 
 #[test]
@@ -308,7 +507,12 @@ fn a_model_kept_before_a_killed_worker_still_exports() {
     ));
     let export = project.path().join("kept.step");
     worker
-        .export(&model.model, ExportFormat::Step, &export, roomy())
+        .export(
+            &model.solid().expect("a solid result").file,
+            ExportFormat::Step,
+            &export,
+            roomy(),
+        )
         .unwrap();
     assert!(std::fs::metadata(&export).unwrap().len() > 0);
 }

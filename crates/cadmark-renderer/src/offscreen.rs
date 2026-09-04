@@ -109,6 +109,7 @@ impl OffscreenRenderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         mesh: Option<&TessellatedMesh>,
+        sketch: Option<&cadmark_core::sketch::SketchProfile>,
         uniforms: &MeshUniforms,
         clear_colour: wgpu::Color,
     ) -> Result<RenderedImage, OffscreenError> {
@@ -121,6 +122,7 @@ impl OffscreenRenderer {
             })
             .into_iter()
             .collect();
+        let gpu_sketch = sketch.map(|sketch| crate::pipeline::upload_sketch(device, sketch));
 
         queue.write_buffer(
             &self.pipelines.mesh_uniform_buffer,
@@ -135,6 +137,7 @@ impl OffscreenRenderer {
             &mut encoder,
             &self.pipelines,
             &gpu_mesh,
+            gpu_sketch.as_ref(),
             clear_colour,
             &self.colour_view,
         );
@@ -340,6 +343,7 @@ mod tests {
                 &device,
                 &queue,
                 Some(&cube()),
+                None,
                 &scene.mesh_uniforms(width as f32 / height as f32),
                 clear,
             )
@@ -418,6 +422,7 @@ mod tests {
                 &device,
                 &queue,
                 None,
+                None,
                 &scene.mesh_uniforms(1.0),
                 wgpu::Color {
                     r: 0.0,
@@ -435,6 +440,163 @@ mod tests {
                 .iter()
                 .all(|pixel| pixel[2] > 250 && pixel[0] < 5),
             "an empty scene rendered something other than the clear colour"
+        );
+    }
+
+    /// A 4-by-2 rectangle on the XY plane, drawn as four curves round one
+    /// filled region with a corner at each end.
+    fn rectangle_profile() -> cadmark_core::sketch::SketchProfile {
+        use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchProfile, SketchRegion};
+
+        let corners = [
+            [-2.0f32, -1.0, 0.0],
+            [2.0, -1.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [-2.0, 1.0, 0.0],
+        ];
+        SketchProfile {
+            plane: Default::default(),
+            curves: (0..4)
+                .map(|index| SketchCurve {
+                    curve_id: index as u32,
+                    points: vec![corners[index], corners[(index + 1) % 4]],
+                })
+                .collect(),
+            corners: corners
+                .iter()
+                .enumerate()
+                .map(|(index, &position)| SketchCorner {
+                    corner_id: index as u32,
+                    position,
+                })
+                .collect(),
+            regions: vec![SketchRegion {
+                region_id: 0,
+                vertices: corners.to_vec(),
+                indices: vec![0, 1, 2, 0, 2, 3],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_sketch_only_model_draws_its_profile_where_the_solid_would_be() {
+        let (device, queue) = gpu();
+        let (width, height) = (200u32, 200u32);
+        let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
+
+        let profile = rectangle_profile();
+        let mut scene = crate::pipeline::Renderer::new();
+        scene.camera.view_plane_face_on(profile.plane.normal);
+        let bounds = crate::camera::Bounds3::from_positions(profile.points()).expect("bounds");
+        scene.camera.frame_bounds(bounds, 1.0);
+
+        let image = renderer
+            .render(
+                &device,
+                &queue,
+                None,
+                Some(&profile),
+                &scene.mesh_uniforms(1.0),
+                wgpu::Color {
+                    r: 0.6,
+                    g: 0.6,
+                    b: 0.6,
+                    a: 1.0,
+                },
+            )
+            .expect("render");
+
+        let pixels = image.rgba.as_chunks::<4>().0;
+        let at = |x: u32, y: u32| pixels[(y * width + x) as usize];
+        // The middle of the frame is inside the region: the wash reads
+        // bluer than the grey it covers, which an empty render never does.
+        let centre = at(width / 2, height / 2);
+        assert!(
+            centre[2] > centre[0] + 12,
+            "the centre pixel {centre:?} is not the region wash"
+        );
+        // A corner of the frame is outside the profile entirely.
+        let corner = at(2, 2);
+        assert!(
+            corner[2].abs_diff(corner[0]) < 6,
+            "the frame's corner {corner:?} is not the background"
+        );
+        // The curves are drawn, and darker than the wash.
+        let drawn = pixels
+            .iter()
+            .filter(|pixel| pixel[2] > 100 && pixel[0] < 60)
+            .count();
+        assert!(
+            drawn > 100,
+            "only {drawn} curve or corner pixels — the profile's lines are missing"
+        );
+    }
+
+    #[test]
+    fn a_ghosted_solid_fades_towards_the_background() {
+        let (device, queue) = gpu();
+        let (width, height) = (160u32, 160u32);
+        let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
+
+        let mut scene = crate::pipeline::Renderer::new();
+        let bounds = crate::camera::Bounds3::from_positions(
+            cube().vertices.iter().map(|vertex| vertex.position),
+        )
+        .expect("cube bounds");
+        scene.camera.frame_bounds(bounds, 1.0);
+        // The viewport background itself, so what is measured is how far
+        // the solid stands out from it.
+        let background = [40u8, 42, 48];
+        let clear = wgpu::Color {
+            r: f64::from(background[0]) / 255.0,
+            g: f64::from(background[1]) / 255.0,
+            b: f64::from(background[2]) / 255.0,
+            a: 1.0,
+        };
+
+        let lit = renderer
+            .render(
+                &device,
+                &queue,
+                Some(&cube()),
+                None,
+                &scene.mesh_uniforms(1.0),
+                clear,
+            )
+            .expect("render");
+        scene.ghost_solid = true;
+        let ghosted = renderer
+            .render(
+                &device,
+                &queue,
+                Some(&cube()),
+                None,
+                &scene.mesh_uniforms(1.0),
+                clear,
+            )
+            .expect("render");
+
+        let contrast = |image: &RenderedImage| {
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|pixel| {
+                    (0..3)
+                        .map(|channel| u64::from(pixel[channel].abs_diff(background[channel])))
+                        .sum::<u64>()
+                })
+                .sum::<u64>()
+        };
+        let (lit, ghosted) = (contrast(&lit), contrast(&ghosted));
+        assert!(
+            ghosted * 3 < lit,
+            "the ghosted solid stands out {ghosted} against the lit solid's {lit} — it has not faded back"
+        );
+        assert!(
+            ghosted > lit / 40,
+            "the ghosted solid vanished into the background entirely"
         );
     }
 

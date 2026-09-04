@@ -27,9 +27,8 @@ use cadmark_bridge::tools::{
     RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
-use cadmark_core::mesh::TessellatedMesh;
 use cadmark_core::message::{ContextUsage, Conversation, MessageKind};
-use cadmark_kernel::protocol::ExecutedModel;
+use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
 use cadmark_kernel::worker::WorkerError;
 
 use crate::validity::describe_validity;
@@ -131,11 +130,12 @@ pub trait DocSource: Send + Sync {
 pub trait RenderSource: Send {
     fn render(&mut self, view: RenderView) -> Result<ImageData, String>;
 
-    /// The model an in-turn execution just produced. The viewport puts
-    /// the same mesh on screen, but only once the UI thread next runs a
-    /// frame; a render asked for in the same response as the execution
-    /// would otherwise be of the previous model, or of nothing at all.
-    fn model_built(&mut self, _mesh: &TessellatedMesh) {}
+    /// The model an in-turn execution just produced, solid or sketch.
+    /// The viewport puts the same geometry on screen, but only once the
+    /// UI thread next runs a frame; a render asked for in the same
+    /// response as the execution would otherwise be of the previous
+    /// model, or of nothing at all.
+    fn model_built(&mut self, _model: &ExecutedModel) {}
 }
 
 /// A render source for a model that cannot see: the tool is not offered,
@@ -284,7 +284,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                         // Before the event: the UI thread shows this mesh
                         // a frame later, and a render may be asked for in
                         // this same response.
-                        self.render.model_built(&model.mesh);
+                        self.render.model_built(&model);
                         emit(TurnEvent::ModelBuilt {
                             model: model.clone(),
                             source: code.clone(),
@@ -576,12 +576,24 @@ pub fn context_usage(
 
 /// What the model reads after a successful execution.
 fn describe_model(model: &ExecutedModel) -> String {
-    let mut text = format!(
-        "Executed successfully. Model: {}.",
-        model.summary.describe()
-    );
-    text.push(' ');
-    text.push_str(&describe_validity(&model.validity));
+    let mut text = match &model.form {
+        ModelForm::Solid(solid) => {
+            let mut text = format!(
+                "Executed successfully. Model: {}.",
+                solid.summary.describe()
+            );
+            text.push(' ');
+            text.push_str(&describe_validity(&solid.validity));
+            text
+        }
+        // A sketch has no volume, no faces and no validity to report: it
+        // is drawn on screen, and extruding it is the next step.
+        ModelForm::Sketch(sketch) => format!(
+            "Executed successfully. {}. It is drawn in the viewport; \
+             nothing can be exported or measured until it becomes a solid.",
+            sketch.describe()
+        ),
+    };
     let untraced = model.ledger.untraced_count();
     if untraced > 0 {
         text.push_str(&format!(
@@ -859,25 +871,68 @@ mod tests {
         }
     }
 
+    fn sample_sketch() -> ExecutedModel {
+        ExecutedModel {
+            mesh: TessellatedMesh::default(),
+            ledger: ProvenanceLedger::new(),
+            descriptors: GeometryDescriptors::default(),
+            form: ModelForm::Sketch(cadmark_core::sketch::SketchProfile {
+                plane: cadmark_core::sketch::SketchPlane {
+                    origin: [0.0; 3],
+                    normal: [0.0, 0.0, 1.0],
+                    x_axis: [1.0, 0.0, 0.0],
+                },
+                curves: vec![cadmark_core::sketch::SketchCurve {
+                    curve_id: 0,
+                    points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+                }],
+                corners: vec![cadmark_core::sketch::SketchCorner {
+                    corner_id: 0,
+                    position: [0.0; 3],
+                }],
+                regions: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_sketch_only_result_is_reported_as_drawn_rather_than_as_a_solid() {
+        let text = describe_model(&sample_sketch());
+
+        assert!(text.starts_with("Executed successfully."), "{text}");
+        assert!(text.contains("not yet a solid"), "{text}");
+        assert!(text.contains("1 curve"), "{text}");
+        assert!(text.contains("drawn in the viewport"), "{text}");
+        assert!(
+            text.contains("nothing can be exported or measured"),
+            "{text}"
+        );
+        // The solid vocabulary must not leak into a sketch's report.
+        assert!(!text.contains("Volume"), "{text}");
+        assert!(!text.contains("watertight"), "{text}");
+    }
+
     fn sample_model() -> ExecutedModel {
         ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
             descriptors: GeometryDescriptors::default(),
-            summary: ModelSummary {
-                volume: 1000.0,
-                bounds_min: [0.0; 3],
-                bounds_max: [10.0; 3],
-                face_count: 6,
-                edge_count: 12,
-                vertex_count: 8,
-            },
-            validity: vec![SolidValidity {
-                closed: true,
-                valid: true,
-            }],
-            model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
-            parts: Vec::new(),
+            form: ModelForm::Solid(cadmark_kernel::protocol::SolidResult {
+                summary: ModelSummary {
+                    volume: 1000.0,
+                    bounds_min: [0.0; 3],
+                    bounds_max: [10.0; 3],
+                    face_count: 6,
+                    edge_count: 12,
+                    vertex_count: 8,
+                },
+                validity: vec![SolidValidity {
+                    closed: true,
+                    valid: true,
+                }],
+                file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+                parts: Vec::new(),
+            }),
         }
     }
 
