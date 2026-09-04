@@ -401,6 +401,12 @@ mod tests {
         direct_result_kinds: Vec<String>,
     }
 
+    #[derive(Clone, Copy)]
+    enum DirectHistoryExpectation {
+        ReturnedSame,
+        UnavailableEmpty,
+    }
+
     /// Run CADmark's consumer path once while observing the real wrapper's
     /// maker queries. The probe is installed after CADmark's instrumentation;
     /// it records the `Generated`, `Modified`, and `IsDeleted` calls without
@@ -565,13 +571,18 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
         queries: &[MakerHistoryQuery],
         builder: &str,
         input_expectations: &[(&str, bool)],
+        direct_expectation: DirectHistoryExpectation,
     ) {
         for (input_kind, expects_output_face) in input_expectations {
-            for method in ["Generated", "Modified", "IsDeleted"] {
+            let required_methods: &[&str] = match direct_expectation {
+                DirectHistoryExpectation::ReturnedSame => &["Generated", "Modified", "IsDeleted"],
+                DirectHistoryExpectation::UnavailableEmpty => &["Generated", "Modified"],
+            };
+            for method in required_methods {
                 assert!(
                     queries.iter().any(|query| {
                         query.builder == builder
-                            && query.method == method
+                            && query.method == *method
                             && query.input_kind == *input_kind
                     }),
                     "{builder} did not issue {method} for an input {input_kind}: {queries:?}"
@@ -582,19 +593,36 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                     && query.input_kind == *input_kind
                     && matches!(query.method.as_str(), "Generated" | "Modified")
             }) {
-                assert_eq!(
-                    query.direct_answer,
-                    "returned",
-                    "{builder} {method} for input {input_kind} was swallowed as {}: {queries:?}",
-                    query.direct_answer,
-                    method = query.method,
-                );
-                assert_eq!(
-                    query.result_kinds,
-                    query.direct_result_kinds,
-                    "{builder} {method} for input {input_kind} differed from its direct maker answer: {queries:?}",
-                    method = query.method,
-                );
+                match direct_expectation {
+                    DirectHistoryExpectation::ReturnedSame => {
+                        assert_eq!(
+                            query.direct_answer,
+                            "returned",
+                            "{builder} {method} for input {input_kind} was swallowed as {}: {queries:?}",
+                            query.direct_answer,
+                            method = query.method,
+                        );
+                        assert_eq!(
+                            query.result_kinds,
+                            query.direct_result_kinds,
+                            "{builder} {method} for input {input_kind} differed from its direct maker answer: {queries:?}",
+                            method = query.method,
+                        );
+                    }
+                    DirectHistoryExpectation::UnavailableEmpty => {
+                        assert_eq!(
+                            query.direct_answer,
+                            "AttributeError",
+                            "{builder} {method} for input {input_kind} unexpectedly exposed maker history: {queries:?}",
+                            method = query.method,
+                        );
+                        assert!(
+                            query.result_kinds.is_empty() && query.direct_result_kinds.is_empty(),
+                            "{builder} {method} for input {input_kind} unexpectedly returned maker history: {queries:?}",
+                            method = query.method,
+                        );
+                    }
+                }
             }
             let returns_output_face = queries.iter().any(|query| {
                 query.builder == builder
@@ -971,6 +999,7 @@ with BuildPart() as part:
             &queries,
             "BRepPrimAPI_MakePrism",
             &[("face", false), ("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
         );
     }
 
@@ -992,6 +1021,7 @@ with BuildPart() as part:
             &queries,
             "BRepPrimAPI_MakeRevol",
             &[("face", false), ("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
         );
     }
 
@@ -1014,6 +1044,7 @@ with BuildPart() as part:
             &queries,
             "BRepOffsetAPI_ThruSections",
             &[("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
         );
     }
 
@@ -1036,6 +1067,7 @@ with BuildPart() as part:
             &queries,
             "BRepOffsetAPI_MakePipeShell",
             &[("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
         );
     }
 
@@ -1057,6 +1089,7 @@ with BuildPart() as part:
             &queries,
             "BRepFilletAPI_MakeFillet",
             &[("face", true), ("edge", true)],
+            DirectHistoryExpectation::ReturnedSame,
         );
     }
 
@@ -1082,11 +1115,13 @@ with BuildPart() as part:
             &queries,
             "BRepAlgoAPI_Cut",
             &[("face", true), ("edge", false)],
+            DirectHistoryExpectation::ReturnedSame,
         );
         assert_maker_queries_reach_topology(
             &queries,
             "BRepAlgoAPI_Fuse",
             &[("face", true), ("edge", false)],
+            DirectHistoryExpectation::ReturnedSame,
         );
     }
 
@@ -1110,6 +1145,24 @@ with BuildPart() as part:
             &queries,
             "BRepAlgoAPI_Cut",
             &[("face", true), ("edge", false)],
+            DirectHistoryExpectation::ReturnedSame,
+        );
+        assert_maker_queries_reach_topology(
+            &queries,
+            "ShapeUpgrade_UnifySameDomain",
+            &[("edge", false), ("face", false), ("vertex", false)],
+            DirectHistoryExpectation::UnavailableEmpty,
+        );
+        assert_eq!(
+            queries
+                .iter()
+                .filter(|query| {
+                    query.builder == "ShapeUpgrade_UnifySameDomain"
+                        && matches!(query.method.as_str(), "Generated" | "Modified")
+                })
+                .count(),
+            198,
+            "clean-up maker-history query count changed: {queries:?}"
         );
         assert_cleanup_between_prism_and_boolean(&queries);
     }
