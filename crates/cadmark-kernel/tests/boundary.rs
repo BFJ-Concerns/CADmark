@@ -126,7 +126,11 @@ fn semantic_operation_names() -> Vec<String> {
                 return None;
             }
             in_enum
-                .then(|| line.strip_suffix(',').unwrap_or(line).to_owned())
+                .then(|| {
+                    line.chars()
+                        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                        .collect::<String>()
+                })
                 .filter(|name| !name.is_empty())
         })
         .collect()
@@ -189,24 +193,48 @@ fn contains_identifier(code: &str, identifier: &str) -> bool {
 fn imported_operation_variants(code: &[String]) -> BTreeSet<String> {
     let known = semantic_operation_names();
     let mut imported = BTreeSet::new();
-    let source = code.join("\n");
-    let mut remaining = source.as_str();
-    while let Some(start) = remaining.find("SemanticOperation::{") {
-        let import = &remaining[start + "SemanticOperation::{".len()..];
-        let Some((names, _)) = import.split_once('}') else {
-            break;
-        };
-        if names.trim() == "*" {
-            imported.extend(known.iter().cloned());
+    let mut use_statement = String::new();
+    for line in code {
+        if use_statement.is_empty() {
+            if line.contains("use ") {
+                use_statement.push_str(line);
+            } else {
+                continue;
+            }
         } else {
-            for name in names.split(',').map(str::trim) {
+            use_statement.push('\n');
+            use_statement.push_str(line);
+        }
+        if !use_statement.contains(';') {
+            continue;
+        }
+
+        let Some((_, import)) = use_statement.split_once("SemanticOperation::") else {
+            use_statement.clear();
+            continue;
+        };
+        if let Some(names) = import
+            .strip_prefix('{')
+            .and_then(|rest| rest.split_once('}'))
+        {
+            for name in names.0.split(',').map(str::trim) {
                 let name = name.split_whitespace().next().unwrap_or_default();
                 if known.iter().any(|known_name| known_name == name) {
                     imported.insert(name.to_owned());
                 }
             }
+        } else if import.starts_with('*') {
+            imported.extend(known.iter().cloned());
+        } else {
+            let name: String = import
+                .chars()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .collect();
+            if known.iter().any(|known_name| known_name == &name) {
+                imported.insert(name);
+            }
         }
-        remaining = &import[import.find('}').expect("closing import brace") + 1..];
+        use_statement.clear();
     }
     imported
 }
@@ -353,6 +381,12 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
     let imported = imported_operation_variants(&code_only(
         "use cadmark_core::ledger::SemanticOperation::{\n    Chamfer, Fillet,\n};",
     ));
+    let single_import = imported_operation_variants(&code_only(
+        "use cadmark_core::ledger::SemanticOperation::Fillet;",
+    ));
+    let glob_import = imported_operation_variants(&code_only(
+        "use cadmark_core::ledger::SemanticOperation::*;",
+    ));
     assert_eq!(
         operation_branch_on_line(
             "let operation = SemanticOperation::Fillet;",
@@ -386,6 +420,14 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
         Some("Fillet".to_owned())
     );
     assert_eq!(
+        operation_branch_on_line("Fillet => render(),", &single_import, false),
+        Some("Fillet".to_owned())
+    );
+    assert_eq!(
+        operation_branch_on_line("Fillet => render(),", &glob_import, false),
+        Some("Fillet".to_owned())
+    );
+    assert_eq!(
         operation_branch_on_line("Self::Fillet => render(),", &no_imports, false),
         Some("Fillet".to_owned())
     );
@@ -416,6 +458,7 @@ fn semantic_operation_vocabulary_cannot_drift_silently() {
     assert_eq!(semantic_operation_name(SemanticOperation::Fillet), "Fillet");
     assert!(names.contains(&"Fillet".to_owned()));
     assert!(names.contains(&"Chamfer".to_owned()));
+    assert!(!names.iter().any(|name| name.contains('(')));
 }
 
 #[test]
