@@ -8,7 +8,7 @@ use std::process::Command;
 
 use thiserror::Error;
 
-use cadmark_core::version::{Microversion, SnapshotInfo};
+use cadmark_core::version::{Microversion, SnapshotInfo, VersionHistory};
 
 #[derive(Error, Debug)]
 pub enum GitError {
@@ -119,6 +119,33 @@ pub fn create_snapshot(
 /// to avoid branch confusion — the working branch pointer stays where it is.
 pub fn checkout_commit(project_dir: &Path, commit_hash: &str) -> Result<(), GitError> {
     run_git(project_dir, &["checkout", commit_hash, "--detach"])?;
+    Ok(())
+}
+
+/// Restore a history step without discarding the lane that requested it.
+///
+/// Undo and redo advance `history` before checking out the selected commit.
+/// Rebuilding from a detached HEAD at that point would make the restored
+/// commit look like the lane tip, losing the forward steps needed for redo.
+/// A jump to a step outside the current lane still reloads from that step so
+/// subsequent navigation follows the selected lane.
+pub fn checkout_history_step(
+    project_dir: &Path,
+    history: &mut VersionHistory,
+    commit_hash: &str,
+) -> Result<(), GitError> {
+    checkout_commit(project_dir, commit_hash)?;
+
+    if history
+        .current()
+        .is_none_or(|current| current.commit_hash != commit_hash)
+    {
+        *history = VersionHistory::from_history(
+            list_microversions(project_dir, 100)?,
+            list_current_lane_microversions(project_dir, 100)?,
+        );
+    }
+
     Ok(())
 }
 
@@ -370,29 +397,41 @@ mod tests {
     }
 
     #[test]
-    fn undo_and_redo_restore_the_recorded_script() {
+    fn undo_and_redo_restore_the_recorded_script_and_keep_their_navigation_lane() {
         let dir = test_repo();
         let script = "part.py";
-        let branch = current_branch(dir.path()).unwrap();
         fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
         let first = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
         fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
         let second = create_microversion(dir.path(), "Widen box", "make it wider", script).unwrap();
 
-        checkout_commit(dir.path(), &first.commit_hash).unwrap();
+        let mut history = VersionHistory::from_history(
+            list_microversions(dir.path(), 10).unwrap(),
+            list_current_lane_microversions(dir.path(), 10).unwrap(),
+        );
+        let undone = history.undo().unwrap().commit_hash.clone();
+        assert_eq!(undone, first.commit_hash);
+        checkout_history_step(dir.path(), &mut history, &undone).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join(script)).unwrap(),
             "box = Box(10, 10, 10)"
         );
+        assert!(history.can_redo());
+        assert!(
+            history
+                .recent(10)
+                .iter()
+                .any(|version| version.commit_hash == second.commit_hash)
+        );
 
-        checkout_commit(dir.path(), &second.commit_hash).unwrap();
+        let redone = history.redo().unwrap().commit_hash.clone();
+        assert_eq!(redone, second.commit_hash);
+        checkout_history_step(dir.path(), &mut history, &redone).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join(script)).unwrap(),
             "box = Box(20, 20, 20)"
         );
-
-        checkout_branch_tip(dir.path(), &branch).unwrap();
-        assert_eq!(current_branch(dir.path()).unwrap(), branch);
+        assert!(!history.can_redo());
     }
 
     #[test]

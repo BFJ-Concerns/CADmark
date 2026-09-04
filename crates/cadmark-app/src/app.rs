@@ -571,10 +571,13 @@ impl CadmarkApp {
 
     /// Check out a design step and rebuild the model from it.
     fn restore_version(&mut self, commit_hash: String) {
-        match crate::git_ops::checkout_commit(&self.project.dir, &commit_hash) {
+        match crate::git_ops::checkout_history_step(
+            &self.project.dir,
+            &mut self.project.history,
+            &commit_hash,
+        ) {
             Ok(()) => {
                 log::info!("Restored design step {commit_hash}");
-                self.project.reload_history();
                 self.project.request_reload();
             }
             Err(e) => {
