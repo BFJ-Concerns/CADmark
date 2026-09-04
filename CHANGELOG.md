@@ -32,8 +32,8 @@ All notable changes to this project will be documented in this file.
 - Window title carries the project name
 
 ### Fixed
-- History now lists steps on CADmark's abandoned edit alternatives without
-  navigating them as undo and redo steps
+- History now lists every CADmark design step, including abandoned alternatives,
+  without navigating them as undo and redo steps
 - Repeated edits from the same undone design step now create separate history
   alternatives instead of colliding with the earlier edit
 - The project-folder picker is parented to the CADmark window on Wayland
