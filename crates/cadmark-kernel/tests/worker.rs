@@ -69,6 +69,42 @@ fn executes_a_script_and_exports_its_kept_model() {
 }
 
 #[test]
+fn a_script_that_prints_does_not_corrupt_the_protocol() {
+    // print() goes to the worker's stderr, never into the reply stream.
+    let (_project, script, mut worker) = project_with_script(
+        "from build123d import *\nprint('{\"outcome\": \"exported\"}')\nprint('hello from the script')\n\nwith BuildPart() as part:\n    Box(3, 3, 3)\n",
+    );
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    assert_eq!(model.ledger.face_count(), 6);
+}
+
+#[test]
+fn a_model_kept_before_a_killed_worker_still_exports() {
+    // A limit hit kills the process but not the turn; the model an
+    // earlier execution kept must survive the replacement.
+    let (project, script, mut worker) = project_with_script(BOX);
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    let runaway = script_path_with(&project, "import time\nwhile True:\n    time.sleep(0.05)\n");
+    let limits = ExecutionLimits {
+        wall_clock: Duration::from_secs(1),
+        ..roomy()
+    };
+    assert!(matches!(
+        worker.execute(&runaway, limits, &CancelFlag::new()),
+        Err(WorkerError::Limit { .. })
+    ));
+    let export = project.path().join("kept.step");
+    worker
+        .export(&model.model, ExportFormat::Step, &export, roomy())
+        .unwrap();
+    assert!(std::fs::metadata(&export).unwrap().len() > 0);
+}
+
+#[test]
 fn a_script_fault_is_reported_with_the_users_own_line() {
     let (_project, script, mut worker) = project_with_script(
         "from build123d import *\n\nwith BuildPart() as part:\n    Box(1, 1, 1)\nraise RuntimeError('deliberate')\n",

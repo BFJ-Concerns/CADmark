@@ -78,26 +78,48 @@ const FORBIDDEN_OUTSIDE_THE_KERNEL: &[(&str, &str)] = &[
     ("cadmark_kernel::export", "reaches past the worker boundary"),
 ];
 
-/// A line with its comment and string literals removed: prose the model
-/// reads and prose in comments may name anything; code may not.
-fn code_only(line: &str) -> String {
-    let trimmed = line.trim_start();
-    if trimmed.starts_with("//") {
-        return String::new();
-    }
-    let mut out = String::new();
+/// The file's code with comments and string literals removed: prose the
+/// model reads and prose in comments may name anything; code may not.
+/// Returns one entry per source line so a finding can cite its line.
+fn code_only(source: &str) -> Vec<String> {
+    let mut lines = Vec::new();
     let mut in_string = false;
     let mut escaped = false;
-    for ch in line.chars() {
-        match (in_string, ch, escaped) {
-            (false, '"', _) => in_string = true,
-            (false, _, _) => out.push(ch),
-            (true, '\\', false) => escaped = true,
-            (true, '"', false) => in_string = false,
-            (true, _, _) => escaped = false,
+    for line in source.lines() {
+        let mut out = String::new();
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if in_string {
+                match (ch, escaped) {
+                    ('\\', false) => escaped = true,
+                    ('"', false) => in_string = false,
+                    _ => escaped = false,
+                }
+                continue;
+            }
+            match ch {
+                '/' if chars.peek() == Some(&'/') => break,
+                '"' => in_string = true,
+                // A char literal such as '"' is not a string start.
+                '\'' => {
+                    let rest: String = chars.clone().take(3).collect();
+                    if rest.starts_with("\"'") || rest.starts_with("\\") {
+                        out.push(ch);
+                        for _ in 0..(if rest.starts_with("\\") { 3 } else { 2 }) {
+                            if let Some(c) = chars.next() {
+                                out.push(c);
+                            }
+                        }
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                _ => out.push(ch),
+            }
         }
+        lines.push(out);
     }
-    out
+    lines
 }
 
 #[test]
@@ -105,8 +127,9 @@ fn no_crate_outside_the_kernel_names_python_build123d_or_ocp() {
     let mut violations = Vec::new();
     for file in sources_outside_the_kernel() {
         let text = std::fs::read_to_string(&file).unwrap();
-        for (number, line) in text.lines().enumerate() {
-            let code = code_only(line);
+        let original: Vec<&str> = text.lines().collect();
+        for (number, code) in code_only(&text).iter().enumerate() {
+            let line = original[number];
             for (needle, reason) in FORBIDDEN_OUTSIDE_THE_KERNEL {
                 if code.contains(needle) {
                     violations.push(format!(
@@ -128,18 +151,23 @@ fn no_crate_outside_the_kernel_names_python_build123d_or_ocp() {
 
 #[test]
 fn only_code_is_inspected() {
-    assert_eq!(code_only("    // TopoDS in a comment"), "");
+    let one = |s: &str| code_only(s).join("\n");
+    assert_eq!(one("    // TopoDS in a comment"), "    ");
+    assert_eq!(one(r#"let x = "BuildPart"; TopoDS"#), "let x = ; TopoDS");
     assert_eq!(
-        code_only(r#"let x = "BuildPart"; TopoDS"#),
-        "let x = ; TopoDS"
-    );
-    assert_eq!(
-        code_only(r#"assert!(s.contains("BuildPart"))"#),
+        one(r#"assert!(s.contains("BuildPart"))"#),
         "assert!(s.contains())"
     );
+    assert_eq!(one(r#"let q = "a \" BRep \" b"; PyAny"#), "let q = ; PyAny");
+    // A string continued across lines stays a string; a char literal of
+    // a quote does not open one.
     assert_eq!(
-        code_only(r#"let q = "a \" BRep \" b"; PyAny"#),
-        "let q = ; PyAny"
+        code_only("let s = \"first BuildPart\nsecond TopoDS\"; PyAny").join("|"),
+        "let s = |; PyAny"
+    );
+    assert_eq!(
+        one(r#"if c == '"' { TopoDS }"#),
+        r#"if c == '"' { TopoDS }"#
     );
 }
 

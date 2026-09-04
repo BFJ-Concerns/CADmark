@@ -26,6 +26,8 @@ pub enum ExecutionError {
     Script(String),
     #[error("Script not found: {0}")]
     ScriptNotFound(String),
+    #[error("No Python packages found in {0}: run scripts/bootstrap-python-runtime")]
+    RuntimeMissing(String),
     #[error("Could not keep the model for export: {0}")]
     ModelFile(String),
     #[error("Provenance error: {0}")]
@@ -66,8 +68,9 @@ pub fn activate_venv(venv_path: &Path) -> Result<(), ExecutionError> {
         .filter(|p| p.is_dir());
 
     let Some(site_packages) = site_packages else {
-        log::warn!("No site-packages found in venv at {}", venv_path.display());
-        return Ok(());
+        return Err(ExecutionError::RuntimeMissing(
+            venv_path.display().to_string(),
+        ));
     };
 
     let site_str = site_packages.to_string_lossy().to_string();

@@ -97,9 +97,11 @@ pub trait ScriptExecutor: Send {
 
 /// Answers the documentation tool.
 pub trait DocSource: Send + Sync {
+    /// Answer `query`, giving up when `cancel` is set.
     fn lookup(
         &self,
         query: &str,
+        cancel: CancelFlag,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + '_>>;
 }
 
@@ -332,8 +334,12 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     Err(error) => return ToolRun::bad_arguments(error),
                 };
                 emit(TurnEvent::Phase("looking up build123d docs".to_string()));
+                let answer = self.docs.lookup(&args.query, self.cancel.clone()).await;
+                if self.cancel.is_cancelled() {
+                    return ToolRun::Abort(TurnOutcome::Cancelled);
+                }
                 ToolRun::Output {
-                    output: self.docs.lookup(&args.query).await,
+                    output: answer,
                     failed: false,
                 }
             }
@@ -718,6 +724,7 @@ mod tests {
         fn lookup(
             &self,
             query: &str,
+            _cancel: CancelFlag,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + '_>> {
             let answer = format!("DOCS FOR {query}");
             Box::pin(async move { answer })

@@ -111,12 +111,15 @@ impl CadmarkApp {
     pub fn new(cc: &eframe::CreationContext<'_>, project_dir: PathBuf) -> Self {
         cadmark_ui::theme::apply(&cc.egui_ctx);
 
-        let settings_store = SettingsStore::default_location();
+        let mut settings_store = SettingsStore::default_location();
         let mut status = None;
         let settings = match settings_store.as_ref().map(SettingsStore::load) {
             Some(Ok(settings)) => settings,
             Some(Err(error)) => {
+                // An unreadable file is the user's to fix; nothing is
+                // written over it until they save from the dialog.
                 status = Some(Status::error(format!("Settings not loaded: {error}")));
+                settings_store = None;
                 UserSettings::default()
             }
             None => UserSettings::default(),
@@ -708,6 +711,16 @@ impl CadmarkApp {
     }
 
     fn apply_settings(&mut self, ctx: &egui::Context, form: SettingsForm) {
+        if self.project.busy.is_some() {
+            self.settings_dialog
+                .reject("Wait for the current turn to finish, then save".into());
+            return;
+        }
+        if self.settings_store.is_none() {
+            // Saving from the dialog is the explicit act that may replace
+            // an unreadable file.
+            self.settings_store = SettingsStore::default_location();
+        }
         let ai = AiConfiguration {
             base_url: form.base_url.trim().to_string(),
             model: form.model.trim().to_string(),
