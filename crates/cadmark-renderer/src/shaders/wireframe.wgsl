@@ -15,9 +15,27 @@ struct Uniforms {
     _pad3: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
+    highlight_colour: vec4<f32>,
+    // Picking IDs the AI's reply referred to, four to a slot because a
+    // uniform array's stride is sixteen bytes. Unused entries are zero.
+    highlight_ids: array<vec4<u32>, 8>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+
+// Whether `id` is one of the elements the AI's reply referred to. Zero is
+// the background ID and is never highlighted.
+fn is_highlighted(id: u32) -> bool {
+    if id == 0u {
+        return false;
+    }
+    for (var slot = 0; slot < 8; slot++) {
+        if any(uniforms.highlight_ids[slot] == vec4<u32>(id)) {
+            return true;
+        }
+    }
+    return false;
+}
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -42,6 +60,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let eid = u32(in.edge_id + 0.5);
     if eid == uniforms.selected_id && uniforms.selected_id != 0u {
         return vec4<f32>(uniforms.selected_colour.rgb, 1.0);
+    }
+    if is_highlighted(eid) {
+        return vec4<f32>(uniforms.highlight_colour.rgb, 1.0);
     }
     if eid == uniforms.hover_id && uniforms.hover_id != 0u {
         return vec4<f32>(uniforms.hover_colour.rgb, 1.0);

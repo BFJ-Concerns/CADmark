@@ -13,6 +13,10 @@ pub struct SelectionStyle {
     pub selected_colour: [f32; 4],
     /// Hover highlight colour.
     pub hover_colour: [f32; 4],
+    /// Colour for elements the AI's reply referred to. Distinct from the
+    /// selection glow: the user's selection and the AI's references are
+    /// different sets and must not read as one.
+    pub highlight_colour: [f32; 4],
 }
 
 impl Default for SelectionStyle {
@@ -21,6 +25,7 @@ impl Default for SelectionStyle {
         Self {
             selected_colour: [0.12, 0.42, 1.0, 0.7],
             hover_colour: [0.3, 0.6, 1.0, 0.35],
+            highlight_colour: [1.0, 0.45, 0.05, 0.75],
         }
     }
 }
@@ -44,7 +49,19 @@ pub struct MeshUniforms {
     pub _pad3: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
+    pub highlight_colour: [f32; 4],
+    /// Picking IDs of the elements the AI's reply referred to, packed four
+    /// to a slot because a uniform array's stride is sixteen bytes. Unused
+    /// entries are zero, which is the background ID and matches nothing.
+    pub highlight_ids: [[u32; 4]; HIGHLIGHT_SLOTS],
 }
+
+/// Slots of four picking IDs each in `MeshUniforms::highlight_ids`; the
+/// shaders' `Uniforms` arrays are the same length.
+pub const HIGHLIGHT_SLOTS: usize = 8;
+
+/// How many elements one reply can light up.
+pub const MAX_HIGHLIGHTS: usize = HIGHLIGHT_SLOTS * 4;
 
 /// Uniforms for the picking shader (just view_proj).
 #[repr(C)]
@@ -560,6 +577,9 @@ pub struct Renderer {
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
+    /// Picking IDs of the elements the AI's last reply referred to.
+    /// Beyond `MAX_HIGHLIGHTS` the rest are not drawn.
+    pub highlight_ids: Vec<u32>,
     /// Whether the colour target stores sRGB-encoded values itself. When it
     /// does not, the shader gamma-encodes its output.
     pub target_is_srgb: bool,
@@ -572,6 +592,7 @@ impl Renderer {
             selection_style: SelectionStyle::default(),
             selected_id: 0,
             hover_id: 0,
+            highlight_ids: Vec::new(),
             target_is_srgb: false,
         }
     }
@@ -598,6 +619,8 @@ impl Renderer {
             _pad3: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
+            highlight_colour: self.selection_style.highlight_colour,
+            highlight_ids: highlight_slots(&self.highlight_ids),
         }
     }
 
@@ -615,6 +638,17 @@ impl Default for Renderer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Pack highlight IDs into the uniform's fixed slots, dropping any beyond
+/// what the shaders can read. Empty entries stay zero: the background ID,
+/// which no element carries.
+fn highlight_slots(ids: &[u32]) -> [[u32; 4]; HIGHLIGHT_SLOTS] {
+    let mut slots = [[0u32; 4]; HIGHLIGHT_SLOTS];
+    for (index, id) in ids.iter().take(MAX_HIGHLIGHTS).enumerate() {
+        slots[index / 4][index % 4] = *id;
+    }
+    slots
 }
 
 /// 4x4 matrix multiplication (column-major).
@@ -730,5 +764,52 @@ mod tests {
         assert_eq!(edge_vertices.len(), 2);
         assert_eq!(edge_vertices[0].edge_id, encoded);
         assert_eq!(edge_vertices[1].edge_id, encoded);
+    }
+
+    #[test]
+    fn highlight_ids_pack_four_to_a_slot_and_leave_the_rest_empty() {
+        let slots = highlight_slots(&[7, 8, 9, 10, 11]);
+        assert_eq!(slots[0], [7, 8, 9, 10]);
+        assert_eq!(slots[1], [11, 0, 0, 0]);
+        assert_eq!(slots[2], [0; 4]);
+    }
+
+    #[test]
+    fn a_highlight_set_beyond_the_uniform_is_dropped_rather_than_overflowing() {
+        let ids: Vec<u32> = (1..=(MAX_HIGHLIGHTS as u32 + 5)).collect();
+        let slots = highlight_slots(&ids);
+        assert_eq!(slots[HIGHLIGHT_SLOTS - 1][3], MAX_HIGHLIGHTS as u32);
+    }
+
+    #[test]
+    fn the_renderers_highlight_set_reaches_the_uniform_it_binds() {
+        let mut renderer = Renderer::new();
+        renderer.highlight_ids = vec![100_002, 5];
+        let uniforms = renderer.mesh_uniforms(1.0);
+        assert_eq!(uniforms.highlight_ids[0], [100_002, 5, 0, 0]);
+        assert_eq!(
+            uniforms.highlight_colour,
+            SelectionStyle::default().highlight_colour
+        );
+    }
+
+    /// The uniform is only as good as its mirror: a field added on one
+    /// side and not the other renders a garbage frame silently.
+    #[test]
+    fn every_shader_binding_the_mesh_uniforms_mirrors_them() {
+        let declaration = format!("highlight_ids: array<vec4<u32>, {HIGHLIGHT_SLOTS}>");
+        for shader in [
+            include_str!("shaders/mesh.wgsl"),
+            include_str!("shaders/wireframe.wgsl"),
+        ] {
+            assert!(shader.contains(&declaration), "{declaration} is missing");
+            assert!(shader.contains("highlight_colour: vec4<f32>"));
+        }
+        // std140-compatible: a vec4 array is 16-byte aligned throughout.
+        assert_eq!(std::mem::size_of::<MeshUniforms>() % 16, 0);
+        assert_eq!(
+            std::mem::size_of::<MeshUniforms>(),
+            160 + 16 + HIGHLIGHT_SLOTS * 16
+        );
     }
 }

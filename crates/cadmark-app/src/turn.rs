@@ -26,9 +26,12 @@ use cadmark_bridge::tools::{
     RunScriptArgs, tools_for,
 };
 use cadmark_core::cancellation::CancelFlag;
+use cadmark_core::geometry::TopologyElement;
 use cadmark_core::message::{Conversation, MessageKind};
 use cadmark_kernel::protocol::ExecutedModel;
 use cadmark_kernel::worker::WorkerError;
+
+use crate::geometry_reference::{self, ReferenceScope};
 
 /// What the user sent to start a turn: any chat text, the pending
 /// comments with their anchors, and the project's reference images.
@@ -63,6 +66,9 @@ pub enum TurnEvent {
         model: Box<ExecutedModel>,
         source: String,
     },
+    /// The elements the finished reply referred to, for the viewport to
+    /// light up. Empty when the reply referred to none that resolve.
+    GeometryReferenced { elements: Vec<TopologyElement> },
 }
 
 /// How a turn ended.
@@ -159,6 +165,9 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
+        // Assigned by the only exit from the loop that reaches the reply;
+        // every other exit returns.
+        let final_reply;
 
         loop {
             if self.cancel.is_cancelled() {
@@ -204,6 +213,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 });
             }
             if response.tool_calls.is_empty() {
+                final_reply = response.text;
                 break;
             }
 
@@ -267,6 +277,21 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 }
             }
         }
+
+        // What the reply pointed at. The scope is this turn's own
+        // execution where there was one — provenance is rebuilt by every
+        // run, so an ID is only meaningful against the ledger that
+        // assigned it. With nothing executed, only the elements the user
+        // pointed at this turn can be resolved; anything else, including
+        // an ID quoted from an earlier turn, resolves to nothing.
+        let anchors = anchored_elements(input);
+        let scope = match &last_good {
+            Some((_, model, _)) => ReferenceScope::Model(model),
+            None => ReferenceScope::Anchors(&anchors),
+        };
+        emit(TurnEvent::GeometryReferenced {
+            elements: geometry_reference::resolve_references(&final_reply, &scope),
+        });
 
         match last_good {
             Some((code, model, summary)) => {
@@ -495,7 +520,20 @@ fn describe_model(model: &ExecutedModel) -> String {
             " {untraced} elements came from operations CADmark cannot trace."
         ));
     }
+    // The inventory the reply's references are written from: the model can
+    // only name an element whose ID it has been given.
+    text.push_str(&geometry_reference::describe_elements(model));
     text
+}
+
+/// Every element the user's comments in this turn anchored.
+fn anchored_elements(input: &TurnInput) -> Vec<TopologyElement> {
+    input
+        .comments
+        .iter()
+        .flat_map(|comment| comment.anchors.iter())
+        .map(|anchor| anchor.element.clone())
+        .collect()
 }
 
 fn describe_tool(name: &str) -> &str {
@@ -563,8 +601,12 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use cadmark_bridge::backend::{DeltaSink, ModelResponse};
+    use cadmark_core::geometry::{EdgeId, FaceId};
     use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
-    use cadmark_core::ledger::ProvenanceLedger;
+    use cadmark_core::ledger::{
+        LedgerValue, ProvenanceEntry, ProvenanceLedger, ProvenanceRelation, SemanticOperation,
+        SourceRef,
+    };
     use cadmark_core::limits::{ExecutionLimits, LimitHit};
     use cadmark_core::mesh::TessellatedMesh;
     use cadmark_kernel::protocol::ModelFile;
@@ -669,10 +711,26 @@ mod tests {
         }
     }
 
+    /// The model every scripted execution produces: a box on line 2 whose
+    /// one line made four edges, and a fillet on line 3 that made a fifth.
+    /// One line owning several elements is what makes a reference to one
+    /// of them discriminating.
     fn sample_model() -> ExecutedModel {
+        let mut ledger = ProvenanceLedger::new();
+        for id in 0..4 {
+            ledger
+                .record_edge(EdgeId(id), sample_source(2, SemanticOperation::Box))
+                .unwrap();
+        }
+        ledger
+            .record_edge(EdgeId(4), sample_source(3, SemanticOperation::Fillet))
+            .unwrap();
+        ledger
+            .record_face(FaceId(0), sample_source(2, SemanticOperation::Box))
+            .unwrap();
         ExecutedModel {
             mesh: TessellatedMesh::default(),
-            ledger: ProvenanceLedger::new(),
+            ledger,
             descriptors: GeometryDescriptors::default(),
             summary: ModelSummary {
                 volume: 1000.0,
@@ -688,6 +746,18 @@ mod tests {
             }],
             model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
         }
+    }
+
+    fn sample_source(line: u32, operation: SemanticOperation) -> LedgerValue {
+        LedgerValue::Resolved(ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation,
+            operation_id: u64::from(line),
+            relation: ProvenanceRelation::Generated,
+        })
     }
 
     impl ScriptExecutor for FakeExecutor {
@@ -777,6 +847,29 @@ mod tests {
 
         fn on_disk(&self) -> Option<String> {
             std::fs::read_to_string(&self.script).ok()
+        }
+
+        /// The elements the finished reply referred to.
+        fn references(&self) -> Vec<TopologyElement> {
+            self.events
+                .iter()
+                .find_map(|event| match event {
+                    TurnEvent::GeometryReferenced { elements } => Some(elements.clone()),
+                    _ => None,
+                })
+                .expect("every finished turn reports what its reply referred to")
+        }
+
+        /// The output of the last tool call, as the model read it.
+        fn last_tool_output(&self) -> String {
+            self.events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    TurnEvent::ToolFinished { output, .. } => Some(output.clone()),
+                    _ => None,
+                })
+                .expect("a tool ran")
         }
 
         fn phases(&self) -> Vec<&str> {
@@ -1087,5 +1180,100 @@ mod tests {
         assert!(matches!(&items[1], ModelItem::ToolCall(call) if call.id == "c1"));
         assert!(matches!(&items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1"));
         assert!(matches!(&items[3], ModelItem::Assistant { text } if text == "Made a box."));
+    }
+
+    #[tokio::test]
+    async fn a_reply_referring_to_one_edge_of_a_line_highlights_that_edge_alone() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("Rounded [edge 1]; the other edges of that line are untouched."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        let outcome = harness
+            .run(&model, chat("round one edge"), CancelFlag::new())
+            .await;
+
+        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+        // Line 2 made edges 0 to 3; naming one of them highlights one.
+        assert_eq!(harness.references(), vec![TopologyElement::Edge(EdgeId(1))]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_only_mentions_geometry_in_prose_highlights_nothing() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("I filleted the top edge of the box, near face 0."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("round one edge"), CancelFlag::new())
+            .await;
+
+        assert!(harness.references().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_reference_to_an_element_the_model_does_not_have_highlights_nothing() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("Rounded [edge 40] and [vertex 0]."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("round one edge"), CancelFlag::new())
+            .await;
+
+        assert!(harness.references().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_run_script_result_names_every_element_the_reply_can_reference() {
+        let model = ScriptedModel::new([
+            run_script("c1", "part = Box(1, 1, 1)", "Box"),
+            text("Done."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, chat("make a box"), CancelFlag::new())
+            .await;
+
+        let output = harness.last_tool_output();
+        assert!(output.contains("Executed successfully."), "{output}");
+        assert!(
+            output.contains("[edge 1]: created by box at line 2"),
+            "{output}"
+        );
+        assert!(
+            output.contains("[edge 4]: created by fillet at line 3"),
+            "{output}"
+        );
+        assert!(output.contains("[face 0]"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn without_an_execution_a_reply_can_only_refer_to_what_the_user_pointed_at() {
+        use cadmark_core::geometry::GeometryContext;
+        let model = ScriptedModel::new([text("[edge 2] is the one you mean, not [edge 3].")]);
+        let mut harness = Harness::with_script(Some("part = Box(1, 1, 1)"), FakeExecutor::new([]));
+        let input = TurnInput {
+            comments: vec![GroundedComment {
+                text: "which is this?".into(),
+                anchors: vec![GeometryContext {
+                    element: TopologyElement::Edge(EdgeId(2)),
+                    provenance: LedgerValue::Untraced,
+                    identification: Default::default(),
+                }],
+            }],
+            ..Default::default()
+        };
+
+        let outcome = harness.run(&model, input, CancelFlag::new()).await;
+
+        assert_eq!(outcome, TurnOutcome::Answered);
+        assert_eq!(harness.references(), vec![TopologyElement::Edge(EdgeId(2))]);
     }
 }
