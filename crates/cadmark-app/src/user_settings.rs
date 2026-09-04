@@ -108,13 +108,9 @@ impl SettingsStore {
                 let settings =
                     serde_path_to_error::deserialize::<_, UserSettings>(&mut deserializer)
                         .map_err(|error| {
-                            let field = error.path().to_string();
+                            let field = known_settings_field(&error.path().to_string());
                             let parse_error = error.into_inner();
-                            invalid_settings_error(
-                                &path,
-                                (!field.is_empty()).then_some(field),
-                                &parse_error,
-                            )
+                            invalid_settings_error(&path, field, &parse_error)
                         })?;
                 deserializer
                     .end()
@@ -190,14 +186,43 @@ impl SettingsStore {
     }
 }
 
-fn invalid_settings_error(path: &Path, field: Option<String>, error: &serde_json::Error) -> String {
+fn known_settings_field(path: &str) -> Option<&'static str> {
+    match path {
+        "ai" => Some("ai"),
+        "ai.base_url" => Some("ai.base_url"),
+        "ai.model" => Some("ai.model"),
+        "ai.accepts_images" => Some("ai.accepts_images"),
+        "ai.allow_insecure_http" => Some("ai.allow_insecure_http"),
+        "limits" => Some("limits"),
+        "limits.wall_clock" | "limits.wall_clock.secs" | "limits.wall_clock.nanos" => {
+            Some("limits.wall_clock")
+        }
+        "limits.memory_bytes" => Some("limits.memory_bytes"),
+        "context_window_tokens" => Some("context_window_tokens"),
+        path if path.starts_with("recent_projects[") => Some("recent_projects"),
+        "recent_projects" => Some("recent_projects"),
+        _ => None,
+    }
+}
+
+fn invalid_settings_error(path: &Path, field: Option<&str>, error: &serde_json::Error) -> String {
     let location = format!("line {}, column {}", error.line(), error.column());
-    match field {
-        Some(field) => format!(
-            "{} has an invalid value for {field} near {location}; correct the field type and try again",
+    match error.classify() {
+        serde_json::error::Category::Data => match field {
+            Some(field) => format!(
+                "{} has an invalid value for {field} near {location}; correct the field type and try again",
+                path.display(),
+            ),
+            None => format!(
+                "{} contains an invalid setting near {location}; correct the field type and try again",
+                path.display(),
+            ),
+        },
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => format!(
+            "{} contains invalid settings near {location}; correct the JSON syntax and try again",
             path.display(),
         ),
-        None => format!(
+        serde_json::error::Category::Io => format!(
             "{} contains invalid settings near {location}; correct the JSON syntax and try again",
             path.display(),
         ),
