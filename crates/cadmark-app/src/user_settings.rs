@@ -103,14 +103,24 @@ impl SettingsStore {
     pub fn load(&self) -> Result<UserSettings, String> {
         let path = self.dir.join(SETTINGS_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).map_err(|error| {
-                format!(
-                    "{} contains invalid settings near line {}, column {}; correct the JSON syntax or field type and try again",
-                    path.display(),
-                    error.line(),
-                    error.column(),
-                )
-            }),
+            Ok(contents) => {
+                let mut deserializer = serde_json::Deserializer::from_str(&contents);
+                let settings =
+                    serde_path_to_error::deserialize::<_, UserSettings>(&mut deserializer)
+                        .map_err(|error| {
+                            let field = error.path().to_string();
+                            let parse_error = error.into_inner();
+                            invalid_settings_error(
+                                &path,
+                                (!field.is_empty()).then_some(field),
+                                &parse_error,
+                            )
+                        })?;
+                deserializer
+                    .end()
+                    .map_err(|error| invalid_settings_error(&path, None, &error))?;
+                Ok(settings)
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(UserSettings::default())
             }
@@ -180,6 +190,20 @@ impl SettingsStore {
     }
 }
 
+fn invalid_settings_error(path: &Path, field: Option<String>, error: &serde_json::Error) -> String {
+    let location = format!("line {}, column {}", error.line(), error.column());
+    match field {
+        Some(field) => format!(
+            "{} has an invalid value for {field} near {location}; correct the field type and try again",
+            path.display(),
+        ),
+        None => format!(
+            "{} contains invalid settings near {location}; correct the JSON syntax and try again",
+            path.display(),
+        ),
+    }
+}
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -228,18 +252,21 @@ mod tests {
             (
                 r#"{"context_window_tokens":"wrong-type-sentinel"}"#,
                 "wrong-type-sentinel",
+                Some("context_window_tokens"),
             ),
             (
                 r#"{"context_window_tokens":"malformed-literal-sentinel"#,
                 "malformed-literal-sentinel",
+                None,
             ),
             (
                 r#"{"context_window_tokens":128000} trailing-junk-sentinel"#,
                 "trailing-junk-sentinel",
+                None,
             ),
         ];
 
-        for (contents, sentinel) in cases {
+        for (contents, sentinel, field) in cases {
             std::fs::create_dir_all(&store.dir).unwrap();
             std::fs::write(store.dir.join(SETTINGS_FILE), contents).unwrap();
 
@@ -249,6 +276,9 @@ mod tests {
             assert!(!error.contains(sentinel));
             assert!(error.contains("line 1"));
             assert!(error.contains("correct"));
+            if let Some(field) = field {
+                assert!(error.contains(field));
+            }
         }
     }
 
