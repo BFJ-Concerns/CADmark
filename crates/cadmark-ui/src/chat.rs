@@ -158,14 +158,16 @@ impl ChatPane {
                 ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let width = ui.available_width();
+                for message in conversation.messages() {
+                    show_message(ui, message, width);
+                }
+                // Pending cards follow history so bottom sticking keeps a
+                // newly staged card in view rather than hiding it above it.
                 let mut remove = None;
                 for comment in pending.comments_mut() {
                     if show_pending_comment(ui, comment, width) {
                         remove = Some(comment.id);
                     }
-                }
-                for message in conversation.messages() {
-                    show_message(ui, message, width);
                 }
 
                 match &self.activity {

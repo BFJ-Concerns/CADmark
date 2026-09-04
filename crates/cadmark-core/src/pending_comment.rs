@@ -112,14 +112,6 @@ impl PendingComments {
         Some(self.comments.remove(index))
     }
 
-    pub fn edit(&mut self, id: PendingCommentId, text: String) -> bool {
-        let Some(comment) = self.comments.iter_mut().find(|comment| comment.id == id) else {
-            return false;
-        };
-        comment.text = text;
-        true
-    }
-
     pub fn comments(&self) -> &[PendingComment] {
         &self.comments
     }
@@ -178,17 +170,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(first, 1, "round this"), (third, 3, "make this taller")]
         );
-    }
-
-    #[test]
-    fn editing_one_card_does_not_change_the_other_pending_comments() {
-        let mut pending = PendingComments::default();
-        let first = pending.add("round this".into(), vec![anchor(1)]);
-        pending.add("chamfer this".into(), vec![anchor(2)]);
-
-        assert!(pending.edit(first, "round this more".into()));
-        assert_eq!(pending.comments()[0].text, "round this more");
-        assert_eq!(pending.comments()[1].text, "chamfer this");
     }
 
     #[test]
