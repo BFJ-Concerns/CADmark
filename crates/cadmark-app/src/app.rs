@@ -2005,6 +2005,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: vec![],
+        chosen_candidate: None,
         };
         let first = anchor(1);
         let second = anchor(4);

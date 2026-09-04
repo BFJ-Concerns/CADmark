@@ -321,6 +321,7 @@ mod tests {
             identification,
             source_context: String::new(),
             neighbours: Vec::new(),
+        chosen_candidate: None,
         };
 
         assert_eq!(
@@ -338,6 +339,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
+            chosen_candidate: None,
         };
         let mut overlay = OverlayState::default();
         assert!(!overlay.toggle_anchor(anchor(TopologyElement::Face(FaceId(1)))));
@@ -362,6 +364,7 @@ mod tests {
             identification: Default::default(),
             source_context: String::new(),
             neighbours: Vec::new(),
+        chosen_candidate: None,
         };
         assert!(context_summary(&context).starts_with("face 0: no source line"));
     }
