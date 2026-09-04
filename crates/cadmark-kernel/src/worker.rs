@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::export::ExportFormat;
+use cadmark_core::geometry::{MinimumDistance, TopologyElement};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use thiserror::Error;
 
@@ -184,6 +185,25 @@ impl KernelWorker {
         }
     }
 
+    /// Measure the closest separation between two elements of a retained model.
+    pub fn minimum_distance(
+        &mut self,
+        model: &ModelFile,
+        first: TopologyElement,
+        second: TopologyElement,
+        limits: ExecutionLimits,
+    ) -> Result<MinimumDistance, WorkerError> {
+        let request = WorkerRequest::MinimumDistance {
+            model: model.clone(),
+            first,
+            second,
+        };
+        match self.request(&request, Some(limits), &CancelFlag::new())? {
+            WorkerReply::MinimumDistance(measurement) => Ok(measurement),
+            other => Err(unexpected_reply("a minimum-distance measurement", other)),
+        }
+    }
+
     fn request(
         &mut self,
         request: &WorkerRequest,
@@ -295,6 +315,7 @@ fn unexpected_reply(request: &str, reply: WorkerReply) -> WorkerError {
             match other {
                 WorkerReply::Executed(_) => "a model",
                 WorkerReply::Exported => "an export",
+                WorkerReply::MinimumDistance(_) => "a minimum-distance measurement",
                 WorkerReply::Failed(_) => unreachable!("handled above"),
             }
         )),
@@ -588,6 +609,16 @@ fn serve(request: WorkerRequest, scratch_dir: &Path) -> WorkerReply {
             path,
         } => match crate::export::export_model(&model, format, &path) {
             Ok(()) => WorkerReply::Exported,
+            Err(error) => WorkerReply::Failed(WorkerFailure::Runtime {
+                message: error.to_string(),
+            }),
+        },
+        WorkerRequest::MinimumDistance {
+            model,
+            first,
+            second,
+        } => match crate::measurement::minimum_distance(&model, &first, &second) {
+            Ok(measurement) => WorkerReply::MinimumDistance(measurement),
             Err(error) => WorkerReply::Failed(WorkerFailure::Runtime {
                 message: error.to_string(),
             }),

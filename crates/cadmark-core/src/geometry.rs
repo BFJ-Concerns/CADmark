@@ -96,6 +96,20 @@ pub struct VertexDescriptor {
     pub position: [f64; 3],
 }
 
+/// The closest separation between two selected topological elements, in mm.
+/// This remains plain data because it crosses the kernel worker boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MinimumDistance {
+    pub millimetres: f64,
+}
+
+impl MinimumDistance {
+    /// A compact label suitable for the in-app measurement readout.
+    pub fn describe(self) -> String {
+        format!("Minimum distance {} mm", compact(self.millimetres))
+    }
+}
+
 /// Whether one solid of the executed model is printable geometry: every
 /// shell closed, and the kernel's own validity check passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +267,17 @@ mod tests {
         assert_eq!(
             summary(12.3456, [1.5, 1.0, 1.0], 6).describe(),
             "6 faces, volume 12.35 mm³, 1.50 × 1 × 1 mm"
+        );
+    }
+
+    #[test]
+    fn minimum_distance_describes_itself_compactly() {
+        assert_eq!(
+            MinimumDistance {
+                millimetres: 12.3456
+            }
+            .describe(),
+            "Minimum distance 12.35 mm"
         );
     }
 

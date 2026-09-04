@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::export::ExportFormat;
+use cadmark_core::geometry::{FaceId, TopologyElement};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 
@@ -50,6 +51,8 @@ fn roomy() -> ExecutionLimits {
 
 const BOX: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n";
 
+const SEPARATED_BOXES: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n    with Locations((20, 0, 0)):\n        Box(10, 10, 10)\n";
+
 #[test]
 fn executes_a_script_and_exports_its_kept_model() {
     let (project, script, mut worker) = project_with_script(BOX);
@@ -66,6 +69,52 @@ fn executes_a_script_and_exports_its_kept_model() {
         .export(&model.model, ExportFormat::Stl, &export, roomy())
         .unwrap();
     assert!(std::fs::metadata(&export).unwrap().len() > 0);
+}
+
+#[test]
+fn measures_the_known_gap_between_faces_through_the_worker() {
+    let (_project, script, mut worker) = project_with_script(SEPARATED_BOXES);
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let measurement = worker
+        .minimum_distance(
+            &model.model,
+            TopologyElement::Face(FaceId(0)),
+            TopologyElement::Face(FaceId(6)),
+            roomy(),
+        )
+        .unwrap();
+
+    assert!(
+        (measurement.millimetres - 20.0).abs() < 1e-6,
+        "{measurement:?}"
+    );
+}
+
+#[test]
+fn exposes_known_circular_edge_diameter_and_face_area_in_descriptors() {
+    let (_project, script, mut worker) = project_with_script(
+        "from build123d import *\n\nwith BuildPart() as part:\n    Cylinder(5, 10)\n",
+    );
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    let circle = model
+        .descriptors
+        .edges
+        .iter()
+        .find(|edge| edge.curve_type == "circle")
+        .expect("cylinder has circular edges");
+    assert!((circle.length / std::f64::consts::PI - 10.0).abs() < 1e-6);
+    assert!(
+        model
+            .descriptors
+            .faces
+            .iter()
+            .any(|face| { (face.area - std::f64::consts::PI * 25.0).abs() < 1e-6 })
+    );
 }
 
 #[test]

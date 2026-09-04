@@ -11,7 +11,7 @@ use cadmark_bridge::AiServices;
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
-use cadmark_core::geometry::ModelSummary;
+use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, TopologyElement};
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::{Conversation, Message};
@@ -35,6 +35,7 @@ pub const SCRIPT_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 /// successful execution besides the mesh, which lives on the GPU.
 pub struct LoadedModel {
     pub summary: ModelSummary,
+    pub descriptors: GeometryDescriptors,
     pub bounds: Option<Bounds3>,
     pub model: ModelFile,
     pub printable: bool,
@@ -92,6 +93,8 @@ pub struct Project {
     /// Whether the script on disk differs from the model on screen.
     pub script_modified_on_disk: bool,
     pub exports_in_flight: usize,
+    /// Distance requests waiting on the retained worker model.
+    pub measurements_in_flight: usize,
 }
 
 impl Project {
@@ -151,6 +154,7 @@ impl Project {
             script_checked_at: Instant::now(),
             script_modified_on_disk: false,
             exports_in_flight: 0,
+            measurements_in_flight: 0,
         };
         project.request_reload();
         project
@@ -235,6 +239,22 @@ impl Project {
         Ok(path)
     }
 
+    /// Ask the retained worker model for the closest separation of two picked elements.
+    pub fn request_minimum_distance(
+        &mut self,
+        first: TopologyElement,
+        second: TopologyElement,
+    ) -> Result<(), String> {
+        let model = self.model.as_ref().ok_or("no model to measure")?;
+        self.send(OrchestratorCommand::MinimumDistance {
+            model: model.model.clone(),
+            first,
+            second,
+        })?;
+        self.measurements_in_flight += 1;
+        Ok(())
+    }
+
     pub fn set_limits(&mut self, limits: ExecutionLimits) {
         let _ = self.send(OrchestratorCommand::SetLimits(limits));
     }
@@ -261,10 +281,11 @@ impl Project {
         let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
         self.ledger = model.ledger;
         self.identification = Box::new(MeasuredIdentification {
-            descriptors: model.descriptors,
+            descriptors: model.descriptors.clone(),
         });
         self.model = Some(LoadedModel {
             summary: model.summary,
+            descriptors: model.descriptors,
             bounds,
             model: model.model,
             printable,
