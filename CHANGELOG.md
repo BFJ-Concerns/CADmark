@@ -16,6 +16,8 @@ All notable changes to this project will be documented in this file.
 - Each AI request carries a curated library of worked build123d examples
   for the operations it names, so the model sees what a good script for
   that operation looks like as well as what the API does
+- Per-part solid-validity status after execution; exports now stop with a
+  non-blocking warning before writing an open or invalid part
 - Project menu in the toolbar: shows the open folder, opens another
   through the system folder picker, lists recent projects, and opens
   `part.py` or the folder externally

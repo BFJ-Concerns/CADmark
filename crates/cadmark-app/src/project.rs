@@ -11,7 +11,7 @@ use cadmark_bridge::AiServices;
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
-use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, TopologyElement};
+use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity, TopologyElement};
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::{Conversation, Message};
@@ -21,6 +21,7 @@ use cadmark_renderer::camera::Bounds3;
 
 use crate::orchestrator::{OrchestratorCommand, OrchestratorResult, spawn_orchestrator};
 use crate::turn::TurnInput;
+use crate::validity::{ExportDecision, export_decision, export_warning};
 
 /// The one script a project folder holds at present.
 pub const SCRIPT_FILENAME: &str = "part.py";
@@ -39,7 +40,8 @@ pub struct LoadedModel {
     pub descriptors: GeometryDescriptors,
     pub bounds: Option<Bounds3>,
     pub model: ModelFile,
-    pub printable: bool,
+    /// Per-solid kernel validity retained for status and the export gate.
+    pub validity: Vec<SolidValidity>,
 }
 
 /// What the worker thread is doing, for the status bar and chat.
@@ -230,6 +232,10 @@ impl Project {
     /// Write the current model next to the script.
     pub fn request_export(&mut self, format: ExportFormat) -> Result<PathBuf, String> {
         let model = self.model.as_ref().ok_or("no model to export")?;
+        let decision = export_decision(&model.validity);
+        if decision != ExportDecision::Ready {
+            return Err(export_warning(&decision).expect("non-ready decision has warning"));
+        }
         let path = self.dir.join(format!("part.{}", format.extension()));
         self.send(OrchestratorCommand::Export {
             model: model.model.clone(),
@@ -278,7 +284,6 @@ impl Project {
             model.mesh.vertices.len(),
             model.ledger.len(),
         );
-        let printable = model.is_printable();
         let bounds = Bounds3::from_positions(model.mesh.vertices.iter().map(|v| v.position));
         self.ledger = model.ledger;
         self.identification = Box::new(MeasuredIdentification {
@@ -289,7 +294,7 @@ impl Project {
             descriptors: model.descriptors,
             bounds,
             model: model.model,
-            printable,
+            validity: model.validity,
         });
         self.script_source = Some(source);
         self.has_script = true;
