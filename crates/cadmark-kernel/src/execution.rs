@@ -505,33 +505,18 @@ mod tests {
         );
     }
 
-    fn assert_every_element_has_candidates(
-        result: &ExecutedModel,
-        expected: &[(SemanticOperation, ProvenanceRelation, u32)],
-    ) {
-        for context in resolved_contexts(result) {
-            let actual = context
-                .provenance
-                .candidates()
-                .iter()
-                .map(|entry| (entry.operation, entry.relation.clone(), entry.source.line))
-                .collect::<Vec<_>>();
-            assert_eq!(actual, expected, "{}", context.element.display_label());
-        }
-    }
-
-    fn assert_every_element_has_candidate(
+    fn assert_every_element_resolves_to(
         result: &ExecutedModel,
         expected: (SemanticOperation, ProvenanceRelation, u32),
     ) {
         for context in resolved_contexts(result) {
-            assert!(
-                context.provenance.candidates().iter().any(|entry| {
-                    (entry.operation, entry.relation.clone(), entry.source.line) == expected
-                }),
-                "{} has no {expected:?}",
-                context.element.display_label()
+            let provenance = entry(&context);
+            let actual = (
+                provenance.operation,
+                provenance.relation.clone(),
+                provenance.source.line,
             );
+            assert_eq!(actual, expected, "{}", context.element.display_label());
         }
     }
 
@@ -709,7 +694,14 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 12);
         assert_eq!(result.ledger.edge_count(), 24);
         assert_eq!(result.ledger.vertex_count(), 16);
-        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::LocationPattern,
+                ProvenanceRelation::Modified,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -725,7 +717,14 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 24);
         assert_eq!(result.ledger.edge_count(), 48);
         assert_eq!(result.ledger.vertex_count(), 32);
-        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::LocationPattern,
+                ProvenanceRelation::Modified,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -741,7 +740,14 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 18);
         assert_eq!(result.ledger.edge_count(), 36);
         assert_eq!(result.ledger.vertex_count(), 24);
-        assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::LocationPattern,
+                ProvenanceRelation::Modified,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -769,7 +775,14 @@ with BuildPart() as part:
         ] {
             let (_scratch, result) = run(source);
             let result = result.unwrap();
-            assert_every_element_resolves(&result, SemanticOperation::LocationPattern, 4);
+            assert_every_element_resolves_to(
+                &result,
+                (
+                    SemanticOperation::LocationPattern,
+                    ProvenanceRelation::Modified,
+                    4,
+                ),
+            );
         }
     }
 
@@ -803,10 +816,7 @@ result = box.scale(2).moved(Location((10, 0, 0)))
         ] {
             let (_scratch, result) = run(source);
             let result = result.unwrap();
-            assert_every_element_has_candidates(
-                &result,
-                &[(operation, ProvenanceRelation::Modified, 4)],
-            );
+            assert_every_element_resolves_to(&result, (operation, ProvenanceRelation::Modified, 4));
         }
     }
 
@@ -833,13 +843,13 @@ result = part.part.rotate(Axis.Z, 30)
         ] {
             let (_scratch, result) = run(source);
             let result = result.unwrap();
-            assert_every_element_has_candidates(
+            assert_every_element_resolves_to(
                 &result,
-                &[(
+                (
                     SemanticOperation::Rotate,
                     ProvenanceRelation::Modified,
                     line,
-                )],
+                ),
             );
         }
     }
@@ -909,7 +919,7 @@ with BuildPart() as part:
     mirror(about=Plane.YZ)
 "#);
         let result = result.unwrap();
-        assert_every_element_has_candidate(
+        assert_every_element_resolves_to(
             &result,
             (SemanticOperation::Mirror, ProvenanceRelation::Modified, 5),
         );
