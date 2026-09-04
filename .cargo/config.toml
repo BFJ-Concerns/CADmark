@@ -1,6 +1,13 @@
+# Cargo settings shared by every checkout.
+
 [env]
-# Point PyO3 at the project's Python 3.12 venv.
-# cadquery-ocp requires 3.12 — system Python may be newer.
-# Relative paths don't work for build scripts — they run in a temp dir.
-# Using the uv-managed Python 3.12 directly.
-PYO3_PYTHON = "/home/user/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12"
+# The Python interpreter PyO3 builds against and the kernel embeds: the
+# project's virtual environment, created by `scripts/bootstrap-python-runtime`.
+# `relative = true` resolves the path against the repository root on
+# whichever machine builds, so nothing here names a home directory. The
+# venv's `bin/python` is a symlink to the real Python 3.12 install; the
+# build scripts follow it to find the interpreter home and library.
+#
+# To build against another interpreter, set PYO3_PYTHON in the environment;
+# a process environment variable overrides this value.
+PYO3_PYTHON = { value = ".venv/bin/python", relative = true }
