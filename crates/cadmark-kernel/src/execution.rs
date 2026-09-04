@@ -397,6 +397,8 @@ mod tests {
         method: String,
         input_kind: String,
         result_kinds: Vec<String>,
+        direct_answer: String,
+        direct_result_kinds: Vec<String>,
     }
 
     /// Run CADmark's consumer path once while observing the real wrapper's
@@ -430,11 +432,22 @@ _cadmark_probe_capture_history = _CadmarkSession.capture_history
 
 def _cadmark_probe_history(builder, method, shape):
     result = _cadmark_probe_history_results(builder, method, shape)
+    try:
+        direct_result = list(getattr(builder, method)(shape))
+        direct_answer = 'returned'
+        direct_result_kinds = tuple(
+            _CadmarkSession.kind_of(item) or 'other' for item in direct_result
+        )
+    except (AttributeError, TypeError, RuntimeError) as error:
+        direct_answer = type(error).__name__
+        direct_result_kinds = ()
     _cadmark_probe_queries.append((
         getattr(builder, '_cadmark_probe_class', type(builder).__name__),
         method,
         _CadmarkSession.kind_of(shape) or 'other',
         tuple(_CadmarkSession.kind_of(item) or 'other' for item in result),
+        direct_answer,
+        direct_result_kinds,
     ))
     return result
 
@@ -452,6 +465,8 @@ class _CadmarkProbeBuilder:
             type(self._cadmark_probe_builder).__name__,
             'IsDeleted',
             _CadmarkSession.kind_of(shape) or 'other',
+            ('deleted',) if result else (),
+            'returned',
             ('deleted',) if result else (),
         ))
         return result
@@ -489,15 +504,25 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                     let queries = globals
                         .get_item("_cadmark_probe_queries")?
                         .expect("probe query collection exists")
-                        .extract::<Vec<(String, String, String, Vec<String>)>>()?;
+                        .extract::<Vec<(String, String, String, Vec<String>, String, Vec<String>)>>(
+                        )?;
                     let queries = queries
                         .into_iter()
                         .map(
-                            |(builder, method, input_kind, result_kinds)| MakerHistoryQuery {
+                            |(
                                 builder,
                                 method,
                                 input_kind,
                                 result_kinds,
+                                direct_answer,
+                                direct_result_kinds,
+                            )| MakerHistoryQuery {
+                                builder,
+                                method,
+                                input_kind,
+                                result_kinds,
+                                direct_answer,
+                                direct_result_kinds,
                             },
                         )
                         .collect();
@@ -550,6 +575,25 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                             && query.input_kind == *input_kind
                     }),
                     "{builder} did not issue {method} for an input {input_kind}: {queries:?}"
+                );
+            }
+            for query in queries.iter().filter(|query| {
+                query.builder == builder
+                    && query.input_kind == *input_kind
+                    && matches!(query.method.as_str(), "Generated" | "Modified")
+            }) {
+                assert_eq!(
+                    query.direct_answer,
+                    "returned",
+                    "{builder} {method} for input {input_kind} was swallowed as {}: {queries:?}",
+                    query.direct_answer,
+                    method = query.method,
+                );
+                assert_eq!(
+                    query.result_kinds,
+                    query.direct_result_kinds,
+                    "{builder} {method} for input {input_kind} differed from its direct maker answer: {queries:?}",
+                    method = query.method,
                 );
             }
             let returns_output_face = queries.iter().any(|query| {
