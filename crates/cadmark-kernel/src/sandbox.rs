@@ -265,8 +265,10 @@ mod tests {
     #[test]
     fn every_jump_lands_inside_the_program() {
         let program = network_denial_program();
+        // An instruction's class is its low three bits.
+        let is_jump = |code: u16| u32::from(code) & 0x07 == libc::BPF_JMP;
         for (index, instruction) in program.iter().enumerate() {
-            if u32::from(instruction.code) & libc::BPF_JMP != 0 {
+            if is_jump(instruction.code) {
                 assert!(index + 1 + usize::from(instruction.jt) < program.len());
                 assert!(index + 1 + usize::from(instruction.jf) < program.len());
             }
