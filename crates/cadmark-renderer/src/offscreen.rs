@@ -440,7 +440,12 @@ mod tests {
     fn rectangle_profile() -> cadmark_core::sketch::SketchProfile {
         use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchProfile, SketchRegion};
 
-        let corners = [[-2.0f32, -1.0, 0.0], [2.0, -1.0, 0.0], [2.0, 1.0, 0.0], [-2.0, 1.0, 0.0]];
+        let corners = [
+            [-2.0f32, -1.0, 0.0],
+            [2.0, -1.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [-2.0, 1.0, 0.0],
+        ];
         SketchProfile {
             plane: Default::default(),
             curves: (0..4)
@@ -542,11 +547,25 @@ mod tests {
         };
 
         let lit = renderer
-            .render(&device, &queue, Some(&cube()), None, &scene.mesh_uniforms(1.0), clear)
+            .render(
+                &device,
+                &queue,
+                Some(&cube()),
+                None,
+                &scene.mesh_uniforms(1.0),
+                clear,
+            )
             .expect("render");
         scene.ghost_solid = true;
         let ghosted = renderer
-            .render(&device, &queue, Some(&cube()), None, &scene.mesh_uniforms(1.0), clear)
+            .render(
+                &device,
+                &queue,
+                Some(&cube()),
+                None,
+                &scene.mesh_uniforms(1.0),
+                clear,
+            )
             .expect("render");
 
         let contrast = |image: &RenderedImage| {

@@ -578,7 +578,10 @@ pub fn context_usage(
 fn describe_model(model: &ExecutedModel) -> String {
     let mut text = match &model.form {
         ModelForm::Solid(solid) => {
-            let mut text = format!("Executed successfully. Model: {}.", solid.summary.describe());
+            let mut text = format!(
+                "Executed successfully. Model: {}.",
+                solid.summary.describe()
+            );
             text.push(' ');
             text.push_str(&describe_validity(&solid.validity));
             text

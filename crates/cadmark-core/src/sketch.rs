@@ -97,7 +97,11 @@ impl SketchProfile {
         (0..3)
             .map(|axis| max[axis] - min[axis])
             .fold(0.0f32, |widest, span| {
-                if span.is_finite() { widest.max(span) } else { widest }
+                if span.is_finite() {
+                    widest.max(span)
+                } else {
+                    widest
+                }
             })
     }
 
@@ -121,7 +125,12 @@ mod tests {
     use super::*;
 
     fn square() -> SketchProfile {
-        let corners = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 3.0, 0.0], [0.0, 3.0, 0.0]];
+        let corners = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 3.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ];
         SketchProfile {
             plane: SketchPlane::default(),
             curves: (0..4)

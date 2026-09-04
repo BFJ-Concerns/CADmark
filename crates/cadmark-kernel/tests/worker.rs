@@ -62,11 +62,20 @@ fn executes_a_script_and_exports_its_kept_model() {
     assert_eq!(model.ledger.face_count(), 6);
     assert_eq!(model.solid().expect("a solid result").summary.face_count, 6);
     assert!(model.is_printable());
-    assert!(model.solid().expect("a solid result").file.0.is_file(), "model kept at {:?}", model.solid().expect("a solid result").file);
+    assert!(
+        model.solid().expect("a solid result").file.0.is_file(),
+        "model kept at {:?}",
+        model.solid().expect("a solid result").file
+    );
 
     let export = project.path().join("part.stl");
     worker
-        .export(&model.solid().expect("a solid result").file, ExportFormat::Stl, &export, roomy())
+        .export(
+            &model.solid().expect("a solid result").file,
+            ExportFormat::Stl,
+            &export,
+            roomy(),
+        )
         .unwrap();
     assert!(std::fs::metadata(&export).unwrap().len() > 0);
 }
@@ -204,7 +213,12 @@ fn a_model_kept_before_a_killed_worker_still_exports() {
     ));
     let export = project.path().join("kept.step");
     worker
-        .export(&model.solid().expect("a solid result").file, ExportFormat::Step, &export, roomy())
+        .export(
+            &model.solid().expect("a solid result").file,
+            ExportFormat::Step,
+            &export,
+            roomy(),
+        )
         .unwrap();
     assert!(std::fs::metadata(&export).unwrap().len() > 0);
 }
