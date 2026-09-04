@@ -83,12 +83,14 @@ mod tests {
             "the production prompt must offer builder, algebra, and direct-API idioms"
         );
         assert!(
-            !prompt.contains("builder mode only"),
-            "the production prompt must not restrict modelling to builder mode"
+            !prompt.contains("import with `from build123d import *`"),
+            "the production prompt must not reinstate the retired wildcard-import rule"
         );
         assert!(
-            !prompt.contains("must use `from build123d import *`"),
-            "the production prompt must not require a wildcard build123d import"
+            !prompt.contains("the script must leave a completed `buildpart` in the namespace")
+                && !prompt
+                    .contains("every part the user asked for is a `buildpart` at the top level"),
+            "the production prompt must not reinstate the retired BuildPart-only rule"
         );
     }
 }

@@ -95,6 +95,18 @@ fn worker_executed_script_also_runs_under_stock_build123d() {
 }
 
 #[test]
+fn worker_does_not_supply_build123d_imports_for_a_script() {
+    let (_project, script, mut worker) =
+        project_with_script("with BuildPart() as part:\n    Box(10, 10, 10)\n");
+
+    let error = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .expect_err("scripts must import their own build123d names");
+    assert!(error.is_script_fault(), "{error}");
+    assert!(error.to_string().contains("NameError"), "{error}");
+}
+
+#[test]
 fn a_script_that_prints_does_not_corrupt_the_protocol() {
     // print() goes to the worker's stderr, never into the reply stream.
     let (_project, script, mut worker) = project_with_script(
