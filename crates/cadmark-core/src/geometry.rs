@@ -57,7 +57,7 @@ pub enum SelectionState {
 
 /// Geometry context packaged for the AI.
 /// Stable output format regardless of which identification strategy produced it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeometryContext {
     /// The selected element type and ID.
     pub element: TopologyElement,
