@@ -1353,13 +1353,191 @@ impl eframe::App for CadmarkApp {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use cadmark_bridge::backend::{ModelItem, ModelRequest, TurnModel};
     use cadmark_core::geometry::{
         EdgeDescriptor, EdgeId, FaceId, GeometryContext, GeometryDescriptors, ModelSummary,
         SelectionState, TopologyElement,
     };
     use cadmark_core::ledger::LedgerValue;
+    use cadmark_core::limits::ExecutionLimits;
+    use cadmark_core::message::{Message, MessageKind};
 
-    use super::{measurement_pair, measurement_readout, turn_chat_message};
+    use super::{
+        CadmarkApp, ChatPane, CodePanel, OverlayState, Project, Renderer, SettingsDialog,
+        SettingsStore, TurnOutcome, TurnRecord, UserSettings, VersionDialog, ai_services,
+        measurement_pair, measurement_readout, turn_chat_message,
+    };
+
+    #[derive(Debug)]
+    struct RecordedProviderRequest {
+        path: String,
+        authenticated: bool,
+        body: serde_json::Value,
+    }
+
+    fn recording_provider(
+        status: u16,
+        body: serde_json::Value,
+    ) -> (
+        String,
+        thread::JoinHandle<Result<RecordedProviderRequest, String>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            return Err(
+                                "recording provider did not receive a request within two seconds"
+                                    .into(),
+                            );
+                        }
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "recording provider could not accept a request: {error}"
+                        ));
+                    }
+                }
+            };
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+            let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':').and_then(|(name, value)| {
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                })
+                .unwrap();
+            while bytes.len() < header_end + content_length {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            let recorded = RecordedProviderRequest {
+                path: headers
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .to_string(),
+                authenticated: headers.lines().any(|line| {
+                    line.eq_ignore_ascii_case("authorization: bearer test-only-stored-token")
+                }),
+                body: serde_json::from_slice(&bytes[header_end..header_end + content_length])
+                    .unwrap(),
+            };
+            let body = body.to_string();
+            let wire = format!(
+                "HTTP/1.1 {status} Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(wire.as_bytes()).unwrap();
+            Ok(recorded)
+        });
+        (format!("http://{address}/v1"), handle)
+    }
+
+    fn settings_for(base_url: String, model: &str) -> UserSettings {
+        UserSettings {
+            ai: Some(cadmark_bridge::config::AiConfiguration {
+                base_url,
+                model: model.to_string(),
+                accepts_images: false,
+                allow_insecure_http: true,
+            }),
+            ..UserSettings::default()
+        }
+    }
+
+    async fn provider_error_from_settings(
+        settings: &UserSettings,
+        store: &SettingsStore,
+    ) -> cadmark_bridge::backend::BackendError {
+        let services = ai_services(settings, Some(store)).unwrap();
+        let mut sink = |_| {};
+        services
+            .model
+            .respond(
+                ModelRequest {
+                    instructions: "test instructions".to_string(),
+                    items: vec![ModelItem::User {
+                        text: "test request".to_string(),
+                        images: vec![],
+                    }],
+                    tools: vec![],
+                },
+                cadmark_core::cancellation::CancelFlag::new(),
+                &mut sink,
+            )
+            .await
+            .unwrap_err()
+    }
+
+    fn app_with_pending_response(project_dir: std::path::PathBuf) -> CadmarkApp {
+        let mut project = Project::open(
+            project_dir,
+            Err("test provider is injected directly".to_string()),
+            ExecutionLimits::default(),
+        );
+        let response = project.conversation.push(Message::ai_response(""));
+        CadmarkApp {
+            project,
+            settings: UserSettings::default(),
+            settings_store: None,
+            chat: ChatPane::new(),
+            overlay: OverlayState::default(),
+            renderer: Renderer::default(),
+            selection: SelectionState::None,
+            minimum_distance: None,
+            code_panel: CodePanel::default(),
+            code_visible: false,
+            highlighted_line: None,
+            version_dialog: VersionDialog::default(),
+            settings_dialog: SettingsDialog::default(),
+            folder_pick_rx: None,
+            pending_camera_bounds: None,
+            pending_pick: None,
+            pick_in_flight: None,
+            hover_readback_pending: false,
+            last_hover_probe: None,
+            has_mesh: false,
+            wgpu_render_state: None,
+            status: None,
+            turn: Some(TurnRecord {
+                response,
+                tools: None,
+                comment_ids: vec![],
+                summary_before: None,
+                history_len: 1,
+            }),
+        }
+    }
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
@@ -1445,5 +1623,109 @@ mod tests {
             measurement_readout(&SelectionState::None, None, Some(&descriptors)),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn stored_provider_settings_reach_the_responses_wire_and_sequence_errors_omit_values() {
+        let (base_url, server) = recording_provider(
+            429,
+            serde_json::json!({"error": {"type": "rate_limit_error", "code": "rate_limit_exceeded", "message": "try again later"}}),
+        );
+        let configuration_dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::at(configuration_dir.path().join("cadmark"));
+        store
+            .save(&settings_for(base_url, "local-cad-model"))
+            .unwrap();
+        store.save_credential("test-only-stored-token").unwrap();
+        let error = provider_error_from_settings(&store.load().unwrap(), &store).await;
+        let request = server.join().unwrap().unwrap();
+        assert!(error.to_string().contains("usage limit"));
+        assert_eq!(request.path, "/v1/responses");
+        assert!(request.authenticated);
+        assert_eq!(request.body["model"], "local-cad-model");
+        assert_eq!(request.body["stream"], true);
+
+        let wrong_type = "endpoint-value-that-must-not-echo";
+        let malformed_dir = configuration_dir.path().join("wrong-type");
+        std::fs::create_dir_all(&malformed_dir).unwrap();
+        std::fs::write(
+            malformed_dir.join("settings.json"),
+            format!(r#"{{"ai":{{"base_url":["{wrong_type}"],"model":"m"}}}}"#),
+        )
+        .unwrap();
+        let error = SettingsStore::at(malformed_dir).load().unwrap_err();
+        assert!(!error.contains(wrong_type));
+    }
+
+    #[test]
+    fn hosted_provider_settings_build_the_shared_application_services() {
+        let configuration_dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::at(configuration_dir.path().join("cadmark"));
+        let settings = UserSettings {
+            ai: Some(cadmark_bridge::config::AiConfiguration {
+                base_url: "https://hosted.example/v1".to_string(),
+                model: "hosted-cad-model".to_string(),
+                accepts_images: true,
+                allow_insecure_http: false,
+            }),
+            ..UserSettings::default()
+        };
+        store.save(&settings).unwrap();
+        let services = ai_services(&store.load().unwrap(), Some(&store)).unwrap();
+        assert_eq!(services.model.model_name(), "hosted-cad-model");
+    }
+
+    #[tokio::test]
+    async fn provider_refusals_reach_the_chat_notice_by_cause() {
+        let cases = [
+            (
+                429,
+                "rate_limit_error",
+                "model_cooldown",
+                "usage limit reached",
+                "the provider is at its usage limit or cooling down",
+            ),
+            (
+                401,
+                "authentication_error",
+                "invalid_api_key",
+                "credential rejected",
+                "the provider rejected the credential",
+            ),
+            (
+                404,
+                "invalid_request_error",
+                "model_not_found",
+                "no such model",
+                "the provider does not serve the configured model",
+            ),
+        ];
+        for (status, kind, code, detail, expected_cause) in cases {
+            let (base_url, server) = recording_provider(
+                status,
+                serde_json::json!({"error": {"type": kind, "code": code, "message": detail}}),
+            );
+            let configuration_dir = tempfile::tempdir().unwrap();
+            let store = SettingsStore::at(configuration_dir.path().join("cadmark"));
+            store
+                .save(&settings_for(base_url, "configured-model"))
+                .unwrap();
+            store.save_credential("test-only-stored-token").unwrap();
+            let error = provider_error_from_settings(&store.load().unwrap(), &store).await;
+            server.join().unwrap().unwrap();
+            let project_dir = tempfile::tempdir().unwrap();
+            let mut app = app_with_pending_response(project_dir.path().to_path_buf());
+            app.finish_turn(TurnOutcome::Failed {
+                error: error.to_string(),
+            });
+            let notice = app.project.conversation.messages().last().unwrap();
+            assert!(matches!(
+                notice.kind,
+                MessageKind::Notice { is_error: true }
+            ));
+            assert!(notice.text.contains(expected_cause));
+            assert!(notice.text.contains(detail));
+            assert!(!notice.text.contains("test-only-stored-token"));
+        }
     }
 }
