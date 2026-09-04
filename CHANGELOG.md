@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Parameters panel listing every module-level numeric name in the open
+  part's script: editing a value rewrites that one number, rebuilds the
+  model and records a design step, with no AI turn; names derived from
+  other parameters are shown as their expression
 - Ambiguous anchors offer their candidate source lines in the comment
   overlay, most likely first where the ledger can rank them and plainly
   unordered where it cannot; hovering a candidate highlights its own line
