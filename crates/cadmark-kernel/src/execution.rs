@@ -391,47 +391,6 @@ mod tests {
         (scratch, result)
     }
 
-    fn assert_every_element_resolves(
-        result: &ExecutedModel,
-        operation: SemanticOperation,
-        line: u32,
-    ) {
-        let strategy = NullIdentification;
-        for index in 0..result.ledger.face_count() {
-            let context = resolve_context(
-                &TopologyElement::Face(FaceId(index as u32)),
-                &result.ledger,
-                &strategy,
-            )
-            .unwrap();
-            let entry = context.provenance.resolved().expect("resolved provenance");
-            assert_eq!(entry.operation, operation);
-            assert_eq!(entry.source.line, line);
-        }
-        for index in 0..result.ledger.edge_count() {
-            let context = resolve_context(
-                &TopologyElement::Edge(EdgeId(index as u32)),
-                &result.ledger,
-                &strategy,
-            )
-            .unwrap();
-            let entry = context.provenance.resolved().expect("resolved provenance");
-            assert_eq!(entry.operation, operation);
-            assert_eq!(entry.source.line, line);
-        }
-        for index in 0..result.ledger.vertex_count() {
-            let context = resolve_context(
-                &TopologyElement::Vertex(VertexId(index as u32)),
-                &result.ledger,
-                &strategy,
-            )
-            .unwrap();
-            let entry = context.provenance.resolved().expect("resolved provenance");
-            assert_eq!(entry.operation, operation);
-            assert_eq!(entry.source.line, line);
-        }
-    }
-
     fn resolved_contexts(result: &ExecutedModel) -> Vec<GeometryContext> {
         let strategy = NullIdentification;
         let mut contexts = Vec::new();
@@ -537,7 +496,10 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 6);
         assert_eq!(result.ledger.edge_count(), 12);
         assert_eq!(result.ledger.vertex_count(), 8);
-        assert_every_element_resolves(&result, SemanticOperation::Box, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (SemanticOperation::Box, ProvenanceRelation::Generated, 4),
+        );
         assert!(matches!(
             result.ledger.lookup_face(FaceId(0)),
             Some(LedgerValue::Resolved(_))
@@ -553,7 +515,14 @@ with BuildPart() as part:
     Cylinder(5, 10)
 "#);
         let result = result.unwrap();
-        assert_every_element_resolves(&result, SemanticOperation::Cylinder, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::Cylinder,
+                ProvenanceRelation::Generated,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -950,7 +919,14 @@ with BuildPart() as part:
 "#);
         let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 6);
-        assert_every_element_resolves(&result, SemanticOperation::Extrude, 6);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::Extrude,
+                ProvenanceRelation::GeneratedDescendant,
+                6,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -993,7 +969,18 @@ with BuildPart() as part:
     revolve(axis=Axis.Z)
 "#);
         let result = result.unwrap();
-        assert_every_element_resolves(&result, SemanticOperation::Revolve, 7);
+        for context in resolved_contexts(&result) {
+            let expected_relation = match context.element {
+                TopologyElement::Face(_) => ProvenanceRelation::Generated,
+                TopologyElement::Edge(_) | TopologyElement::Vertex(_) => {
+                    ProvenanceRelation::GeneratedDescendant
+                }
+            };
+            let provenance = entry(&context);
+            assert_eq!(provenance.operation, SemanticOperation::Revolve);
+            assert_eq!(provenance.relation, expected_relation);
+            assert_eq!(provenance.source.line, 7);
+        }
         assert_bridge_consumers(&result);
     }
 
@@ -1020,7 +1007,10 @@ with BuildPart() as part:
             let (_scratch, result) = run(source);
             let result = result.unwrap();
             assert_eq!(result.ledger.untraced_count(), 0);
-            assert_every_element_resolves(&result, operation, 3);
+            assert_every_element_resolves_to(
+                &result,
+                (operation, ProvenanceRelation::Generated, 3),
+            );
             assert_bridge_consumers(&result);
         }
     }
@@ -1046,7 +1036,10 @@ with BuildPart() as part:
             ),
         ] {
             let (_scratch, result) = run(source);
-            assert_every_element_resolves(&result.unwrap(), operation, 4);
+            assert_every_element_resolves_to(
+                &result.unwrap(),
+                (operation, ProvenanceRelation::Generated, 4),
+            );
         }
     }
 
@@ -1272,7 +1265,10 @@ block = Solid.make_box(4, 4, 4)
 "#);
         let direct = direct.unwrap();
         assert_eq!(direct.ledger.face_count(), 6);
-        assert_every_element_resolves(&direct, SemanticOperation::Box, 3);
+        assert_every_element_resolves_to(
+            &direct,
+            (SemanticOperation::Box, ProvenanceRelation::Generated, 3),
+        );
     }
 
     #[test]
@@ -1325,7 +1321,14 @@ raise RuntimeError("deliberate execution failure")
 with BuildPart() as part:
     Cylinder(2, 4)
 "#);
-        assert_every_element_resolves(&result.unwrap(), SemanticOperation::Cylinder, 4);
+        assert_every_element_resolves_to(
+            &result.unwrap(),
+            (
+                SemanticOperation::Cylinder,
+                ProvenanceRelation::Generated,
+                4,
+            ),
+        );
     }
 
     #[test]
@@ -1344,7 +1347,10 @@ with BuildPart() as part:
         .unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let result = execute_script(&path, scratch.path()).unwrap();
-        assert_every_element_resolves(&result, SemanticOperation::Box, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (SemanticOperation::Box, ProvenanceRelation::Generated, 4),
+        );
     }
 
     #[test]
