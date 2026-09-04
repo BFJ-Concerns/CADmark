@@ -59,8 +59,6 @@ pub struct MeshUniforms {
     /// Number of live entries at the front of the marker storage buffer.
     pub marker_count: u32,
     pub _pad2: u32,
-    pub _pad3: u32,
-    pub _pad4: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
 }
@@ -692,8 +690,6 @@ impl Renderer {
             hover_id: self.hover_id,
             marker_count: self.markers.len().try_into().unwrap_or(u32::MAX),
             _pad2: 0,
-            _pad3: 0,
-            _pad4: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
         }
@@ -806,6 +802,7 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wgpu::util::DeviceExt;
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {
@@ -852,5 +849,96 @@ mod tests {
 
         renderer.markers.clear();
         assert_eq!(renderer.mesh_uniforms(1.0).marker_count, 0);
+    }
+
+    #[test]
+    fn pipeline_accepts_marker_layout_after_markers_are_cleared() {
+        let instance = wgpu::Instance::default();
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: true,
+        };
+        let adapter = pollster::block_on(instance.request_adapter(&options))
+            .or_else(|| {
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    force_fallback_adapter: false,
+                    ..options
+                }))
+            })
+            .expect("a wgpu adapter is required for renderer verification");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("renderer-pipeline-test"),
+                ..Default::default()
+            },
+            None,
+        ))
+        .expect("software adapter device is available");
+        let mut pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
+        pipelines.set_markers(
+            &device,
+            &queue,
+            &[
+                ViewportMarker {
+                    element_id: 1,
+                    colour: [0.8, 0.2, 0.1, 0.7],
+                },
+                ViewportMarker {
+                    element_id: 2,
+                    colour: [0.1, 0.5, 0.9, 0.7],
+                },
+            ],
+        );
+        pipelines.set_markers(&device, &queue, &[]);
+
+        let mesh = GpuMesh {
+            vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-mesh-vertices"),
+                contents: bytemuck::cast_slice(&[GpuVertex {
+                    position: [0.0; 3],
+                    normal: [0.0, 0.0, 1.0],
+                    face_id: 1.0,
+                    _padding: 0.0,
+                }]),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            index_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-mesh-indices"),
+                contents: bytemuck::cast_slice(&[0u32, 0, 0]),
+                usage: wgpu::BufferUsages::INDEX,
+            }),
+            index_count: 3,
+            edge_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("test-edge-vertices"),
+                contents: bytemuck::cast_slice(&[
+                    EdgeVertex {
+                        position: [0.0; 3],
+                        edge_id: 1.0,
+                    },
+                    EdgeVertex {
+                        position: [0.0; 3],
+                        edge_id: 1.0,
+                    },
+                ]),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            edge_vertex_count: 2,
+        };
+        let renderer = Renderer::new();
+        queue.write_buffer(
+            &pipelines.mesh_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&renderer.mesh_uniforms(1.0)),
+        );
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
+        crate::viewport::render_scene(&mut encoder, &pipelines, Some(&mesh), wgpu::Color::BLACK);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+        assert!(
+            pollster::block_on(device.pop_error_scope()).is_none(),
+            "marker bindings and both draw pipelines must validate"
+        );
     }
 }

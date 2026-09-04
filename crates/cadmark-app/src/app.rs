@@ -264,7 +264,12 @@ impl CadmarkApp {
 
     /// Leave a spatial comment pending so several comments can form one turn.
     fn stage_spatial_comment(&mut self, text: String, anchors: Vec<GeometryContext>) {
-        stage_pending_comment(&mut self.pending_comments, text, anchors);
+        stage_pending_comment(
+            &mut self.project.conversation,
+            &mut self.pending_comments,
+            text,
+            anchors,
+        );
         self.chat.focus_input();
     }
 
@@ -1266,14 +1271,17 @@ fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
         .collect()
 }
 
-/// Stage a spatial comment without touching persisted conversation history.
+/// Stage a spatial comment without changing persisted conversation history.
 /// The batch enters history only when it is dispatched as a turn.
 fn stage_pending_comment(
+    conversation: &mut Conversation,
     pending: &mut PendingComments,
     text: String,
     anchors: Vec<GeometryContext>,
 ) {
+    let message_count = conversation.len();
     pending.add(text, anchors);
+    debug_assert_eq!(conversation.len(), message_count);
 }
 
 fn standard_view(view: toolbar::StandardView) -> StandardView {
@@ -1428,9 +1436,19 @@ mod tests {
     #[test]
     fn staging_a_second_comment_keeps_the_first_unsent_and_intact() {
         let mut pending = PendingComments::default();
-        let conversation = Conversation::new();
-        stage_pending_comment(&mut pending, "round this".into(), vec![anchor(1)]);
-        stage_pending_comment(&mut pending, "chamfer this".into(), vec![anchor(2)]);
+        let mut conversation = Conversation::new();
+        stage_pending_comment(
+            &mut conversation,
+            &mut pending,
+            "round this".into(),
+            vec![anchor(1)],
+        );
+        stage_pending_comment(
+            &mut conversation,
+            &mut pending,
+            "chamfer this".into(),
+            vec![anchor(2)],
+        );
 
         assert!(conversation.is_empty(), "staging must not start a turn");
         assert_eq!(pending.comments().len(), 2);
