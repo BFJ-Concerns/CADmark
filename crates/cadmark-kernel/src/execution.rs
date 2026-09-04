@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
 
-use crate::protocol::{ExecutedModel, ModelFile};
+use crate::protocol::{ExecutedModel, ModelForm, ModelFile, SolidResult};
 
 #[derive(Error, Debug)]
 pub enum ExecutionError {
@@ -243,24 +243,7 @@ fn execute_script_source_named(
                 keys.join(", "),
             );
 
-            let shape = crate::tessellation::find_result_shape(&globals)?;
-            let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
-            let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
-            validate_tessellation_ids(&mesh, &ledger)?;
-            let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
-            let (descriptors, summary) =
-                crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
-            log::info!("Model measured: {}", summary.describe());
-            let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
-            let model = keep_model(py, &shape, scratch_dir)?;
-            Ok(ExecutedModel {
-                mesh,
-                ledger,
-                descriptors,
-                summary,
-                validity,
-                model,
-            })
+            capture_result(py, &globals, &session, source, scratch_dir)
         })();
 
         let restoration = crate::provenance::restore(py, &session);
@@ -269,6 +252,52 @@ fn execute_script_source_named(
         }
         execution
     })
+}
+
+/// Turn an executed namespace into what the application keeps. A script
+/// that reached a solid is measured, checked and retained for export; a
+/// script that has so far drawn only a sketch yields its profile, and none
+/// of the solid measurements, because it has no solid to measure.
+fn capture_result(
+    py: Python<'_>,
+    globals: &Bound<'_, PyDict>,
+    session: &crate::provenance::InstrumentationSession,
+    source: &str,
+    scratch_dir: &Path,
+) -> Result<ExecutedModel, ExecutionError> {
+    match crate::tessellation::find_result_shape(globals)? {
+        crate::tessellation::ScriptResult::Solid(shape) => {
+            let (_raw, ledger) = crate::provenance::finalise(py, session, &shape, source)?;
+            let mesh = crate::tessellation::tessellate_from_namespace(py, globals, &shape)?;
+            validate_tessellation_ids(&mesh, &ledger)?;
+            let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
+            let (descriptors, summary) =
+                crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
+            log::info!("Model measured: {}", summary.describe());
+            let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
+            let file = keep_model(py, &shape, scratch_dir)?;
+            Ok(ExecutedModel {
+                mesh,
+                ledger,
+                descriptors,
+                form: ModelForm::Solid(SolidResult {
+                    summary,
+                    validity,
+                    file,
+                }),
+            })
+        }
+        crate::tessellation::ScriptResult::Sketch(sketch) => {
+            let profile = crate::sketch_tessellation::extract_profile(py, globals, &sketch)?;
+            log::info!("Sketch drawn: {}", profile.describe());
+            Ok(ExecutedModel {
+                mesh: TessellatedMesh::default(),
+                ledger: ProvenanceLedger::new(),
+                descriptors: cadmark_core::geometry::GeometryDescriptors::default(),
+                form: ModelForm::Sketch(profile),
+            })
+        }
+    }
 }
 
 /// Write the executed model to a fresh BREP file in `scratch_dir` so it can
@@ -498,15 +527,7 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                         (source, "<cadmark-maker-history-probe>", "exec"),
                     )?;
                     builtins.call_method1("exec", (&code, &globals, &globals))?;
-                    let shape = crate::tessellation::find_result_shape(&globals)?;
-                    let (_raw, ledger) = crate::provenance::finalise(py, &session, &shape, source)?;
-                    let mesh = crate::tessellation::tessellate_from_namespace(py, &globals)?;
-                    validate_tessellation_ids(&mesh, &ledger)?;
-                    let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
-                    let (descriptors, summary) =
-                        crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
-                    let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
-                    let model = keep_model(py, &shape, scratch.path())?;
+                    let executed = capture_result(py, &globals, &session, source, scratch.path())?;
                     let queries = globals
                         .get_item("_cadmark_probe_queries")?
                         .expect("probe query collection exists")
@@ -532,17 +553,7 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                             },
                         )
                         .collect();
-                    Ok((
-                        ExecutedModel {
-                            mesh,
-                            ledger,
-                            descriptors,
-                            summary,
-                            validity,
-                            model,
-                        },
-                        queries,
-                    ))
+                    Ok((executed, queries))
                 })();
             crate::provenance::restore(py, &session)?;
             execution
@@ -961,6 +972,190 @@ with BuildPart() as part:
         assert_bridge_consumers(&result);
     }
 
+    /// The total area of a profile's triangulated regions — what a filled
+    /// region actually covers, holes excluded.
+    fn region_area(profile: &cadmark_core::sketch::SketchProfile) -> f32 {
+        profile
+            .regions
+            .iter()
+            .flat_map(|region| {
+                region.indices.chunks_exact(3).map(|triangle| {
+                    let [a, b, c] = [
+                        region.vertices[triangle[0] as usize],
+                        region.vertices[triangle[1] as usize],
+                        region.vertices[triangle[2] as usize],
+                    ];
+                    let first = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                    let second = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                    let cross = [
+                        first[1] * second[2] - first[2] * second[1],
+                        first[2] * second[0] - first[0] * second[2],
+                        first[0] * second[1] - first[1] * second[0],
+                    ];
+                    (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt() / 2.0
+                })
+            })
+            .sum()
+    }
+
+    fn sketch_of(source: &str) -> cadmark_core::sketch::SketchProfile {
+        let (_scratch, result) = run(source);
+        let model = result.expect("a sketch-only script executes successfully");
+        assert!(
+            model.solid().is_none(),
+            "a script with no solid must not report one"
+        );
+        model.sketch().expect("a sketch profile").clone()
+    }
+
+    #[test]
+    fn a_sketch_only_script_draws_its_curves_corners_and_regions() {
+        let profile = sketch_of(
+            "from build123d import *
+
+with BuildSketch() as profile:
+    Rectangle(20, 10)
+",
+        );
+
+        // A rectangle is four curves meeting at four corners around one
+        // enclosed region — the counts a viewer would draw.
+        assert_eq!(profile.curves.len(), 4, "{:?}", profile.curves);
+        assert_eq!(profile.corners.len(), 4, "{:?}", profile.corners);
+        assert_eq!(profile.regions.len(), 1);
+
+        // The geometry itself, not merely its shape: the corners are the
+        // rectangle's, centred on the origin as build123d places it.
+        let mut corners: Vec<[i32; 2]> = profile
+            .corners
+            .iter()
+            .map(|corner| {
+                [
+                    corner.position[0].round() as i32,
+                    corner.position[1].round() as i32,
+                ]
+            })
+            .collect();
+        corners.sort_unstable();
+        assert_eq!(corners, [[-10, -5], [-10, 5], [10, -5], [10, 5]]);
+        assert!(
+            profile
+                .corners
+                .iter()
+                .all(|corner| corner.position[2].abs() < 1e-4),
+            "a sketch on the XY plane sits at z = 0"
+        );
+
+        // Every corner and curve has its own topology identity, so a later
+        // reader can tell one curve from another.
+        let mut ids: Vec<u32> = profile.curves.iter().map(|curve| curve.curve_id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 4);
+
+        assert!(
+            (region_area(&profile) - 200.0).abs() < 0.5,
+            "the region covers {} rather than the rectangle's 200",
+            region_area(&profile)
+        );
+        assert_eq!(profile.plane.normal.map(|c| c.round()), [0.0, 0.0, 1.0]);
+        assert_eq!(profile.extent(), 20.0);
+    }
+
+    #[test]
+    fn a_sketch_regions_fill_leaves_out_its_holes() {
+        let profile = sketch_of(
+            "from build123d import *
+
+with BuildSketch() as profile:
+    Rectangle(20, 10)
+    Circle(3, mode=Mode.SUBTRACT)
+",
+        );
+
+        // The hole is a curve and a region boundary, not a second region.
+        assert_eq!(profile.regions.len(), 1);
+        assert_eq!(profile.curves.len(), 5, "{:?}", profile.curves);
+
+        let expected = 200.0 - std::f32::consts::PI * 9.0;
+        let area = region_area(&profile);
+        assert!(
+            (area - expected).abs() < 2.0,
+            "the filled region covers {area} rather than {expected} — the hole is filled in"
+        );
+    }
+
+    #[test]
+    fn a_curved_sketch_is_drawn_as_a_polyline_on_its_own_plane() {
+        let profile = sketch_of(
+            "from build123d import *
+
+with BuildSketch(Plane.YZ) as profile:
+    Circle(5)
+",
+        );
+
+        assert_eq!(profile.regions.len(), 1);
+        assert_eq!(profile.curves.len(), 1);
+        let points = &profile.curves[0].points;
+        assert!(
+            points.len() > 8,
+            "a circle drawn with only {} points is not a curve",
+            points.len()
+        );
+        // Placed on the YZ plane, so the profile stands at x = 0 with every
+        // point 5 from the centre — a sketch drawn off the XY plane is not
+        // flattened onto it.
+        assert_eq!(profile.plane.normal.map(|c| c.abs().round()), [1.0, 0.0, 0.0]);
+        for point in points {
+            assert!(point[0].abs() < 1e-3, "point {point:?} left the YZ plane");
+            let radius = (point[1] * point[1] + point[2] * point[2]).sqrt();
+            assert!((radius - 5.0).abs() < 0.2, "point {point:?} is not on the circle");
+        }
+    }
+
+    #[test]
+    fn a_line_that_encloses_nothing_still_draws_its_curves_and_corners() {
+        let profile = sketch_of(
+            "from build123d import *
+
+with BuildLine() as path:
+    Line((0, 0), (10, 0))
+    Line((10, 0), (10, 4))
+",
+        );
+
+        assert_eq!(profile.curves.len(), 2);
+        assert_eq!(profile.corners.len(), 3, "{:?}", profile.corners);
+        assert!(
+            profile.regions.is_empty(),
+            "an open line encloses no region to fill"
+        );
+        // No face states the plane, so it comes from the points themselves.
+        assert_eq!(profile.plane.normal.map(|c| c.abs().round()), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_script_that_extrudes_its_sketch_still_reports_a_solid() {
+        let (_scratch, result) = run(
+            "from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch() as profile:
+        Rectangle(20, 10)
+    extrude(amount=4)
+",
+        );
+        let model = result.expect("execution succeeds");
+        assert!(
+            model.sketch().is_none(),
+            "a finished solid must not be reported as a sketch"
+        );
+        let solid = model.solid().expect("a solid result");
+        assert!((solid.summary.volume - 800.0).abs() < 1e-3);
+        assert!(solid.file.0.is_file());
+    }
+
     #[test]
     fn real_sketch_extrude_resolves_all_final_topology() {
         let (_scratch, result) = run(r#"from build123d import *
@@ -1329,12 +1524,12 @@ with BuildPart() as part:
             .expect("box has an upward face");
         assert!((top.area - 200.0).abs() < 1e-6);
         assert!((top.centre[2] - 2.5).abs() < 1e-6);
-        assert!((result.summary.volume - 1000.0).abs() < 1e-6);
-        let size = result.summary.size();
+        assert!((result.solid().expect("a solid result").summary.volume - 1000.0).abs() < 1e-6);
+        let size = result.solid().expect("a solid result").summary.size();
         assert!((size[0] - 20.0).abs() < 1e-3);
         assert!((size[1] - 10.0).abs() < 1e-3);
         assert!((size[2] - 5.0).abs() < 1e-3);
-        assert_eq!(result.summary.face_count, 6);
+        assert_eq!(result.solid().expect("a solid result").summary.face_count, 6);
     }
 
     #[test]
@@ -1478,7 +1673,7 @@ with BuildPart() as part:
     Cylinder(10, 5)
 "#);
         let result = result.unwrap();
-        let size = result.summary.size();
+        let size = result.solid().expect("a solid result").summary.size();
         assert!((size[0] - 20.0).abs() < 1e-6, "{size:?}");
         assert!((size[1] - 20.0).abs() < 1e-6, "{size:?}");
         assert!((size[2] - 5.0).abs() < 1e-6, "{size:?}");
@@ -1561,13 +1756,13 @@ with BuildPart() as part:
     Box(20, 10, 5)
 "#);
         let result = result.unwrap();
-        assert!(result.model.0.is_file(), "model kept at {:?}", result.model);
+        assert!(result.solid().expect("a solid result").file.0.is_file(), "model kept at {:?}", result.solid().expect("a solid result").file);
         let directory = tempfile::tempdir().unwrap();
         for format in cadmark_core::export::ExportFormat::ALL {
             let path = directory
                 .path()
                 .join(format!("part.{}", format.extension()));
-            crate::export::export_model(&result.model, format, &path).unwrap();
+            crate::export::export_model(&result.solid().expect("a solid result").file, format, &path).unwrap();
             assert!(std::fs::metadata(&path).unwrap().len() > 0, "{path:?}");
         }
     }
@@ -1581,7 +1776,7 @@ hole = Cylinder(2, 10)
 result = plate - hole
 "#);
         let algebra = algebra.unwrap();
-        assert!(algebra.summary.face_count > 6, "the hole adds faces");
+        assert!(algebra.solid().expect("a solid result").summary.face_count > 6, "the hole adds faces");
         assert_contains_operation(&algebra, SemanticOperation::BooleanCut);
         assert!(algebra.is_printable());
 
@@ -1602,7 +1797,7 @@ with BuildPart() as part:
     Box(10, 10, 10)
 "#);
         let closed = closed.unwrap();
-        assert_eq!(closed.validity.len(), 1);
+        assert_eq!(closed.solid().expect("a solid result").validity.len(), 1);
         assert!(closed.is_printable());
 
         // A box with one face removed, closed into a "solid" with a hole in
@@ -1618,8 +1813,8 @@ with BuildPart() as part:
     add(leaky)
 "#);
         let open = open.unwrap();
-        assert_eq!(open.validity.len(), 1);
-        assert!(!open.validity[0].closed);
+        assert_eq!(open.solid().expect("a solid result").validity.len(), 1);
+        assert!(!open.solid().expect("a solid result").validity[0].closed);
         assert!(!open.is_printable());
     }
 
