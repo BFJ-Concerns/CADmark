@@ -6,8 +6,10 @@
 // 2. Identification (experimental): which specific element was clicked.
 // 3. Output format (stable): packages the result for the AI bridge.
 
-use crate::geometry::{GeometryContext, GeometryDescriptors, TopologyElement};
-use crate::ledger::ProvenanceLedger;
+use crate::geometry::{
+    GeometryContext, GeometryDescriptors, PickedElement, SketchElement, TopologyElement,
+};
+use crate::ledger::{LedgerValue, ProvenanceLedger};
 use crate::sketch_lineage::{SketchLineage, SketchLineageLedger};
 
 /// The picked element is outside the ledger the current model was built
@@ -127,7 +129,7 @@ pub fn resolve_context(
 
     // Step 3: Package into the stable output format.
     Ok(GeometryContext {
-        element: element.clone(),
+        element: PickedElement::Solid(element.clone()),
         provenance,
         identification,
         source_context: String::new(),
@@ -148,11 +150,37 @@ pub fn with_sketch_route(
     lineage: &SketchLineageLedger,
 ) -> GeometryContext {
     context.sketch = match &context.element {
-        TopologyElement::Face(id) => lineage.lookup_face(*id),
-        TopologyElement::Edge(id) => lineage.lookup_edge(*id),
-        TopologyElement::Vertex(id) => lineage.lookup_vertex(*id),
+        PickedElement::Solid(TopologyElement::Face(id)) => lineage.lookup_face(*id),
+        PickedElement::Solid(TopologyElement::Edge(id)) => lineage.lookup_edge(*id),
+        PickedElement::Solid(TopologyElement::Vertex(id)) => lineage.lookup_vertex(*id),
+        PickedElement::Sketch(element) => lineage.lookup_element(element),
     };
     context
+}
+
+/// Package a clicked sketch element as a context the rest of the
+/// application anchors to exactly as it anchors to a solid element.
+///
+/// A sketch element has no place in the solid's provenance ledger — it is
+/// what the script drew, not what the kernel built — so its provenance is
+/// the sketch route itself, which names the line that drew it or the reason
+/// no line can be named.
+pub fn resolve_sketch_context(
+    element: SketchElement,
+    lineage: &SketchLineageLedger,
+) -> GeometryContext {
+    let sketch = lineage.lookup_element(&element);
+    GeometryContext {
+        element: PickedElement::Sketch(element),
+        // Nothing the kernel built claims a sketch element, so its ledger
+        // provenance is honestly empty; the sketch route below carries the
+        // line that drew it.
+        provenance: LedgerValue::Untraced,
+        identification: std::collections::HashMap::new(),
+        source_context: String::new(),
+        neighbours: Vec::new(),
+        sketch,
+    }
 }
 
 /// Attach the executed script context to an already resolved element. The
@@ -168,12 +196,24 @@ pub fn with_source_context(mut context: GeometryContext, source: Option<&str>) -
         context.source_context = "The executed script is empty.".to_string();
         return context;
     }
-    let candidates: Vec<u32> = context
+    // A sketch element has no ledger provenance — nothing the kernel built
+    // claims it — so the line the sketch route names is the only known
+    // source there is, and the window is drawn around it.
+    let mut candidates: Vec<u32> = context
         .provenance
         .candidates()
         .iter()
         .map(|entry| entry.source.line)
         .collect();
+    candidates.extend(
+        context
+            .sketch
+            .candidates()
+            .iter()
+            .map(|source| source.source.line),
+    );
+    candidates.sort_unstable();
+    candidates.dedup();
     let windows = if candidates.is_empty() {
         vec![(1, lines.len())]
     } else {
@@ -443,14 +483,71 @@ mod tests {
             neighbours: Vec::new(),
         };
 
-        let drawn = with_sketch_route(context(TopologyElement::Face(FaceId(1))), &lineage);
+        let drawn = with_sketch_route(
+            context(PickedElement::Solid(TopologyElement::Face(FaceId(1)))),
+            &lineage,
+        );
         assert_eq!(
             drawn.sketch.resolved().map(|source| source.source.line),
             Some(5),
         );
         // A different element must not inherit the only route on record.
-        let other = with_sketch_route(context(TopologyElement::Face(FaceId(2))), &lineage);
+        let other = with_sketch_route(
+            context(PickedElement::Solid(TopologyElement::Face(FaceId(2)))),
+            &lineage,
+        );
         assert_eq!(other.sketch.resolved(), None);
         assert!(other.sketch.no_route().is_some());
+    }
+
+    #[test]
+    fn a_clicked_sketch_element_becomes_an_anchorable_context() {
+        use crate::geometry::{SketchElement, SketchElementKind};
+        let mut lineage = SketchLineageLedger::new();
+        let curve = SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 2,
+        };
+        lineage.record_element(
+            curve,
+            crate::sketch_lineage::SketchSource {
+                source: SourceRef {
+                    line: 8,
+                    code: "Rectangle(20, 10)".to_string(),
+                },
+                object: "Rectangle".to_string(),
+            },
+        );
+
+        let context = with_source_context(
+            resolve_sketch_context(curve, &lineage),
+            Some(
+                "from build123d import *\n\n\n\n\n\nwith BuildSketch():\n    Rectangle(20, 10)\nextrude(amount=5)\n",
+            ),
+        );
+
+        // The context anchors to the sketch element itself, so it can be
+        // held as a comment anchor exactly as a solid element is.
+        assert_eq!(context.element, PickedElement::Sketch(curve));
+        assert_eq!(
+            context.sketch.resolved().map(|source| source.source.line),
+            Some(8),
+        );
+        // Nothing the kernel built claims a drawn curve, so the window
+        // comes from the sketch route rather than from ledger provenance.
+        assert_eq!(context.provenance, LedgerValue::Untraced);
+        assert!(context.source_context.contains("8 |     Rectangle(20, 10)"));
+        assert!(!context.source_context.contains("1 | from build123d"));
+
+        // An element the execution never recorded says so rather than
+        // borrowing the only route on file.
+        let unknown = resolve_sketch_context(
+            SketchElement {
+                kind: SketchElementKind::Corner,
+                index: 9,
+            },
+            &lineage,
+        );
+        assert!(unknown.sketch.no_route().is_some());
     }
 }
