@@ -1440,7 +1440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stored_provider_settings_reach_the_responses_wire_without_echoing_wrong_types() {
+    async fn stored_provider_settings_reach_the_responses_wire_and_sequence_errors_omit_values() {
         let (base_url, server) = recording_provider(
             429,
             serde_json::json!({
