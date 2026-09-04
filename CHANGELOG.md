@@ -5,8 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Selecting a face or edge shows which sketch curve produced it, and clicking
-  a sketch curve, corner or region points at the line that drew it. Where the
+- Selecting a face or edge shows which sketch curve produced it, and a sketch
+  curve, corner or region can be clicked and commented on like any other
+  selection, anchored to the line that drew it. Where the
   kernel keeps no route from the sketch to that element — across a clean-up
   step, or a boolean's edge inputs — the reason is stated rather than a
   nearest plausible line being offered
