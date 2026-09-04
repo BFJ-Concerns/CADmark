@@ -314,6 +314,53 @@ mod tests {
     }
 
     #[test]
+    fn completed_turn_leaves_the_working_script_at_its_recorded_step() {
+        let dir = test_repo();
+        let script = "part.py";
+        let recorded_script = "box = Box(10, 10, 10)";
+        fs::write(dir.path().join(script), recorded_script).unwrap();
+
+        let step = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+
+        let committed_script = run_git(
+            dir.path(),
+            &["show", &format!("{}:{script}", step.commit_hash)],
+        )
+        .unwrap();
+        assert_eq!(committed_script.trim(), recorded_script);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(script)).unwrap(),
+            committed_script
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_restore_the_recorded_script() {
+        let dir = test_repo();
+        let script = "part.py";
+        let branch = current_branch(dir.path()).unwrap();
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let first = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+        fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
+        let second = create_microversion(dir.path(), "Widen box", "make it wider", script).unwrap();
+
+        checkout_commit(dir.path(), &first.commit_hash).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(script)).unwrap(),
+            "box = Box(10, 10, 10)"
+        );
+
+        checkout_commit(dir.path(), &second.commit_hash).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join(script)).unwrap(),
+            "box = Box(20, 20, 20)"
+        );
+
+        checkout_branch_tip(dir.path(), &branch).unwrap();
+        assert_eq!(current_branch(dir.path()).unwrap(), branch);
+    }
+
+    #[test]
     fn create_snapshot() {
         let dir = test_repo();
         let script = "part.py";
@@ -325,6 +372,23 @@ mod tests {
 
         let versions = list_microversions(dir.path(), 10).unwrap();
         assert!(versions[0].snapshot.is_some());
+    }
+
+    #[test]
+    fn named_version_is_listed_by_its_name() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+
+        super::create_snapshot(dir.path(), "Before fillet", script).unwrap();
+
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        assert!(versions.iter().any(|version| {
+            version
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.name == "Before fillet")
+        }));
     }
 
     #[test]
@@ -376,6 +440,62 @@ mod tests {
             list_branches(dir.path()).unwrap().contains(&second_branch),
             "the second edit must be recorded on its own branch"
         );
+    }
+
+    #[test]
+    fn history_lists_steps_on_several_alternatives_from_one_undone_step() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let base = create_microversion(dir.path(), "Create box", "make a box", script).unwrap();
+
+        for (summary, script_source) in [
+            ("First alternative", "box = Box(20, 20, 20)"),
+            ("Second alternative", "box = Box(30, 30, 30)"),
+            ("Third alternative", "box = Box(40, 40, 40)"),
+        ] {
+            checkout_commit(dir.path(), &base.commit_hash).unwrap();
+            fs::write(dir.path().join(script), script_source).unwrap();
+            create_microversion(dir.path(), summary, "try another edit", script).unwrap();
+        }
+
+        let summaries: Vec<_> = list_microversions(dir.path(), 10)
+            .unwrap()
+            .into_iter()
+            .map(|version| version.summary)
+            .collect();
+        assert!(summaries.contains(&"Create box".to_string()));
+        for alternative in [
+            "First alternative",
+            "Second alternative",
+            "Third alternative",
+        ] {
+            assert!(
+                summaries.contains(&alternative.to_string()),
+                "history omitted {alternative}"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_step_recording_leaves_no_history_entry() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        create_microversion(dir.path(), "Existing step", "make a box", script).unwrap();
+        let history_before = list_microversions(dir.path(), 10).unwrap();
+
+        let result = create_microversion(
+            dir.path(),
+            "Missing script",
+            "make a box",
+            "does-not-exist.py",
+        );
+
+        assert!(result.is_err());
+        let history_after = list_microversions(dir.path(), 10).unwrap();
+        assert_eq!(history_after.len(), history_before.len());
+        assert_eq!(history_after[0].commit_hash, history_before[0].commit_hash);
     }
 
     #[test]
