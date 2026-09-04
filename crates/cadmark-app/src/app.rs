@@ -22,14 +22,18 @@ use cadmark_renderer::pipeline::Renderer;
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
+use cadmark_ui::part_name_dialog::{PartNameAction, PartNameDialog};
 use cadmark_ui::settings_dialog::{SettingsAction, SettingsDialog, SettingsForm};
+use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
 use cadmark_ui::status::{Status, StatusView};
-use cadmark_ui::toolbar::{self, ToolbarAction, ToolbarState};
+use cadmark_ui::toolbar::{self, PartOption, ToolbarAction, ToolbarState};
 use cadmark_ui::version_dialog::{VersionDialog, VersionDialogAction};
 use cadmark_ui::view_gizmo::GizmoAction;
 
+use crate::launch::LaunchTarget;
 use crate::orchestrator::OrchestratorResult;
-use crate::project::{Busy, Project, SCRIPT_FILENAME, SCRIPT_WATCH_INTERVAL};
+use crate::parts::{self, OpenPart};
+use crate::project::{Busy, Project, SCRIPT_WATCH_INTERVAL};
 use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
 use crate::turn::{
     NoRender, RenderSource, TurnEvent, TurnInput, TurnOutcome, context_usage,
@@ -144,7 +148,9 @@ struct TurnRecord {
 
 /// Top-level application state.
 pub struct CadmarkApp {
-    project: Project,
+    /// The open project folder, or `None` before one is chosen: the
+    /// application starts here and loads nothing until the user picks.
+    project: Option<Project>,
     settings: UserSettings,
     settings_store: Option<SettingsStore>,
     chat: ChatPane,
@@ -158,9 +164,16 @@ pub struct CadmarkApp {
     /// Source line of the selected element, when its provenance is known.
     highlighted_line: Option<u32>,
     version_dialog: VersionDialog,
+    part_dialog: PartNameDialog,
     settings_dialog: SettingsDialog,
     /// A folder picker running on its own thread reports here.
     folder_pick_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// Why the last attempt to open a folder came to nothing, shown on
+    /// the start view where there is no status bar to carry it.
+    start_notice: Option<String>,
+    /// A message typed before a project was open, delivered as the first
+    /// turn of the project the user then chooses.
+    pending_first_message: Option<String>,
     /// Bounds to frame once the viewport aspect ratio is known.
     pending_camera_bounds: Option<Bounds3>,
     /// Local click coordinates (relative to viewport rect) for the
@@ -190,7 +203,7 @@ pub struct CadmarkApp {
 }
 
 impl CadmarkApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, project_dir: PathBuf) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, target: LaunchTarget) -> Self {
         cadmark_ui::theme::apply(&cc.egui_ctx);
 
         let mut settings_store = SettingsStore::default_location();
@@ -214,15 +227,8 @@ impl CadmarkApp {
         }
 
         let scene = SceneHandle::new();
-        let project = Project::open(
-            project_dir,
-            ai_services(&settings, settings_store.as_ref()),
-            settings.limits,
-            render_source(&scene, wgpu_render_state.as_ref()),
-        );
-
         let mut app = Self {
-            project,
+            project: None,
             settings,
             settings_store,
             chat: ChatPane::new(),
@@ -234,8 +240,11 @@ impl CadmarkApp {
             code_visible: false,
             highlighted_line: None,
             version_dialog: VersionDialog::default(),
+            part_dialog: PartNameDialog::default(),
             settings_dialog: SettingsDialog::default(),
             folder_pick_rx: None,
+            start_notice: None,
+            pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
@@ -251,14 +260,41 @@ impl CadmarkApp {
             .wgpu_render_state
             .as_ref()
             .is_some_and(|rs| rs.target_format.is_srgb());
-        app.chat.ai_available = app.project.ai_model.is_some();
-        app.remember_project();
+        if let LaunchTarget::Folder(dir) = target {
+            app.open_project(&cc.egui_ctx, dir);
+        }
         app.apply_window_title(&cc.egui_ctx);
         app
     }
 
+    /// The open project, for the many places that only run with one.
+    fn project(&self) -> Option<&Project> {
+        self.project.as_ref()
+    }
+
+    fn project_mut(&mut self) -> Option<&mut Project> {
+        self.project.as_mut()
+    }
+
+    /// Whether the worker is running something that must not be raced.
+    fn busy(&self) -> bool {
+        self.project
+            .as_ref()
+            .is_some_and(|project| project.busy.is_some())
+    }
+
+    /// Whether the open part has a script on disk.
+    fn has_script(&self) -> bool {
+        self.project
+            .as_ref()
+            .is_some_and(|project| project.has_script)
+    }
+
     fn remember_project(&mut self) {
-        self.settings.remember_project(&self.project.dir);
+        let Some(dir) = self.project().map(|project| project.dir.clone()) else {
+            return;
+        };
+        self.settings.remember_project(&dir);
         self.save_settings();
     }
 
@@ -271,33 +307,57 @@ impl CadmarkApp {
     }
 
     fn apply_window_title(&self, ctx: &egui::Context) {
-        let name = toolbar::project_display_name(&self.project.dir);
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "{name} \u{2014} CADmark"
-        )));
+        let title = match self.project() {
+            Some(project) => format!(
+                "{} \u{2014} {} \u{2014} CADmark",
+                project.part().display_name(),
+                toolbar::project_display_name(&project.dir)
+            ),
+            None => "CADmark".to_string(),
+        };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
     /// Switch to another project folder: a new worker, history and
     /// conversation, with the viewport cleared until its script has run.
     fn open_project(&mut self, ctx: &egui::Context, project_dir: PathBuf) {
-        if self.project.busy.is_some() {
+        if self.busy() {
             return;
         }
-        self.project.save_conversation();
-        self.project = Project::open(
+        if !project_dir.is_dir() {
+            self.start_notice = Some(format!(
+                "{} is not a folder any more.",
+                project_dir.display()
+            ));
+            self.settings.forget_project(&project_dir);
+            self.save_settings();
+            return;
+        }
+        if let Some(project) = self.project() {
+            project.save_conversation();
+        }
+        let project = Project::open(
             project_dir,
+            None,
             ai_services(&self.settings, self.settings_store.as_ref()),
             self.settings.limits,
             render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
         self.chat = ChatPane::new();
-        self.chat.ai_available = self.project.ai_model.is_some();
+        self.chat.ai_available = project.ai_model.is_some();
+        self.project = Some(project);
+        self.start_notice = None;
         self.status = None;
         self.turn = None;
         self.clear_loaded_model();
         self.renderer.camera = Camera::default();
         self.remember_project();
         self.apply_window_title(ctx);
+        // A message typed before there was a project to send it to is
+        // this project's first turn.
+        if let Some(text) = self.pending_first_message.take() {
+            self.send_chat_message(text);
+        }
     }
 
     /// Show the system folder picker on its own thread; the choice is
@@ -308,11 +368,17 @@ impl CadmarkApp {
         }
         let (tx, rx) = mpsc::channel();
         let start_in = self
-            .project
-            .dir
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.project.dir.clone());
+            .project()
+            .map(|project| {
+                project
+                    .dir
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| project.dir.clone())
+            })
+            .or_else(|| self.settings.recent_projects.first().cloned())
+            .or_else(std::env::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
         let dialog = rfd::FileDialog::new()
             .set_parent(frame)
             .set_title("Open a CADmark project folder")
@@ -331,13 +397,17 @@ impl CadmarkApp {
 
     /// Send a chat message: one turn with this text and no anchors.
     fn send_chat_message(&mut self, text: String) {
-        let history = self.project.conversation.clone();
-        self.project.conversation.push(Message::user_chat(&text));
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        let history = project.conversation.clone();
+        project.conversation.push(Message::user_chat(&text));
+        let dir = project.dir.clone();
         self.start_turn(
             TurnInput {
                 chat: Some(text),
                 comments: Vec::new(),
-                images: reference_images(&self.project.dir),
+                images: reference_images(&dir),
                 context_window_tokens: self.settings.context_window_tokens,
             },
             history,
@@ -347,16 +417,19 @@ impl CadmarkApp {
 
     /// Send a spatial comment: one turn anchored to the elements.
     fn send_spatial_comment(&mut self, text: String, anchors: Vec<GeometryContext>) {
-        let history = self.project.conversation.clone();
-        let id = self
-            .project
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        let history = project.conversation.clone();
+        let id = project
             .conversation
             .push(Message::spatial_comment(&text, anchors.clone()));
+        let dir = project.dir.clone();
         self.start_turn(
             TurnInput {
                 chat: None,
                 comments: vec![GroundedComment { text, anchors }],
-                images: reference_images(&self.project.dir),
+                images: reference_images(&dir),
                 context_window_tokens: self.settings.context_window_tokens,
             },
             history,
@@ -368,13 +441,12 @@ impl CadmarkApp {
     /// recorded; the model sees it plus the turn's input, once.
     fn start_turn(&mut self, input: TurnInput, history: Conversation, comment_ids: Vec<MessageId>) {
         let history_len = history.len();
-        let summary_before = self
-            .project
-            .model
-            .as_ref()
-            .map(|model| model.summary.clone());
-        let response = self.project.conversation.push(Message::ai_response(""));
-        match self.project.start_turn(input, history) {
+        let Some(project) = self.project.as_mut() else {
+            return;
+        };
+        let summary_before = project.model.as_ref().map(|model| model.summary.clone());
+        let response = project.conversation.push(Message::ai_response(""));
+        match project.start_turn(input, history) {
             Ok(_cancel) => {
                 self.turn = Some(TurnRecord {
                     response,
@@ -385,26 +457,39 @@ impl CadmarkApp {
                 });
             }
             Err(error) => {
-                self.project.conversation.remove(response);
+                project.conversation.remove(response);
                 self.status = Some(Status::error(error));
             }
         }
     }
 
     fn apply_turn_event(&mut self, event: TurnEvent) {
+        if self.turn.is_none() || self.project.is_none() {
+            return;
+        }
+        if let TurnEvent::ModelBuilt { model, source } = event {
+            self.show_model(*model, source);
+            if let Some(project) = self.project.as_mut() {
+                project.note_turn_event(None);
+            }
+            return;
+        }
         let Some(turn) = &mut self.turn else { return };
-        let conversation = &mut self.project.conversation;
+        let Some(project) = self.project.as_mut() else {
+            return;
+        };
+        let conversation = &mut project.conversation;
         match event {
             TurnEvent::ConversationCondensed { summary } => {
                 conversation.condense_before(turn.history_len, summary);
                 turn.history_len = 1;
             }
             TurnEvent::Phase(phase) => {
-                self.project.note_turn_event(Some(phase));
+                project.note_turn_event(Some(phase));
             }
             TurnEvent::Text(text) => {
                 conversation.append_text(turn.response, &text);
-                self.project.note_turn_event(None);
+                project.note_turn_event(None);
             }
             TurnEvent::ToolStarted {
                 call_id,
@@ -424,7 +509,7 @@ impl CadmarkApp {
                     record_tool_start(conversation, turn.tools, turn.response, activity);
                 turn.tools = Some(tools);
                 turn.response = response;
-                self.project.note_turn_event(None);
+                project.note_turn_event(None);
             }
             TurnEvent::ToolFinished {
                 call_id,
@@ -442,19 +527,26 @@ impl CadmarkApp {
                     activity.failed = failed;
                     activity.finished = Some(chrono::Utc::now());
                 }
-                self.project.note_turn_event(None);
+                project.note_turn_event(None);
             }
-            TurnEvent::ModelBuilt { model, source } => {
-                self.show_model(*model, source);
-                self.project.note_turn_event(None);
-            }
+            // Handled before the project is borrowed above.
+            TurnEvent::ModelBuilt { .. } => {}
         }
     }
 
     fn finish_turn(&mut self, outcome: TurnOutcome) {
-        self.project.busy = None;
+        let Some(project) = self.project.as_mut() else {
+            return;
+        };
+        project.busy = None;
         let Some(turn) = self.turn.take() else { return };
-        let conversation = &mut self.project.conversation;
+        let dir = project.dir.clone();
+        let script_filename = project.part_file_name().to_string();
+        let conversation = &mut project.conversation;
+        // What the outcome asks of the rest of the application, once the
+        // conversation has been brought up to date.
+        let mut show: Option<(Box<cadmark_kernel::protocol::ExecutedModel>, String)> = None;
+        let mut rebuild = false;
         match outcome {
             TurnOutcome::Completed {
                 summary,
@@ -481,12 +573,12 @@ impl CadmarkApp {
                     message.text = text;
                 }
                 match crate::git_ops::create_microversion(
-                    &self.project.dir,
+                    &dir,
                     &summary,
                     &summary,
-                    SCRIPT_FILENAME,
+                    &script_filename,
                 ) {
-                    Ok(version) => self.project.history.push(version),
+                    Ok(version) => project.history.push(version),
                     Err(e) => {
                         log::error!("Failed to record the design step: {e}");
                         self.status = Some(Status::error(format!(
@@ -494,7 +586,7 @@ impl CadmarkApp {
                         )));
                     }
                 }
-                self.show_model(*model, source);
+                show = Some((model, source));
             }
             TurnOutcome::Answered => {
                 if conversation
@@ -509,61 +601,76 @@ impl CadmarkApp {
                 conversation.push(Message::error_notice(format!(
                     "The turn did not produce a working model, so the previous one was kept.\n\n{error}"
                 )));
-                self.restore_after_failed_turn();
+                rebuild = true;
             }
             TurnOutcome::Cancelled => {
                 conversation.remove(turn.response);
                 conversation.push(Message::notice("Turn cancelled; the model is as it was."));
-                self.restore_after_failed_turn();
+                rebuild = true;
             }
         }
-        self.project.save_conversation();
+        if let Some((model, source)) = show {
+            self.show_model(*model, source);
+        }
+        if rebuild {
+            self.restore_after_failed_turn();
+        }
+        if let Some(project) = self.project() {
+            project.save_conversation();
+        }
         self.chat.focus_input();
     }
 
     /// A turn that failed after a mid-turn execution left that model on
     /// screen; the script on disk is the original again, so rebuild it.
     fn restore_after_failed_turn(&mut self) {
-        self.project.request_reload();
+        if let Some(project) = self.project_mut() {
+            project.request_reload();
+        }
     }
 
     // ── Worker results ────────────────────────────────────────────
 
     fn poll_results(&mut self, ctx: &egui::Context) {
-        for result in self.project.poll() {
+        let results = match self.project_mut() {
+            Some(project) => project.poll(),
+            None => Vec::new(),
+        };
+        for result in results {
+            let Some(project) = self.project.as_mut() else {
+                break;
+            };
+            let part = project.part_file_name().to_string();
             match result {
                 OrchestratorResult::Reloaded { model, source } => {
-                    self.project.busy = None;
+                    project.busy = None;
                     self.show_model(*model, source);
                 }
                 OrchestratorResult::NoScript => {
-                    self.project.busy = None;
+                    project.busy = None;
+                    project.script_source = None;
+                    project.has_script = false;
+                    project.script_modified_on_disk = false;
                     self.clear_loaded_model();
-                    self.project.script_source = None;
-                    self.project.has_script = false;
-                    self.project.script_modified_on_disk = false;
                     self.status = Some(Status::info(format!(
-                        "No {SCRIPT_FILENAME} yet \u{2014} describe a part to get started"
+                        "No {part} yet \u{2014} describe a part to get started"
                     )));
                 }
                 OrchestratorResult::ReloadFailed { error } => {
-                    self.project.busy = None;
+                    project.busy = None;
                     log::error!("Script execution failed: {error}");
+                    project.has_script = project.script_path().exists();
+                    project.record_script_state();
+                    project.conversation.push(Message::error_notice(format!(
+                        "{part} failed to run.\n\n{error}"
+                    )));
                     self.clear_loaded_model();
-                    self.project.has_script = self.project.script_path().exists();
-                    self.project.record_script_state();
                     self.status = Some(Status::error(format!("Execution error: {error}")));
-                    self.project
-                        .conversation
-                        .push(Message::error_notice(format!(
-                            "{SCRIPT_FILENAME} failed to run.\n\n{error}"
-                        )));
                 }
                 OrchestratorResult::TurnEvent(event) => self.apply_turn_event(event),
                 OrchestratorResult::TurnEnded(outcome) => self.finish_turn(outcome),
                 OrchestratorResult::Exported { format, result } => {
-                    self.project.exports_in_flight =
-                        self.project.exports_in_flight.saturating_sub(1);
+                    project.exports_in_flight = project.exports_in_flight.saturating_sub(1);
                     self.status = Some(match result {
                         Ok(path) => Status::info(format!(
                             "Exported {} to {}",
@@ -580,8 +687,8 @@ impl CadmarkApp {
                     second,
                     result,
                 } => {
-                    self.project.measurements_in_flight =
-                        self.project.measurements_in_flight.saturating_sub(1);
+                    project.measurements_in_flight =
+                        project.measurements_in_flight.saturating_sub(1);
                     if measurement_pair(self.overlay.anchors()) == Some((first, second)) {
                         self.minimum_distance = match result {
                             Ok(measurement) => Some(measurement),
@@ -604,6 +711,14 @@ impl CadmarkApp {
                 }
                 Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
                     self.folder_pick_rx = None;
+                    // Nothing was chosen, so a message held for the
+                    // project goes back into the input rather than
+                    // waiting on a choice the user declined to make.
+                    if let Some(text) = self.pending_first_message.take() {
+                        self.chat.input_text = text;
+                        self.start_notice = None;
+                        self.chat.focus_input();
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -613,7 +728,11 @@ impl CadmarkApp {
     /// Put an executed model on screen: the GPU mesh, the ledger, the
     /// status line, and a fresh selection.
     fn show_model(&mut self, model: cadmark_kernel::protocol::ExecutedModel, source: String) {
-        let mut status = format!("Built {SCRIPT_FILENAME}");
+        let part = match self.project() {
+            Some(project) => project.part_file_name().to_string(),
+            None => return,
+        };
+        let mut status = format!("Built {part}");
         let untraced = model.ledger.untraced_count();
         if untraced > 0 {
             status.push_str(&format!(
@@ -636,7 +755,9 @@ impl CadmarkApp {
         // A new mesh under a resting cursor must be picked afresh.
         self.last_hover_probe = None;
         let mesh = std::sync::Arc::new(model.mesh.clone());
-        let bounds = self.project.install_model(model, source);
+        let bounds = self
+            .project_mut()
+            .and_then(|project| project.install_model(model, source));
         self.scene.set_mesh(Some((mesh, bounds)));
         if let Some(bounds) = bounds {
             self.pending_camera_bounds = Some(bounds);
@@ -656,7 +777,9 @@ impl CadmarkApp {
     /// show stale geometry after a reload failure.
     fn clear_loaded_model(&mut self) {
         self.pending_camera_bounds = None;
-        self.project.clear_model();
+        if let Some(project) = self.project_mut() {
+            project.clear_model();
+        }
         self.scene.set_mesh(None);
         self.has_mesh = false;
         self.pending_pick = None;
@@ -671,12 +794,31 @@ impl CadmarkApp {
         }
     }
 
-    /// Check out a design step and rebuild the model from it.
+    /// Check out a design step and rebuild the model from it. A step that
+    /// changed another part of the folder reopens that part, so what the
+    /// user sees is what the step changed.
     fn restore_version(&mut self, commit_hash: String) {
-        match crate::git_ops::checkout_commit(&self.project.dir, &commit_hash) {
+        let Some(dir) = self.project().map(|project| project.dir.clone()) else {
+            return;
+        };
+        match crate::git_ops::checkout_commit(&dir, &commit_hash) {
             Ok(()) => {
                 log::info!("Restored design step {commit_hash}");
-                self.project.request_reload();
+                let part = crate::git_ops::part_of_commit(&dir, &commit_hash);
+                let Some(project) = self.project_mut() else {
+                    return;
+                };
+                match part {
+                    Some(file_name) if file_name != project.part_file_name() => {
+                        let part = if file_name == crate::parts::UNTITLED_PART {
+                            OpenPart::Untitled
+                        } else {
+                            OpenPart::Named(file_name)
+                        };
+                        project.switch_part(part);
+                    }
+                    _ => project.request_reload(),
+                }
             }
             Err(e) => {
                 log::error!("Restoring {commit_hash} failed: {e}");
@@ -688,9 +830,12 @@ impl CadmarkApp {
     }
 
     fn save_named_version(&mut self, name: String) {
-        match crate::git_ops::create_snapshot(&self.project.dir, &name, SCRIPT_FILENAME) {
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        match crate::git_ops::create_snapshot(&project.dir, &name, project.part_file_name()) {
             Ok(version) => {
-                self.project.history.push(version);
+                project.history.push(version);
                 self.status = Some(Status::info(format!(
                     "Saved version \u{201C}{name}\u{201D}"
                 )));
@@ -703,7 +848,10 @@ impl CadmarkApp {
     }
 
     fn export(&mut self, format: ExportFormat) {
-        match self.project.request_export(format) {
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        match project.request_export(format) {
             Ok(_path) => {
                 self.status = Some(Status::info(format!(
                     "Exporting {}\u{2026}",
@@ -725,14 +873,17 @@ impl CadmarkApp {
     /// Handle a completed pick — resolve to selection and open the spatial
     /// comment overlay, or add the element to an open comment.
     fn handle_pick_result(&mut self, element: TopologyElement, screen_pos: (f32, f32)) {
+        let Some(project) = self.project.as_ref() else {
+            return;
+        };
         let context = match cadmark_core::context::resolve_context(
             &element,
-            &self.project.ledger,
-            self.project.identification.as_ref(),
+            &project.ledger,
+            project.identification.as_ref(),
         ) {
             Ok(context) => cadmark_core::context::with_source_context(
                 context,
-                self.project.script_source.as_deref(),
+                project.script_source.as_deref(),
             ),
             Err(error) => {
                 self.clear_selection();
@@ -759,7 +910,8 @@ impl CadmarkApp {
         }
         self.minimum_distance = None;
         if let Some((first, second)) = measurement_pair(self.overlay.anchors())
-            && let Err(error) = self.project.request_minimum_distance(first, second)
+            && let Some(project) = self.project_mut()
+            && let Err(error) = project.request_minimum_distance(first, second)
         {
             self.status = Some(Status::error(format!("Measurement failed: {error}")));
         }
@@ -824,7 +976,7 @@ impl CadmarkApp {
     }
 
     fn apply_settings(&mut self, ctx: &egui::Context, form: SettingsForm) {
-        if self.project.busy.is_some() {
+        if self.busy() {
             self.settings_dialog
                 .reject("Wait for the current turn to finish, then save".into());
             return;
@@ -874,10 +1026,14 @@ impl CadmarkApp {
         self.settings = candidate;
         self.save_settings();
         self.settings_dialog.close();
-        self.project.set_limits(self.settings.limits);
+        let limits = self.settings.limits;
+        if let Some(project) = self.project_mut() {
+            project.set_limits(limits);
+        }
         // The provider is bound at project open; reopen to pick it up.
-        let dir = self.project.dir.clone();
-        self.open_project(ctx, dir);
+        if let Some(dir) = self.project().map(|project| project.dir.clone()) {
+            self.open_project(ctx, dir);
+        }
         self.status = Some(Status::info("Settings saved"));
     }
 
@@ -889,9 +1045,8 @@ impl CadmarkApp {
     fn handle_shortcuts(&mut self, ctx: &egui::Context) -> ToolbarAction {
         use egui::{Key, KeyboardShortcut, Modifiers};
         let typing = ctx.wants_keyboard_input();
-        let idle = self.project.busy.is_none()
-            && !self.version_dialog.is_open()
-            && !self.settings_dialog.is_open();
+        let idle =
+            !self.busy() && !self.version_dialog.is_open() && !self.settings_dialog.is_open();
         let mut action = ToolbarAction::None;
         ctx.input_mut(|input| {
             if !typing
@@ -912,7 +1067,7 @@ impl CadmarkApp {
             {
                 action = ToolbarAction::OpenProject;
             } else if idle
-                && self.project.has_script
+                && self.has_script()
                 && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S))
             {
                 action = ToolbarAction::NameVersion;
@@ -922,7 +1077,7 @@ impl CadmarkApp {
             {
                 action = ToolbarAction::OpenSettings;
             } else if idle
-                && self.project.has_script
+                && self.has_script()
                 && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F5))
             {
                 action = ToolbarAction::Refresh;
@@ -947,46 +1102,96 @@ impl CadmarkApp {
     ) {
         match action {
             ToolbarAction::Undo => {
-                if let Some(version) = self.project.history.undo() {
+                if let Some(version) = self.project_mut().and_then(|p| p.history.undo()) {
                     let hash = version.commit_hash.clone();
                     self.restore_version(hash);
                 }
             }
             ToolbarAction::Redo => {
-                if let Some(version) = self.project.history.redo() {
+                if let Some(version) = self.project_mut().and_then(|p| p.history.redo()) {
                     let hash = version.commit_hash.clone();
                     self.restore_version(hash);
                 }
             }
             ToolbarAction::JumpToVersion(idx) => {
-                if let Some(version) = self.project.history.jump_to(idx) {
+                if let Some(version) = self.project_mut().and_then(|p| p.history.jump_to(idx)) {
                     let hash = version.commit_hash.clone();
                     self.restore_version(hash);
                 }
             }
-            ToolbarAction::NameVersion => self.version_dialog.open(),
-            ToolbarAction::OpenProject => self.pick_project_folder(frame),
-            ToolbarAction::NewConversation => match self.project.start_fresh_conversation() {
-                Ok(()) => {
-                    self.turn = None;
-                    self.chat.focus_input();
-                    self.status = Some(Status::info("Started a new conversation"));
+            // The same key names the part the first time and a version
+            // every time after: the meaning changes once, when the part
+            // gets a name of its own.
+            ToolbarAction::NameVersion => {
+                match self.project().map(|p| parts::save_target(p.part())) {
+                    Some(parts::SaveTarget::PartName) => self.part_dialog.open(),
+                    Some(parts::SaveTarget::VersionName) => self.version_dialog.open(),
+                    None => {}
                 }
-                Err(error) => self.status = Some(Status::error(error)),
-            },
+            }
+            ToolbarAction::NewPart => {
+                if let Some(project) = self.project_mut() {
+                    match project.begin_untitled_part() {
+                        Ok(()) => {
+                            self.status =
+                                Some(Status::info("New part \u{2014} save it to give it a name"));
+                            self.clear_loaded_model();
+                        }
+                        Err(error) => self.status = Some(Status::error(error)),
+                    }
+                }
+            }
+            ToolbarAction::OpenPart(file_name) => {
+                let part = if file_name == parts::UNTITLED_PART {
+                    OpenPart::Untitled
+                } else {
+                    OpenPart::Named(file_name)
+                };
+                if let Some(project) = self.project_mut() {
+                    project.switch_part(part);
+                }
+                self.clear_loaded_model();
+                self.apply_window_title(ctx);
+            }
+            ToolbarAction::OpenProject => self.pick_project_folder(frame),
+            ToolbarAction::NewConversation => {
+                let Some(project) = self.project_mut() else {
+                    return;
+                };
+                match project.start_fresh_conversation() {
+                    Ok(()) => {
+                        self.turn = None;
+                        self.chat.focus_input();
+                        self.status = Some(Status::info("Started a new conversation"));
+                    }
+                    Err(error) => self.status = Some(Status::error(error)),
+                }
+            }
             ToolbarAction::OpenRecent(path) => self.open_project(ctx, path),
             ToolbarAction::RevealProject => {
-                let dir = self.project.dir.clone();
-                self.open_externally(&dir, "the project folder");
+                if let Some(dir) = self.project().map(|project| project.dir.clone()) {
+                    self.open_externally(&dir, "the project folder");
+                }
             }
             ToolbarAction::OpenScriptInEditor => {
-                let path = self.project.script_path();
-                self.open_externally(&path, SCRIPT_FILENAME);
+                let Some((path, what)) = self
+                    .project()
+                    .map(|project| (project.script_path(), project.part_file_name().to_string()))
+                else {
+                    return;
+                };
+                self.open_externally(&path, &what);
             }
-            ToolbarAction::Refresh => self.project.request_reload(),
+            ToolbarAction::Refresh => {
+                if let Some(project) = self.project_mut() {
+                    project.request_reload();
+                }
+            }
             ToolbarAction::FitView => {
-                self.pending_camera_bounds =
-                    self.project.model.as_ref().and_then(|model| model.bounds);
+                self.pending_camera_bounds = self
+                    .project()
+                    .and_then(|project| project.model.as_ref())
+                    .and_then(|model| model.bounds);
             }
             ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
             ToolbarAction::Export(format) => self.export(format),
@@ -1013,27 +1218,111 @@ impl CadmarkApp {
                     .inner_margin(egui::Margin::symmetric(10, 6)),
             )
             .show(ctx, |ui| {
-                let recent = self.settings.other_recent_projects(&self.project.dir);
-                let export_warning = self
-                    .project
+                let Some(project) = self.project.as_ref() else {
+                    return;
+                };
+                let recent = self.settings.other_recent_projects(&project.dir);
+                let export_warning = project
                     .model
                     .as_ref()
                     .and_then(|model| export_warning(&export_decision(&model.validity)));
+                let part_options: Vec<PartOption> = project
+                    .parts()
+                    .iter()
+                    .map(|file_name| PartOption {
+                        file_name: file_name.clone(),
+                        display: parts::part_display_name(file_name),
+                    })
+                    .collect();
+                let part_name = project.part().display_name();
                 let state = ToolbarState {
-                    project_dir: &self.project.dir,
-                    script_filename: SCRIPT_FILENAME,
-                    has_script: self.project.has_script,
+                    project_dir: &project.dir,
+                    script_filename: project.part_file_name(),
+                    part_name: &part_name,
+                    parts: &part_options,
+                    has_script: project.has_script,
                     recent_projects: &recent,
-                    controls_enabled: self.project.busy.is_none(),
-                    has_model: self.project.model.is_some(),
+                    controls_enabled: project.busy.is_none(),
+                    has_model: project.model.is_some(),
                     code_visible: self.code_visible,
                     orthographic: self.renderer.camera.projection() == Projection::Orthographic,
                     export_warning: export_warning.as_deref(),
-                    ai_model: self.project.ai_model.as_deref(),
+                    ai_model: project.ai_model.as_deref(),
                 };
-                action = toolbar::show_toolbar(ui, &self.project.history, state);
+                action = toolbar::show_toolbar(ui, &project.history, state);
             });
         self.apply_toolbar_action(ctx, frame, action);
+    }
+
+    /// Give the open untitled part the name the prompt collected, or keep
+    /// the prompt open saying why the name was refused.
+    fn name_open_part(&mut self, ctx: &egui::Context, typed: String) {
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        match project.name_untitled_part(&typed) {
+            Ok(file_name) => {
+                self.status = Some(Status::info(format!(
+                    "Saved as {}",
+                    parts::part_display_name(&file_name)
+                )));
+                self.apply_window_title(ctx);
+            }
+            Err(reason) => self.part_dialog.reject(reason),
+        }
+    }
+
+    /// The window before a project is chosen: nothing is loaded, and the
+    /// only things on screen are the ways to choose one.
+    fn show_start_view(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let mut action = StartAction::None;
+        // Chat is the primary channel and stays reachable with no project
+        // open (C39): what is typed here is held and sent as the first
+        // turn of whichever project the user then chooses.
+        let mut chat_action = ChatAction::None;
+        self.chat.activity = ChatActivity::Idle;
+        self.chat.ai_available = self.settings.ai.is_some();
+        let waiting = Conversation::new();
+        egui::SidePanel::right("chat_panel")
+            .resizable(true)
+            .default_width(380.0)
+            .width_range(300.0..=700.0)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
+            .show(ctx, |ui| {
+                let usage = context_usage(&waiting, 0, self.settings.context_window_tokens);
+                chat_action = self.chat.show(ui, &waiting, usage);
+            });
+        if let ChatAction::Send(text) = chat_action {
+            self.pending_first_message = Some(text);
+            self.start_notice = Some(
+                "Choose a project folder \u{2014} your message is sent as soon as it opens."
+                    .to_string(),
+            );
+            self.pick_project_folder(frame);
+        }
+        egui::CentralPanel::default().show(ctx, |ui| {
+            action = show_start_view(
+                ui,
+                StartViewState {
+                    recent_projects: &self.settings.recent_projects,
+                    notice: self.start_notice.as_deref(),
+                    controls_enabled: self.folder_pick_rx.is_none(),
+                },
+            );
+        });
+        match action {
+            // Creating a project and opening one are the same choice of
+            // folder; a folder with no parts opens at its first one.
+            StartAction::OpenFolder | StartAction::CreateProject => {
+                self.pick_project_folder(frame);
+            }
+            StartAction::OpenRecent(path) => self.open_project(ctx, path),
+            StartAction::OpenSettings => self.open_settings(),
+            StartAction::None => {}
+        }
     }
 
     fn show_status_bar(&mut self, ctx: &egui::Context) {
@@ -1049,18 +1338,26 @@ impl CadmarkApp {
                     }
                     SelectionState::None => None,
                 };
-                let activity = self.project.busy.as_ref().map(Busy::label);
+                let activity = self
+                    .project()
+                    .and_then(|project| project.busy.as_ref())
+                    .map(Busy::label);
                 let measurement = measurement_readout(
                     &self.selection,
                     self.minimum_distance,
-                    self.project.model.as_ref().map(|model| &model.descriptors),
+                    self.project()
+                        .and_then(|project| project.model.as_ref())
+                        .map(|model| &model.descriptors),
                 );
                 cadmark_ui::status::show_status_bar(
                     ui,
                     StatusView {
                         activity: activity.as_deref(),
                         status: self.status.as_ref(),
-                        summary: self.project.model.as_ref().map(|model| &model.summary),
+                        summary: self
+                            .project()
+                            .and_then(|project| project.model.as_ref())
+                            .map(|model| &model.summary),
                         selection,
                         measurement: measurement.as_deref(),
                     },
@@ -1079,7 +1376,10 @@ impl CadmarkApp {
                     .inner_margin(egui::Margin::symmetric(10, 8)),
             )
             .show(ctx, |ui| {
-                self.chat.activity = match &self.project.busy {
+                let Some(project) = self.project.as_ref() else {
+                    return;
+                };
+                self.chat.activity = match &project.busy {
                     None => ChatActivity::Idle,
                     Some(Busy::Building) => ChatActivity::Building,
                     Some(Busy::Turn {
@@ -1094,15 +1394,19 @@ impl CadmarkApp {
                     }),
                 };
                 let usage = context_usage(
-                    &self.project.conversation,
-                    reference_image_count(&self.project.dir),
+                    &project.conversation,
+                    reference_image_count(&project.dir),
                     self.settings.context_window_tokens,
                 );
-                action = self.chat.show(ui, &self.project.conversation, usage);
+                action = self.chat.show(ui, &project.conversation, usage);
             });
         match action {
             ChatAction::Send(text) => self.send_chat_message(text),
-            ChatAction::Cancel => self.project.cancel_turn(),
+            ChatAction::Cancel => {
+                if let Some(project) = self.project() {
+                    project.cancel_turn();
+                }
+            }
             ChatAction::None => {}
         }
     }
@@ -1118,29 +1422,47 @@ impl CadmarkApp {
                     .inner_margin(egui::Margin::symmetric(10, 8)),
             )
             .show(ctx, |ui| {
+                let Some(project) = self.project.as_ref() else {
+                    return;
+                };
                 action = self.code_panel.show(
                     ui,
                     CodeView {
-                        script_filename: SCRIPT_FILENAME,
-                        source: self.project.script_source.as_deref(),
+                        script_filename: project.part_file_name(),
+                        source: project.script_source.as_deref(),
                         highlighted_line: self.highlighted_line,
-                        modified_on_disk: self.project.script_modified_on_disk,
-                        controls_enabled: self.project.busy.is_none(),
+                        modified_on_disk: project.script_modified_on_disk,
+                        controls_enabled: project.busy.is_none(),
                     },
                 );
             });
         match action {
             CodePanelAction::Copy => {
-                if let Some(source) = &self.project.script_source {
-                    ctx.copy_text(source.clone());
-                    self.status = Some(Status::info(format!("Copied {SCRIPT_FILENAME}")));
+                let copied = self.project().and_then(|project| {
+                    project
+                        .script_source
+                        .clone()
+                        .map(|source| (source, project.part_file_name().to_string()))
+                });
+                if let Some((source, part)) = copied {
+                    ctx.copy_text(source);
+                    self.status = Some(Status::info(format!("Copied {part}")));
                 }
             }
             CodePanelAction::OpenInEditor => {
-                let path = self.project.script_path();
-                self.open_externally(&path, SCRIPT_FILENAME);
+                let Some((path, what)) = self
+                    .project()
+                    .map(|project| (project.script_path(), project.part_file_name().to_string()))
+                else {
+                    return;
+                };
+                self.open_externally(&path, &what);
             }
-            CodePanelAction::Refresh => self.project.request_reload(),
+            CodePanelAction::Refresh => {
+                if let Some(project) = self.project_mut() {
+                    project.request_reload();
+                }
+            }
             CodePanelAction::None => {}
         }
     }
@@ -1266,21 +1588,25 @@ impl CadmarkApp {
     /// how to begin.
     fn paint_viewport_placeholder(&self, ui: &egui::Ui, rect: egui::Rect) {
         use cadmark_ui::theme;
-        let (headline, detail, colour) = match (&self.project.busy, &self.status) {
+        let Some(project) = self.project() else {
+            return;
+        };
+        let (headline, detail, colour) = match (&project.busy, &self.status) {
             (Some(busy), _) => (busy.label(), String::new(), theme::TEXT_MUTED),
             (None, Some(status)) if status.is_error => (
                 "The script did not run".to_string(),
                 status.text.clone(),
                 theme::ERROR,
             ),
-            (None, _) if !self.project.has_script => (
+            (None, _) if !project.has_script => (
                 "No part yet".to_string(),
-                if self.project.ai_model.is_some() {
+                if project.ai_model.is_some() {
                     "Describe what to build in the chat, and the model will appear here."
                         .to_string()
                 } else {
                     format!(
-                        "Write {SCRIPT_FILENAME} in the project folder and press Rebuild, or open Settings to add an AI provider."
+                        "Write {} in the project folder and press Rebuild, or open Settings to add an AI provider.",
+                        project.part_file_name()
                     )
                 },
                 theme::TEXT_MUTED,
@@ -1365,13 +1691,21 @@ fn ai_services(
 impl eframe::App for CadmarkApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_results(ctx);
-        self.project.watch_script();
+        if let Some(project) = self.project_mut() {
+            project.watch_script();
+        }
         self.consume_pick_result();
 
         // Keep the frame loop alive while anything is in flight.
-        if self.project.busy.is_some()
-            || self.project.exports_in_flight > 0
-            || self.project.measurements_in_flight > 0
+        let exporting = self
+            .project()
+            .is_some_and(|project| project.exports_in_flight > 0);
+        let measuring = self
+            .project()
+            .is_some_and(|project| project.measurements_in_flight > 0);
+        if self.busy()
+            || exporting
+            || measuring
             || self.pick_in_flight.is_some()
             || self.folder_pick_rx.is_some()
         {
@@ -1380,8 +1714,20 @@ impl eframe::App for CadmarkApp {
         if self.hover_readback_pending {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
-        if self.project.has_script {
+        if self.has_script() {
             ctx.request_repaint_after(SCRIPT_WATCH_INTERVAL);
+        }
+
+        // With no project there is nothing to act on and nothing to type
+        // into: the start view owns the window, and no panel is drawn
+        // present-but-dead. Settings stay reachable from it.
+        if self.project.is_none() {
+            self.show_start_view(ctx, frame);
+            match self.settings_dialog.show(ctx) {
+                SettingsAction::Save(form) => self.apply_settings(ctx, form),
+                SettingsAction::Cancel | SettingsAction::None => {}
+            }
+            return;
         }
 
         let shortcut = self.handle_shortcuts(ctx);
@@ -1399,6 +1745,10 @@ impl eframe::App for CadmarkApp {
             VersionDialogAction::Save(name) => self.save_named_version(name),
             VersionDialogAction::Cancel | VersionDialogAction::None => {}
         }
+        match self.part_dialog.show(ctx) {
+            PartNameAction::Save(name) => self.name_open_part(ctx, name),
+            PartNameAction::Cancel | PartNameAction::None => {}
+        }
         match self.settings_dialog.show(ctx) {
             SettingsAction::Save(form) => self.apply_settings(ctx, form),
             SettingsAction::Cancel | SettingsAction::None => {}
@@ -1406,7 +1756,9 @@ impl eframe::App for CadmarkApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.project.save_conversation();
+        if let Some(project) = self.project() {
+            project.save_conversation();
+        }
     }
 }
 
@@ -1427,9 +1779,10 @@ mod tests {
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, Project, Renderer, SceneHandle,
-        SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings, VersionDialog,
-        ai_services, measurement_pair, measurement_readout, record_tool_start, turn_chat_message,
+        CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
+        SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
+        VersionDialog, ai_services, measurement_pair, measurement_readout, record_tool_start,
+        turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -1561,13 +1914,14 @@ mod tests {
     fn app_with_pending_response(project_dir: std::path::PathBuf) -> CadmarkApp {
         let mut project = Project::open(
             project_dir,
+            None,
             Err("test provider is injected directly".to_string()),
             ExecutionLimits::default(),
             Box::new(NoRender),
         );
         let response = project.conversation.push(Message::ai_response(""));
         CadmarkApp {
-            project,
+            project: Some(project),
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
@@ -1579,8 +1933,11 @@ mod tests {
             code_visible: false,
             highlighted_line: None,
             version_dialog: VersionDialog::default(),
+            part_dialog: PartNameDialog::default(),
             settings_dialog: SettingsDialog::default(),
             folder_pick_rx: None,
+            start_notice: None,
+            pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
@@ -1779,7 +2136,13 @@ mod tests {
             app.finish_turn(TurnOutcome::Failed {
                 error: error.to_string(),
             });
-            let notice = app.project.conversation.messages().last().unwrap();
+            let notice = app
+                .project()
+                .unwrap()
+                .conversation
+                .messages()
+                .last()
+                .unwrap();
             assert!(matches!(
                 notice.kind,
                 MessageKind::Notice { is_error: true }

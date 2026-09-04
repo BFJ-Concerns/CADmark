@@ -7,7 +7,9 @@ use eframe::egui;
 
 mod app;
 pub mod git_ops;
+mod launch;
 pub mod orchestrator;
+pub mod parts;
 mod project;
 mod render_source;
 pub mod turn;
@@ -32,11 +34,10 @@ fn main() -> eframe::Result<()> {
     env_logger::init();
     log::info!("Starting CADmark");
 
-    // The project folder: the first argument, else the current directory.
-    let project_dir = std::env::args()
-        .nth(1)
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().expect("failed to read current directory"));
+    // A folder named on the command line opens directly; with none, the
+    // start view asks which project to open and nothing is loaded until
+    // it is answered.
+    let target = launch::target_from_args(std::env::args());
 
     let wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
         on_surface_error: std::sync::Arc::new(surface_error_action),
@@ -57,7 +58,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "CADmark",
         options,
-        Box::new(move |cc| Ok(Box::new(app::CadmarkApp::new(cc, project_dir)))),
+        Box::new(move |cc| Ok(Box::new(app::CadmarkApp::new(cc, target)))),
     )
 }
 
