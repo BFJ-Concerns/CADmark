@@ -189,4 +189,43 @@ mod tests {
         assert!(DOC_CORPUS.contains("chamfer"));
         assert!(DOC_CORPUS.contains("extrude"));
     }
+
+    #[test]
+    fn documentation_consumer_covers_instrumented_build123d_operations() {
+        // These terms cover the operations whose execution-time provenance
+        // instrumentation accepts today. The assertion is against the exact
+        // corpus `lookup_docs` sends to its consumer, rather than against a
+        // fixture or the files merely present on disk.
+        for operation in [
+            "Box",
+            "Cylinder",
+            "Sphere",
+            "Cone",
+            "Torus",
+            "Wedge",
+            "Extrude",
+            "Revolve",
+            "Loft",
+            "Sweep",
+            "Thicken",
+            "Shell",
+            "Draft",
+            "Split",
+            "Fuse",
+            "Cut",
+            "intersect(**to_intersect",
+            "Fillet",
+            "Chamfer",
+            "Mirror",
+            "Rotate",
+            "Scale",
+            "Offset",
+            "Locations",
+        ] {
+            assert!(
+                DOC_CORPUS.contains(operation),
+                "lookup_docs corpus is missing documentation for {operation}"
+            );
+        }
+    }
 }
