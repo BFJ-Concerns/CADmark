@@ -4,7 +4,7 @@
 // element's measurements. This text is the grounding the pointing channel
 // exists to deliver; every anchor of a comment is rendered, in order.
 
-use cadmark_core::geometry::GeometryContext;
+use cadmark_core::geometry::{GeometryContext, TopologyElement};
 use cadmark_core::ledger::LedgerValue;
 
 /// One comment as the model receives it: the user's words and the
@@ -77,6 +77,21 @@ fn render_anchor(context: &GeometryContext) -> String {
                 .join(", "),
         );
     }
+    out.push_str("\n    surrounding code:\n");
+    out.push_str(&context.source_context);
+    out.push_str("\n    neighbours: ");
+    if context.neighbours.is_empty() {
+        out.push_str("none measured");
+    } else {
+        out.push_str(
+            &context
+                .neighbours
+                .iter()
+                .map(TopologyElement::display_label)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
     out.push('\n');
     out
 }
@@ -84,7 +99,7 @@ fn render_anchor(context: &GeometryContext) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement};
+    use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
     use cadmark_core::ledger::{ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef};
 
     fn entry(line: u32, operation: SemanticOperation) -> ProvenanceEntry {
@@ -120,6 +135,8 @@ mod tests {
                     element: TopologyElement::Face(FaceId(3)),
                     provenance: LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
                     identification,
+                    source_context: "lines 3-7:\n3 | with BuildPart():\n5 | Box(10, 10, 2)".into(),
+                    neighbours: vec![TopologyElement::Edge(EdgeId(1))],
                 },
                 GeometryContext {
                     element: TopologyElement::Edge(EdgeId(4)),
@@ -128,11 +145,19 @@ mod tests {
                         entry(3, SemanticOperation::Fillet),
                     ]),
                     identification: Default::default(),
+                    source_context: "lines 1-5:\n2 | Box(10, 10, 2)\n3 | fillet(...)".into(),
+                    neighbours: vec![
+                        TopologyElement::Face(FaceId(0)),
+                        TopologyElement::Vertex(VertexId(2)),
+                    ],
                 },
                 GeometryContext {
                     element: TopologyElement::Edge(EdgeId(9)),
                     provenance: LedgerValue::Untraced,
                     identification: Default::default(),
+                    source_context:
+                        "lines 1-3:\n1 | from build123d import *\n2 | part = imported_shape".into(),
+                    neighbours: vec![TopologyElement::Edge(EdgeId(8))],
                 },
             ],
         };
@@ -140,9 +165,15 @@ mod tests {
         assert!(text.starts_with("The user selected 3 geometry elements"));
         assert!(text.contains("- face 3: modified by box at line 5: `line 5`"));
         assert!(text.contains("measured: area_mm2 200.00, surface plane"));
+        assert!(text.contains("surrounding code:\nlines 3-7"));
+        assert!(text.contains("neighbours: edge 1"));
         assert!(text.contains("- edge 4: its source is ambiguous"));
         assert!(text.contains("    - modified by fillet at line 3"));
+        assert!(text.contains("lines 1-5:\n2 | Box(10, 10, 2)"));
+        assert!(text.contains("neighbours: face 0, vertex 2"));
         assert!(text.contains("- edge 9: no source line is known"));
+        assert!(text.contains("lines 1-3:\n1 | from build123d import *"));
+        assert!(text.contains("neighbours: edge 8"));
         assert!(text.ends_with("\nround this"));
     }
 }

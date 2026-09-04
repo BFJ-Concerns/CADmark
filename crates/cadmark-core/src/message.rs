@@ -206,6 +206,8 @@ mod tests {
                 relation: ProvenanceRelation::Generated,
             }),
             identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
         }
     }
 
