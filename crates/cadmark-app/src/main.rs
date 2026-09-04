@@ -35,7 +35,7 @@ fn main() -> eframe::Result<()> {
     // A folder named on the command line opens directly; with none, the
     // start view asks which project to open and nothing is loaded until
     // it is answered.
-    let target = launch::launch_target(std::env::args().nth(1).map(std::path::PathBuf::from));
+    let target = launch::target_from_args(std::env::args());
 
     let wgpu_options = eframe::egui_wgpu::WgpuConfiguration {
         on_surface_error: std::sync::Arc::new(surface_error_action),

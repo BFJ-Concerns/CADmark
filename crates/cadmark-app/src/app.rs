@@ -104,6 +104,9 @@ pub struct CadmarkApp {
     /// Why the last attempt to open a folder came to nothing, shown on
     /// the start view where there is no status bar to carry it.
     start_notice: Option<String>,
+    /// A message typed before a project was open, delivered as the first
+    /// turn of the project the user then chooses.
+    pending_first_message: Option<String>,
     /// Bounds to frame once the viewport aspect ratio is known.
     pending_camera_bounds: Option<Bounds3>,
     /// Local click coordinates (relative to viewport rect) for the
@@ -169,6 +172,7 @@ impl CadmarkApp {
             settings_dialog: SettingsDialog::default(),
             folder_pick_rx: None,
             start_notice: None,
+            pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
             pick_in_flight: None,
@@ -275,6 +279,11 @@ impl CadmarkApp {
         self.renderer.camera = Camera::default();
         self.remember_project();
         self.apply_window_title(ctx);
+        // A message typed before there was a project to send it to is
+        // this project's first turn.
+        if let Some(text) = self.pending_first_message.take() {
+            self.send_chat_message(text);
+        }
     }
 
     /// Show the system folder picker on its own thread; the choice is
@@ -624,6 +633,14 @@ impl CadmarkApp {
                 }
                 Ok(None) | Err(mpsc::TryRecvError::Disconnected) => {
                     self.folder_pick_rx = None;
+                    // Nothing was chosen, so a message held for the
+                    // project goes back into the input rather than
+                    // waiting on a choice the user declined to make.
+                    if let Some(text) = self.pending_first_message.take() {
+                        self.chat.input_text = text;
+                        self.start_notice = None;
+                        self.chat.focus_input();
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
             }
@@ -1168,6 +1185,33 @@ impl CadmarkApp {
     /// only things on screen are the ways to choose one.
     fn show_start_view(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let mut action = StartAction::None;
+        // Chat is the primary channel and stays reachable with no project
+        // open (C39): what is typed here is held and sent as the first
+        // turn of whichever project the user then chooses.
+        let mut chat_action = ChatAction::None;
+        self.chat.activity = ChatActivity::Idle;
+        self.chat.ai_available = self.settings.ai.is_some();
+        let waiting = Conversation::new();
+        egui::SidePanel::right("chat_panel")
+            .resizable(true)
+            .default_width(380.0)
+            .width_range(300.0..=700.0)
+            .frame(
+                egui::Frame::side_top_panel(&ctx.style())
+                    .inner_margin(egui::Margin::symmetric(10, 8)),
+            )
+            .show(ctx, |ui| {
+                let usage = context_usage(&waiting, 0, self.settings.context_window_tokens);
+                chat_action = self.chat.show(ui, &waiting, usage);
+            });
+        if let ChatAction::Send(text) = chat_action {
+            self.pending_first_message = Some(text);
+            self.start_notice = Some(
+                "Choose a project folder \u{2014} your message is sent as soon as it opens."
+                    .to_string(),
+            );
+            self.pick_project_folder(frame);
+        }
         egui::CentralPanel::default().show(ctx, |ui| {
             action = show_start_view(
                 ui,
