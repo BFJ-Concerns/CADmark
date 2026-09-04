@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use cadmark_core::geometry::TopologyElement;
+use cadmark_core::geometry::{PickedElement, SketchElement, TopologyElement};
 use cadmark_core::mesh::TessellatedMesh;
 use cadmark_renderer::mesh::GpuMesh;
 use cadmark_renderer::picking::PickingPass;
@@ -99,6 +99,8 @@ impl ViewportResources {
 
 pub enum CompletedPick {
     Hit(TopologyElement),
+    /// A drawn sketch element under the cursor rather than solid topology.
+    SketchHit(SketchElement),
     Background,
     ReadbackFailed,
 }
@@ -199,6 +201,7 @@ fn pick_submission_decision(attempt: PickAttempt, marker_bytes: [u8; 4]) -> Pick
 pub enum PickTransition {
     Waiting,
     Hit(TopologyElement, (f32, f32)),
+    SketchHit(SketchElement, (f32, f32)),
     Background,
     ReadbackFailed,
 }
@@ -214,6 +217,10 @@ pub fn completed_pick_transition(
         None => PickTransition::Waiting,
         Some(CompletedPick::Hit(element)) => match pick_in_flight.take() {
             Some(screen_pos) => PickTransition::Hit(element, screen_pos),
+            None => PickTransition::Background,
+        },
+        Some(CompletedPick::SketchHit(element)) => match pick_in_flight.take() {
+            Some(screen_pos) => PickTransition::SketchHit(element, screen_pos),
             None => PickTransition::Background,
         },
         Some(CompletedPick::Background) => {
@@ -287,7 +294,12 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                                 Ok(Ok(())) => {
                                     let data = slice.get_mapped_range();
                                     res.pick_result = Some(match decode_pick_result(&data) {
-                                        Some(element) => CompletedPick::Hit(element),
+                                        Some(PickedElement::Solid(element)) => {
+                                            CompletedPick::Hit(element)
+                                        }
+                                        Some(PickedElement::Sketch(element)) => {
+                                            CompletedPick::SketchHit(element)
+                                        }
                                         None => CompletedPick::Background,
                                     });
                                     drop(data);
@@ -450,7 +462,7 @@ pub fn viewport_clear_colour(target_is_srgb: bool) -> wgpu::Color {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::{FaceId, TopologyElement};
+    use cadmark_core::geometry::{FaceId, SketchElementKind, TopologyElement};
 
     use super::*;
 
@@ -497,6 +509,41 @@ mod tests {
             PickTransition::Hit(element, (120.0, 240.0))
         );
         assert_eq!(in_flight, None);
+    }
+
+    #[test]
+    fn a_completed_sketch_hit_consumes_and_returns_the_pick_anchor() {
+        let element = SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 2,
+        };
+        let mut in_flight = Some((120.0, 240.0));
+        assert_eq!(
+            completed_pick_transition(
+                Some(CompletedPick::SketchHit(element.clone())),
+                &mut in_flight
+            ),
+            PickTransition::SketchHit(element, (120.0, 240.0))
+        );
+        assert_eq!(in_flight, None);
+    }
+
+    /// A sketch hit with no anchor is a stale readback, the same as a
+    /// solid one: it puts the selection down rather than opening an
+    /// overlay at a position nobody clicked.
+    #[test]
+    fn a_sketch_hit_without_an_anchor_falls_back_to_the_background() {
+        let mut in_flight = None;
+        assert_eq!(
+            completed_pick_transition(
+                Some(CompletedPick::SketchHit(SketchElement {
+                    kind: SketchElementKind::Region,
+                    index: 0,
+                })),
+                &mut in_flight
+            ),
+            PickTransition::Background
+        );
     }
 
     #[test]
