@@ -56,6 +56,9 @@ pub enum MessageKind {
     },
     /// Response from the AI. While a turn streams, the text grows.
     AiResponse,
+    /// A durable account of an earlier stretch of conversation. It replaces
+    /// chatter only after the model has retained the decisions and open work.
+    ConversationSummary,
     /// A run of consecutive tool calls in one turn, grouped so a long
     /// turn reads as one collapsed entry.
     ToolCalls(Vec<ToolActivity>),
@@ -99,6 +102,10 @@ impl Message {
 
     pub fn ai_response(text: impl Into<String>) -> Self {
         Self::new(MessageKind::AiResponse, text)
+    }
+
+    pub fn conversation_summary(text: impl Into<String>) -> Self {
+        Self::new(MessageKind::ConversationSummary, text)
     }
 
     /// A group of tool calls; its text is unused.
@@ -182,6 +189,70 @@ impl Conversation {
 
     pub fn is_empty(&self) -> bool {
         self.messages.is_empty()
+    }
+
+    /// Replace the completed portion of a conversation with the model's
+    /// compact account, retaining messages which belong to the active turn.
+    pub fn condense_before(&mut self, index: usize, summary: impl Into<String>) {
+        let retained = self.messages.split_off(index.min(self.messages.len()));
+        self.messages = vec![Message::conversation_summary(summary)];
+        self.messages.extend(retained);
+    }
+
+    /// A deliberately conservative, provider-neutral estimate. Providers do
+    /// not expose one common tokenizer, so this is used to start condensing
+    /// early rather than to claim an exact token count.
+    pub fn estimated_tokens(&self) -> usize {
+        self.messages
+            .iter()
+            .map(|message| message.estimated_tokens())
+            .sum()
+    }
+}
+
+impl Message {
+    fn estimated_tokens(&self) -> usize {
+        let mut characters = self.text.chars().count();
+        if let MessageKind::ToolCalls(activities) = &self.kind {
+            for activity in activities {
+                characters += activity.tool.chars().count();
+                characters += activity.arguments.to_string().chars().count();
+                characters += activity
+                    .output
+                    .as_deref()
+                    .map(str::chars)
+                    .map(Iterator::count)
+                    .unwrap_or_default();
+            }
+        }
+        characters.div_ceil(4)
+    }
+}
+
+/// The portion of a provider context window consumed before the next turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextUsage {
+    pub conversation_tokens: usize,
+    pub reference_image_tokens: usize,
+    pub window_tokens: usize,
+}
+
+impl ContextUsage {
+    pub fn used_tokens(self) -> usize {
+        self.conversation_tokens + self.reference_image_tokens
+    }
+
+    pub fn percent(self) -> usize {
+        if self.window_tokens == 0 {
+            return 100;
+        }
+        self.used_tokens().saturating_mul(100) / self.window_tokens
+    }
+
+    /// Start condensing well before a request can overflow. This is a context
+    /// threshold, never a count of messages or turns.
+    pub fn needs_condensing(self) -> bool {
+        self.used_tokens().saturating_mul(4) >= self.window_tokens.saturating_mul(3)
     }
 }
 
@@ -282,6 +353,27 @@ mod tests {
         conv.push(Message::error_notice("part.py failed to run"));
         let json = serde_json::to_string(&conv).unwrap();
         assert_eq!(serde_json::from_str::<Conversation>(&json).unwrap(), conv);
+    }
+
+    #[test]
+    fn condensing_keeps_the_active_request_after_replacing_old_history() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("Use a 5 mm wall."));
+        conversation.push(Message::ai_response("I will use a 5 mm wall."));
+        let active_start = conversation.len();
+        conversation.push(Message::user_chat("Add an open top."));
+
+        conversation.condense_before(
+            active_start,
+            "Decision: use a 5 mm wall. Open request: add an open top.",
+        );
+
+        assert!(matches!(
+            conversation.messages()[0].kind,
+            MessageKind::ConversationSummary
+        ));
+        assert!(conversation.messages()[0].text.contains("5 mm wall"));
+        assert_eq!(conversation.messages()[1].text, "Add an open top.");
     }
 
     #[test]
