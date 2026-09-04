@@ -3,14 +3,22 @@ name = "cadmark-kernel"
 version.workspace = true
 edition = "2024"
 
+[[bin]]
+name = "cadmark-kernel-worker"
+path = "src/bin/cadmark-kernel-worker.rs"
+
 [dependencies]
 cadmark-core = { workspace = true }
 pyo3 = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
+env_logger = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+libc = { workspace = true }
+landlock = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 cadmark-bridge = { workspace = true }

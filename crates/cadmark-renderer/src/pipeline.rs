@@ -659,7 +659,7 @@ fn mat4_mul(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
 /// Upload a tessellated mesh to GPU buffers.
 pub fn upload_mesh(
     device: &wgpu::Device,
-    mesh: &cadmark_kernel::tessellation::TessellatedMesh,
+    mesh: &cadmark_core::mesh::TessellatedMesh,
 ) -> GpuMesh {
     use wgpu::util::DeviceExt;
 
@@ -715,7 +715,7 @@ pub fn upload_mesh(
     }
 }
 
-fn edge_vertices(mesh: &cadmark_kernel::tessellation::TessellatedMesh) -> Vec<EdgeVertex> {
+fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> {
     let mut edge_vertices = Vec::new();
     for edge in &mesh.edges {
         let edge_id =
@@ -742,11 +742,11 @@ mod tests {
 
     #[test]
     fn edge_vertices_use_picking_edge_ids() {
-        let mesh = cadmark_kernel::tessellation::TessellatedMesh {
+        let mesh = cadmark_core::mesh::TessellatedMesh {
             vertices: Vec::new(),
             indices: Vec::new(),
             face_ids: Vec::new(),
-            edges: vec![cadmark_kernel::tessellation::MeshEdge {
+            edges: vec![cadmark_core::mesh::MeshEdge {
                 points: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
                 edge_id: 7,
             }],

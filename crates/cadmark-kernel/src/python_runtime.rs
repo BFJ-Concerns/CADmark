@@ -53,6 +53,11 @@ pub fn derive_runtime_layout_from_interpreter(
     })
 }
 
+/// The interpreter home the build baked in, if any.
+pub fn embedded_python_home() -> Option<PathBuf> {
+    EMBEDDED_PYTHON_HOME.map(PathBuf::from)
+}
+
 /// Set `PYTHONHOME` from the compile-time embedded runtime if the caller has
 /// not already supplied one.
 pub fn configure_python_home() {

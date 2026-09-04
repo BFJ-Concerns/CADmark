@@ -35,6 +35,11 @@ reqwest = { version = "=0.13.4", default-features = false, features = ["json", "
 # Python embedding
 pyo3 = { version = "0.24", features = ["auto-initialize"] }
 
+# Script sandbox (Linux)
+landlock = "0.4.7"
+libc = "0.2.183"
+tempfile = "3"
+
 # GPU rendering
 wgpu = { version = "24", features = ["wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }

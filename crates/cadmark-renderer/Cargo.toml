@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 cadmark-core = { workspace = true }
-cadmark-kernel = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 pollster = { workspace = true }
