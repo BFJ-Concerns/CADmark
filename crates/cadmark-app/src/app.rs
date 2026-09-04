@@ -2878,6 +2878,59 @@ mod tests {
         assert!(!error.contains(wrong_type));
     }
 
+    /// A sketch pick does not stop at the transition: it reaches
+    /// `handle_pick_result` as a `PickedElement::Sketch` and leaves the
+    /// selection, the renderer's glow ID, the highlighted line and the
+    /// comment anchor standing on the sketch element the user clicked.
+    #[test]
+    fn a_sketch_pick_reaches_the_app_as_a_sketch_selection_anchored_to_its_drawing_line() {
+        use cadmark_core::geometry::{SketchElement, SketchElementKind};
+        use cadmark_core::ledger::SourceRef;
+        use cadmark_core::sketch_lineage::SketchSource;
+
+        let source = "a = 1\nRectangle(10, 5)\n";
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("part.py"), source).unwrap();
+        let mut project = open_test_project(dir.path().to_path_buf(), None);
+        project.script_source = Some(source.to_string());
+        let element = SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 0,
+        };
+        project.sketch_lineage.record_element(
+            element,
+            SketchSource {
+                source: SourceRef {
+                    line: 2,
+                    code: "Rectangle(10, 5)".to_string(),
+                },
+                object: "Rectangle".to_string(),
+            },
+        );
+        let mut app = app_around(project);
+
+        app.handle_pick_result(PickedElement::Sketch(element), (12.0, 34.0));
+
+        let SelectionState::Selected(selected) = &app.selection else {
+            panic!("a sketch pick left no selection: {:?}", app.selection);
+        };
+        assert_eq!(selected, &PickedElement::Sketch(element));
+        assert_eq!(
+            app.renderer.selected_id,
+            cadmark_renderer::picking::encode_pick(&PickedElement::Sketch(element))
+        );
+        // The line the sketch was drawn on, read back out of the lineage
+        // the click resolved against.
+        assert_eq!(app.highlighted_line, Some(2));
+        let anchors = app.overlay.anchors();
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].element, PickedElement::Sketch(element));
+        assert_eq!(
+            anchors[0].sketch.resolved().map(|s| s.object.as_str()),
+            Some("Rectangle")
+        );
+    }
+
     #[test]
     fn a_sketch_faces_its_own_plane_even_when_a_solid_is_already_on_screen() {
         let sketch = cadmark_core::sketch::SketchProfile {
