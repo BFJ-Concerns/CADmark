@@ -20,6 +20,20 @@ struct Uniforms {
     _pad3: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
+    // Section plane [nx, ny, nz, d]: a fragment is discarded when
+    // dot(n, world_pos) + d < 0. All zeroes means no section.
+    section_plane: vec4<f32>,
+    // Opacity of the shaded surface.
+    mesh_alpha: f32,
+    _pad4: f32,
+    _pad5: f32,
+    _pad6: f32,
+}
+
+// Whether the section plane keeps `world_pos`. Mirrors
+// `SectionPlane::equation` in the renderer's `section` module.
+fn section_keeps(section_plane: vec4<f32>, world_pos: vec3<f32>) -> bool {
+    return dot(section_plane.xyz, world_pos) + section_plane.w >= 0.0;
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -64,6 +78,9 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    if !section_keeps(uniforms.section_plane, in.world_pos) {
+        discard;
+    }
     var normal = normalize(in.world_normal);
     // Both sides are lit: looking into an open shell or a section shows a
     // shaded interior, not a black one.
@@ -104,5 +121,5 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
     if uniforms.encode_srgb != 0u {
         colour = linear_to_srgb(colour);
     }
-    return vec4<f32>(colour, 1.0);
+    return vec4<f32>(colour, uniforms.mesh_alpha);
 }
