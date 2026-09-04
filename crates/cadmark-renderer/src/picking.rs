@@ -213,6 +213,45 @@ mod tests {
     }
 
     #[test]
+    fn sketch_elements_roundtrip_in_their_own_ranges() {
+        for kind in [
+            SketchElementKind::Curve,
+            SketchElementKind::Corner,
+            SketchElementKind::Region,
+        ] {
+            for index in [0, 1, 99_998] {
+                let element = PickedElement::Sketch(SketchElement { kind, index });
+                assert_eq!(decode_pick(encode_pick(&element)), Some(element));
+            }
+        }
+    }
+
+    #[test]
+    fn solid_and_sketch_ranges_never_collide() {
+        let solid = [
+            TopologyElement::Face(FaceId(3)),
+            TopologyElement::Edge(EdgeId(3)),
+            TopologyElement::Vertex(VertexId(3)),
+            TopologyElement::Part(PartId(3)),
+        ];
+        for element in solid {
+            let id = encode_picking_id(&element);
+            assert_eq!(
+                decode_pick(id),
+                Some(PickedElement::Solid(element.clone())),
+                "solid IDs still decode as solid topology",
+            );
+        }
+        // A sketch pixel is not a very high part index: the solid-only
+        // decoder must decline it.
+        let sketch = encode_pick(&PickedElement::Sketch(SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 0,
+        }));
+        assert_eq!(decode_picking_id(sketch), None);
+    }
+
+    #[test]
     fn colour_encoding_roundtrip() {
         let id = 0x00_AB_CD_EF;
         let colour = id_to_colour(id);

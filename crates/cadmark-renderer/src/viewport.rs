@@ -289,7 +289,9 @@ pub fn decode_pick_result(data: &[u8]) -> Option<cadmark_core::geometry::PickedE
 mod tests {
     use std::sync::mpsc;
 
-    use cadmark_core::geometry::{FaceId, PartId, PickedElement, TopologyElement};
+    use cadmark_core::geometry::{
+        FaceId, PartId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
+    };
     use cadmark_core::mesh::{MeshVertex, TessellatedMesh};
 
     use super::*;
@@ -648,6 +650,18 @@ mod tests {
         assert!(
             lit(right_pixel),
             "a later part did not reach the frame: {right_pixel:?}"
+        );
+    }
+
+    #[test]
+    fn a_sketch_pixel_decodes_to_the_sketch_element_it_encodes() {
+        // 400_001 = the first sketch curve, above the part range.
+        assert_eq!(
+            decode_pick_result(&(400_001u32).to_le_bytes()),
+            Some(PickedElement::Sketch(SketchElement {
+                kind: SketchElementKind::Curve,
+                index: 0,
+            })),
         );
     }
 }
