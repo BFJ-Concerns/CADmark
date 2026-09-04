@@ -173,12 +173,19 @@ mod tests {
         ledger
             .record_vertex(VertexId(2), LedgerValue::Untraced)
             .unwrap();
+        // A traced vertex, so the footprint is proved to carry every kind
+        // of element the ledger records and not just the two the viewport
+        // can currently draw.
+        ledger
+            .record_vertex(VertexId(3), LedgerValue::Resolved(fillet.clone()))
+            .unwrap();
 
         assert_eq!(
             candidate_footprint(&ledger, 4),
             vec![
                 TopologyElement::Face(FaceId(0)),
                 TopologyElement::Edge(EdgeId(5)),
+                TopologyElement::Vertex(VertexId(3)),
             ]
         );
         assert_eq!(
