@@ -34,6 +34,29 @@ use crate::viewport::{
     viewport_clear_colour,
 };
 
+/// Open the turn's tool group beneath whatever the AI said before it, and
+/// return the group and the reply that will carry what it says afterwards.
+///
+/// Anything spoken before the first tool call is the turn's preamble — it
+/// is where the announced sketch-or-solid route lands, said while the
+/// script can still be held to it — so it stays in the conversation above
+/// the group. A turn that went straight to a tool said nothing, and its
+/// empty reply is dropped rather than shown as a blank card.
+fn begin_tool_group(
+    conversation: &mut Conversation,
+    response: MessageId,
+    activity: ToolActivity,
+) -> (MessageId, MessageId) {
+    let spoke = conversation
+        .message_mut(response)
+        .is_some_and(|message| !message.text.trim().is_empty());
+    if !spoke {
+        conversation.remove(response);
+    }
+    let tools = conversation.push(Message::tool_calls(vec![activity]));
+    (tools, conversation.push(Message::ai_response("")))
+}
+
 /// The chat line for a completed turn: the AI's summary, then what
 /// measurably changed so an edit that did more than asked is visible.
 fn turn_chat_message(
@@ -335,11 +358,10 @@ impl CadmarkApp {
                         }
                     }
                     None => {
-                        // The tool group sits above the reply text: the
-                        // reply is what the turn concluded after its work.
-                        conversation.remove(turn.response);
-                        turn.tools = Some(conversation.push(Message::tool_calls(vec![activity])));
-                        turn.response = conversation.push(Message::ai_response(""));
+                        let (tools, response) =
+                            begin_tool_group(conversation, turn.response, activity);
+                        turn.tools = Some(tools);
+                        turn.response = response;
                     }
                 }
                 self.project.note_turn_event(None);
@@ -1246,8 +1268,65 @@ impl eframe::App for CadmarkApp {
 #[cfg(test)]
 mod tests {
     use cadmark_core::geometry::ModelSummary;
+    use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
-    use super::turn_chat_message;
+    use super::{begin_tool_group, turn_chat_message};
+
+    fn activity() -> ToolActivity {
+        ToolActivity {
+            call_id: "call-1".into(),
+            tool: "run_script".into(),
+            arguments: serde_json::Value::Null,
+            output: None,
+            failed: false,
+            started: chrono::Utc::now(),
+            finished: None,
+        }
+    }
+
+    fn kinds_and_text(conversation: &Conversation) -> Vec<(MessageKind, String)> {
+        conversation
+            .messages()
+            .iter()
+            .map(|message| (message.kind.clone(), message.text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn what_the_ai_said_before_its_first_tool_call_survives_the_tool_group() {
+        let mut conversation = Conversation::new();
+        let response = conversation.push(Message::ai_response(""));
+        conversation.append_text(response, "Route: sketch — the profile corner");
+
+        let (tools, reply) = begin_tool_group(&mut conversation, response, activity());
+
+        let messages = kinds_and_text(&conversation);
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert_eq!(
+            messages[0],
+            (
+                MessageKind::AiResponse,
+                "Route: sketch — the profile corner".to_string()
+            ),
+            "the announcement must stay above the tool group"
+        );
+        assert!(matches!(messages[1].0, MessageKind::ToolCalls(_)));
+        assert_eq!(messages[2], (MessageKind::AiResponse, String::new()));
+        assert_ne!(reply, response, "the turn continues in a fresh reply");
+        assert!(conversation.message_mut(tools).is_some());
+    }
+
+    #[test]
+    fn a_turn_that_said_nothing_first_leaves_no_blank_reply() {
+        let mut conversation = Conversation::new();
+        let response = conversation.push(Message::ai_response(""));
+
+        begin_tool_group(&mut conversation, response, activity());
+
+        let messages = kinds_and_text(&conversation);
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(matches!(messages[0].0, MessageKind::ToolCalls(_)));
+    }
 
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {

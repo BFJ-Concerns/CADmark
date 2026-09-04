@@ -5,13 +5,15 @@
 //! protocol that every supported provider or gateway serves; `tools` are
 //! the tools the loop offers; `grounding` renders spatial anchors for the
 //! model; `doc_lookup` answers the documentation tool from the bundled
-//! build123d corpus.
+//! build123d corpus; `sketch_route` reads back the sketch-or-solid route
+//! the prompt asks the model to announce before it edits.
 
 pub mod backend;
 pub mod config;
 pub mod doc_lookup;
 pub mod grounding;
 mod openai_compatible;
+pub mod sketch_route;
 pub mod tools;
 
 use config::{AiConfiguration, ConfigurationError};
