@@ -1316,7 +1316,8 @@ impl CadmarkApp {
                 let model = self.project().and_then(|project| project.model.as_ref());
                 // Fitting a sketch returns to the flat view of its own
                 // plane, which is how it was first shown.
-                let plane_normal = model.and_then(|model| model.sketch())
+                let plane_normal = model
+                    .and_then(|model| model.sketch())
                     .map(|sketch| sketch.plane.normal);
                 self.pending_camera_bounds = model.and_then(|model| model.bounds);
                 if let Some(normal) = plane_normal {
@@ -1969,9 +1970,10 @@ mod tests {
 
     use super::{
         CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, PartNameDialog, Project, Renderer,
-        SceneHandle, SettingsDialog, SettingsStore, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, grounded_comments, measurement_pair, measurement_readout,
-        TurnGeometry, pending_markers, record_tool_start, stage_pending_comment, turn_chat_message,
+        SceneHandle, SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome, TurnRecord,
+        UserSettings, VersionDialog, ai_services, grounded_comments, measurement_pair,
+        measurement_readout, pending_markers, record_tool_start, stage_pending_comment,
+        turn_chat_message,
     };
 
     #[derive(Debug)]

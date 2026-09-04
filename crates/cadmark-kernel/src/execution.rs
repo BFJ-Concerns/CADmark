@@ -14,7 +14,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
 
-use crate::protocol::{ExecutedModel, ModelForm, ModelFile, SolidResult};
+use crate::protocol::{ExecutedModel, ModelFile, ModelForm, SolidResult};
 
 #[derive(Error, Debug)]
 pub enum ExecutionError {
@@ -1106,11 +1106,17 @@ with BuildSketch(Plane.YZ) as profile:
         // Placed on the YZ plane, so the profile stands at x = 0 with every
         // point 5 from the centre — a sketch drawn off the XY plane is not
         // flattened onto it.
-        assert_eq!(profile.plane.normal.map(|c| c.abs().round()), [1.0, 0.0, 0.0]);
+        assert_eq!(
+            profile.plane.normal.map(|c| c.abs().round()),
+            [1.0, 0.0, 0.0]
+        );
         for point in points {
             assert!(point[0].abs() < 1e-3, "point {point:?} left the YZ plane");
             let radius = (point[1] * point[1] + point[2] * point[2]).sqrt();
-            assert!((radius - 5.0).abs() < 0.2, "point {point:?} is not on the circle");
+            assert!(
+                (radius - 5.0).abs() < 0.2,
+                "point {point:?} is not on the circle"
+            );
         }
     }
 
@@ -1132,20 +1138,21 @@ with BuildLine() as path:
             "an open line encloses no region to fill"
         );
         // No face states the plane, so it comes from the points themselves.
-        assert_eq!(profile.plane.normal.map(|c| c.abs().round()), [0.0, 0.0, 1.0]);
+        assert_eq!(
+            profile.plane.normal.map(|c| c.abs().round()),
+            [0.0, 0.0, 1.0]
+        );
     }
 
     #[test]
     fn a_script_that_extrudes_its_sketch_still_reports_a_solid() {
-        let (_scratch, result) = run(
-            "from build123d import *
+        let (_scratch, result) = run("from build123d import *
 
 with BuildPart() as part:
     with BuildSketch() as profile:
         Rectangle(20, 10)
     extrude(amount=4)
-",
-        );
+");
         let model = result.expect("execution succeeds");
         assert!(
             model.sketch().is_none(),
@@ -1529,7 +1536,10 @@ with BuildPart() as part:
         assert!((size[0] - 20.0).abs() < 1e-3);
         assert!((size[1] - 10.0).abs() < 1e-3);
         assert!((size[2] - 5.0).abs() < 1e-3);
-        assert_eq!(result.solid().expect("a solid result").summary.face_count, 6);
+        assert_eq!(
+            result.solid().expect("a solid result").summary.face_count,
+            6
+        );
     }
 
     #[test]
@@ -1756,13 +1766,22 @@ with BuildPart() as part:
     Box(20, 10, 5)
 "#);
         let result = result.unwrap();
-        assert!(result.solid().expect("a solid result").file.0.is_file(), "model kept at {:?}", result.solid().expect("a solid result").file);
+        assert!(
+            result.solid().expect("a solid result").file.0.is_file(),
+            "model kept at {:?}",
+            result.solid().expect("a solid result").file
+        );
         let directory = tempfile::tempdir().unwrap();
         for format in cadmark_core::export::ExportFormat::ALL {
             let path = directory
                 .path()
                 .join(format!("part.{}", format.extension()));
-            crate::export::export_model(&result.solid().expect("a solid result").file, format, &path).unwrap();
+            crate::export::export_model(
+                &result.solid().expect("a solid result").file,
+                format,
+                &path,
+            )
+            .unwrap();
             assert!(std::fs::metadata(&path).unwrap().len() > 0, "{path:?}");
         }
     }
@@ -1776,7 +1795,10 @@ hole = Cylinder(2, 10)
 result = plate - hole
 "#);
         let algebra = algebra.unwrap();
-        assert!(algebra.solid().expect("a solid result").summary.face_count > 6, "the hole adds faces");
+        assert!(
+            algebra.solid().expect("a solid result").summary.face_count > 6,
+            "the hole adds faces"
+        );
         assert_contains_operation(&algebra, SemanticOperation::BooleanCut);
         assert!(algebra.is_printable());
 

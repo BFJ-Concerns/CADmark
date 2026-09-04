@@ -437,11 +437,12 @@ impl RenderPipelines {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/sketch.wgsl").into()),
         });
 
-        let sketch_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("sketch_pipeline_layout"),
-            bind_group_layouts: &[&mesh_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let sketch_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("sketch_pipeline_layout"),
+                bind_group_layouts: &[&mesh_bind_group_layout],
+                push_constant_ranges: &[],
+            });
 
         let sketch_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<SketchVertex>() as u64,
@@ -463,34 +464,35 @@ impl RenderPipelines {
             bias: Default::default(),
         };
 
-        let sketch_curve_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("sketch_curve_pipeline"),
-            layout: Some(&sketch_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &sketch_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[sketch_vertex_layout.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &sketch_shader,
-                entry_point: Some("fs_curve"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: Some(sketch_depth.clone()),
-            multisample: Default::default(),
-            multiview: None,
-            cache: None,
-        });
+        let sketch_curve_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("sketch_curve_pipeline"),
+                layout: Some(&sketch_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &sketch_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[sketch_vertex_layout.clone()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &sketch_shader,
+                    entry_point: Some("fs_curve"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(sketch_depth.clone()),
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
 
         let sketch_fill_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sketch_fill_pipeline"),
@@ -807,7 +809,11 @@ impl Renderer {
             selected_id: self.selected_id,
             hover_id: self.hover_id,
             marker_count: self.markers.len().try_into().unwrap_or(u32::MAX),
-            ghost: if self.ghost_solid { GHOST_STRENGTH } else { 0.0 },
+            ghost: if self.ghost_solid {
+                GHOST_STRENGTH
+            } else {
+                0.0
+            },
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
         }
@@ -961,7 +967,11 @@ mod tests {
         // The region's three vertices, then the corner marker's two
         // triangles.
         assert_eq!(vertices.len(), 3 + 6);
-        assert!(vertices[..3].iter().all(|vertex| vertex.tint == REGION_TINT));
+        assert!(
+            vertices[..3]
+                .iter()
+                .all(|vertex| vertex.tint == REGION_TINT)
+        );
 
         let marker = &vertices[3..];
         assert!(marker.iter().all(|vertex| vertex.tint == CORNER_TINT));
@@ -969,7 +979,10 @@ mod tests {
         // plane the sketch was drawn on.
         let half_width = profile.extent() * CORNER_MARKER_SCALE;
         for vertex in marker {
-            assert!((vertex.position[2]).abs() < 1e-6, "{vertex:?} left the plane");
+            assert!(
+                (vertex.position[2]).abs() < 1e-6,
+                "{vertex:?} left the plane"
+            );
             assert!((vertex.position[0] - 4.0).abs() - half_width < 1e-6);
             assert!(vertex.position[1].abs() - half_width < 1e-6);
         }
@@ -1151,7 +1164,9 @@ pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
     for corner in &profile.corners {
         let offset = |along: f32, sideways: f32| SketchVertex {
             position: std::array::from_fn(|axis| {
-                corner.position[axis] + across[axis] * along * half_width + up[axis] * sideways * half_width
+                corner.position[axis]
+                    + across[axis] * along * half_width
+                    + up[axis] * sideways * half_width
             }),
             tint: CORNER_TINT,
         };
