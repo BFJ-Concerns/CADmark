@@ -33,6 +33,11 @@ All notable changes to this project will be documented in this file.
   script is a successful build rather than an error, and the status line,
   the chat and the AI's render all report it as a profile that is not yet a
   solid and so cannot be exported or measured
+- Section plane: cut the model along X, Y or Z, slide the plane across
+  it, and flip which half is kept, so an internal pocket can be seen
+  without exporting. Cut-away geometry is also unclickable
+- Ghost button makes the model see-through, another way to see inside
+  it without cutting
 
 ### Changed
 - New conversation control archives the current chat before starting a blank

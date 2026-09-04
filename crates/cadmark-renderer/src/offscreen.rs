@@ -131,6 +131,11 @@ impl OffscreenRenderer {
             gpu_mesh.as_ref(),
             gpu_sketch.as_ref(),
             clear_colour,
+            // The offscreen render is what the AI is shown, so it draws
+            // the model the way the user has it: the same uniforms carry
+            // the section plane, and the alpha they carry chooses the
+            // pass, exactly as the viewport's own selector does.
+            uniforms.mesh_alpha < 1.0,
             &self.colour_view,
         );
         encoder.copy_texture_to_buffer(
@@ -521,6 +526,199 @@ mod tests {
         assert!(
             drawn > 100,
             "only {drawn} curve or corner pixels — the profile's lines are missing"
+        );
+    }
+
+    /// The see-through view has to actually let the background through.
+    ///
+    /// A solid cube drawn opaque covers the background completely where
+    /// it sits; drawn see-through, the same pixels must move back
+    /// towards the background without disappearing into it. Comparing
+    /// one interior pixel against both is what separates "blended" from
+    /// "the opaque pass ran anyway".
+    #[test]
+    fn a_see_through_solid_lets_the_background_through() {
+        let (device, queue) = gpu();
+        let (width, height) = (160u32, 160u32);
+        let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
+
+        let mut scene = crate::pipeline::Renderer::new();
+        let bounds = crate::camera::Bounds3::from_positions(
+            cube().vertices.iter().map(|vertex| vertex.position),
+        )
+        .expect("cube bounds");
+        scene.camera.frame_bounds(bounds, 1.0);
+        scene
+            .camera
+            .look_at_standard(crate::camera::StandardView::Front);
+        let background = [40u8, 42, 48];
+        let clear = wgpu::Color {
+            r: f64::from(background[0]) / 255.0,
+            g: f64::from(background[1]) / 255.0,
+            b: f64::from(background[2]) / 255.0,
+            a: 1.0,
+        };
+        let draw = |scene: &crate::pipeline::Renderer| {
+            renderer
+                .render(
+                    &device,
+                    &queue,
+                    Some(&cube()),
+                    None,
+                    &scene.mesh_uniforms(1.0),
+                    clear,
+                )
+                .expect("render")
+        };
+        // The image centre: the cube is framed there, so this pixel is
+        // the front face in both renders.
+        let centre = |image: &RenderedImage| {
+            let index = ((height / 2) * width + width / 2) as usize * 4;
+            [
+                image.rgba[index],
+                image.rgba[index + 1],
+                image.rgba[index + 2],
+            ]
+        };
+        let distance = |pixel: [u8; 3]| -> u32 {
+            (0..3)
+                .map(|channel| u32::from(pixel[channel].abs_diff(background[channel])))
+                .sum()
+        };
+
+        let opaque = distance(centre(&draw(&scene)));
+        assert!(opaque > 60, "the opaque cube is not covering the centre");
+
+        scene.transparent = true;
+        let see_through = distance(centre(&draw(&scene)));
+
+        // Both the near and the far face land on this pixel — the pass
+        // culls nothing, so an open shell's far side is still revealed —
+        // and each blends in turn. Two layers at the pass's own opacity
+        // leave the centre a little over half the opaque reading, so the
+        // bar is set below that rather than at one layer's share.
+        assert!(
+            see_through * 4 < opaque * 3,
+            "the see-through surface reads at {see_through} against the opaque {opaque} — the background is not showing through"
+        );
+        assert!(
+            see_through > opaque / 20,
+            "the see-through surface vanished entirely at {see_through}; it must still be visibly there"
+        );
+    }
+
+    /// The section is meant to be *looked through*, so the proof that
+    /// matters is pixels: half the solid must stop being drawn.
+    ///
+    /// The cube is framed head-on and cut along X through its centre.
+    /// Counting how many pixels differ from the background before and
+    /// after gives the cut's own effect, and the surviving pixels must
+    /// all sit on one side of the image — a shader that discarded
+    /// nothing, or discarded everywhere, fails both halves of this.
+    #[test]
+    fn a_section_plane_stops_half_the_solid_being_drawn() {
+        let (device, queue) = gpu();
+        let (width, height) = (160u32, 160u32);
+        let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
+
+        let mut scene = crate::pipeline::Renderer::new();
+        let bounds = crate::camera::Bounds3::from_positions(
+            cube().vertices.iter().map(|vertex| vertex.position),
+        )
+        .expect("cube bounds");
+        scene.camera.frame_bounds(bounds, 1.0);
+        scene
+            .camera
+            .look_at_standard(crate::camera::StandardView::Front);
+        let background = [40u8, 42, 48];
+        let clear = wgpu::Color {
+            r: f64::from(background[0]) / 255.0,
+            g: f64::from(background[1]) / 255.0,
+            b: f64::from(background[2]) / 255.0,
+            a: 1.0,
+        };
+        let draw = |scene: &crate::pipeline::Renderer| {
+            renderer
+                .render(
+                    &device,
+                    &queue,
+                    Some(&cube()),
+                    None,
+                    &scene.mesh_uniforms(1.0),
+                    clear,
+                )
+                .expect("render")
+        };
+
+        // Which pixels are the solid rather than the background, as a
+        // column-indexed grid.
+        let drawn = |image: &RenderedImage| -> Vec<(u32, u32)> {
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(_, pixel)| {
+                    (0..3).any(|channel| pixel[channel].abs_diff(background[channel]) > 12)
+                })
+                .map(|(index, _)| (index as u32 % width, index as u32 / width))
+                .collect()
+        };
+
+        let whole = drawn(&draw(&scene));
+        assert!(
+            whole.len() > 2000,
+            "only {} pixels of solid before the cut — the scene is not set up",
+            whole.len()
+        );
+
+        scene.section.enabled = true;
+        scene
+            .section
+            .cut_along(crate::section::Axis::X, Some(bounds));
+        let cut = drawn(&draw(&scene));
+
+        assert!(
+            !cut.is_empty(),
+            "the section discarded the whole model, not half of it"
+        );
+        assert!(
+            cut.len() * 4 < whole.len() * 3,
+            "{} pixels survived the cut against {} before it — nothing was clipped away",
+            cut.len(),
+            whole.len()
+        );
+
+        // Everything left standing is on one side of the cut. The plane
+        // is axis-aligned and the view is head-on, so the boundary is a
+        // column: the kept pixels must not straddle the whole width the
+        // uncut solid covered.
+        let span = |pixels: &[(u32, u32)]| {
+            let columns: Vec<u32> = pixels.iter().map(|(x, _)| *x).collect();
+            let (low, high) = (
+                *columns.iter().min().expect("pixels"),
+                *columns.iter().max().expect("pixels"),
+            );
+            high - low
+        };
+        assert!(
+            span(&cut) * 3 < span(&whole) * 2,
+            "the kept pixels span {} columns against the uncut {} — the survivors are not one side of a cut",
+            span(&cut),
+            span(&whole)
+        );
+
+        // Flipping keeps the other half: the two halves must not overlap.
+        scene.section.flip();
+        let flipped = drawn(&draw(&scene));
+        let kept: std::collections::HashSet<_> = cut.iter().copied().collect();
+        let overlap = flipped.iter().filter(|pixel| kept.contains(pixel)).count();
+        assert!(
+            !flipped.is_empty() && overlap * 10 < flipped.len(),
+            "{overlap} of {} flipped pixels coincide with the {} kept before the flip — the flip did not swap halves",
+            flipped.len(),
+            cut.len()
         );
     }
 
