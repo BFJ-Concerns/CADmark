@@ -253,20 +253,29 @@ mod tests {
                 r#"{"context_window_tokens":"wrong-type-sentinel"}"#,
                 "wrong-type-sentinel",
                 Some("context_window_tokens"),
+                "field type",
+            ),
+            (
+                r#"{"unknown-key-sentinel":[1,}"#,
+                "unknown-key-sentinel",
+                None,
+                "JSON syntax",
             ),
             (
                 r#"{"context_window_tokens":"malformed-literal-sentinel"#,
                 "malformed-literal-sentinel",
                 None,
+                "JSON syntax",
             ),
             (
                 r#"{"context_window_tokens":128000} trailing-junk-sentinel"#,
                 "trailing-junk-sentinel",
                 None,
+                "JSON syntax",
             ),
         ];
 
-        for (contents, sentinel, field) in cases {
+        for (contents, sentinel, field, repair) in cases {
             std::fs::create_dir_all(&store.dir).unwrap();
             std::fs::write(store.dir.join(SETTINGS_FILE), contents).unwrap();
 
@@ -276,6 +285,7 @@ mod tests {
             assert!(!error.contains(sentinel));
             assert!(error.contains("line 1"));
             assert!(error.contains("correct"));
+            assert!(error.contains(repair));
             if let Some(field) = field {
                 assert!(error.contains(field));
             }
