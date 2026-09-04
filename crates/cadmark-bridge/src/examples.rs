@@ -240,43 +240,90 @@ mod tests {
                 "{} must show a named parameter block",
                 example.name
             );
-            assert!(
-                has_a_derived_parameter(example.body),
-                "{} must derive at least one parameter from another (C33)",
-                example.name
-            );
+            for block in parameter_blocks(example.body) {
+                assert!(
+                    derives_a_parameter(&block),
+                    "every parameter block of {} must derive a value from another \
+                     parameter, not only state literals (C33); this one does not:\n{}",
+                    example.name,
+                    block.join("\n")
+                );
+            }
         }
     }
 
-    /// Whether any parameter assignment's right-hand side names a
-    /// parameter assigned above it — a derived value rather than a
-    /// literal.
-    fn has_a_derived_parameter(body: &str) -> bool {
+    /// The lines of each `# Parameters` block in an example: the
+    /// assignments that follow the heading, ending at the first line that
+    /// is neither blank nor a plain `name = value` assignment (the
+    /// `# Geometry` heading, or the first statement). Geometry below is
+    /// deliberately out of scope — a derived value down in the modelling
+    /// code is not a parameter block that derives.
+    fn parameter_blocks(body: &str) -> Vec<Vec<&str>> {
+        let mut blocks = Vec::new();
+        let mut lines = body.lines();
+        while let Some(line) = lines.next() {
+            if line.trim() != "# Parameters" {
+                continue;
+            }
+            let mut block = Vec::new();
+            for line in lines.by_ref() {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                if assigned_name(line).is_none() {
+                    break;
+                }
+                block.push(line);
+            }
+            blocks.push(block);
+        }
+        blocks
+    }
+
+    /// The name a line assigns, when the line is a plain assignment.
+    fn assigned_name(line: &str) -> Option<&str> {
+        let (left, right) = line.trim().split_once('=')?;
+        if right.starts_with('=') || left.ends_with(['!', '<', '>', '=']) {
+            return None;
+        }
+        let name = left.trim();
+        (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')).then_some(name)
+    }
+
+    /// Whether some assignment in this block names a parameter assigned
+    /// above it.
+    fn derives_a_parameter(block: &[&str]) -> bool {
         let mut assigned: Vec<&str> = Vec::new();
-        for line in body.lines() {
-            let line = line.trim();
-            let Some((left, right)) = line.split_once('=') else {
+        for line in block {
+            let Some(name) = assigned_name(line) else {
                 continue;
             };
-            if right.starts_with('=') || left.ends_with(['!', '<', '>', '=']) {
-                continue;
-            }
-            let name = left.trim();
-            if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                continue;
-            }
+            let right = line.split_once('=').map(|(_, right)| right).unwrap_or("");
             let right = right.split('#').next().unwrap_or(right);
-            let referenced = assigned.iter().any(|earlier| {
+            if assigned.iter().any(|earlier| {
                 right
                     .split(|c: char| !(c.is_alphanumeric() || c == '_'))
                     .any(|word| word == *earlier)
-            });
-            if referenced {
+            }) {
                 return true;
             }
             assigned.push(name);
         }
         false
+    }
+
+    #[test]
+    fn a_parameter_block_of_bare_literals_is_not_accepted() {
+        // The shape the whole-body scan used to accept: literal
+        // parameters, with the only derived value down in the geometry.
+        let literal_block = "# Parameters\nwidth = 60.0\ndepth = 40.0\n\n\
+                             with BuildPart():\n    helper = width / 2\n";
+        let blocks = parameter_blocks(literal_block);
+        assert_eq!(blocks.len(), 1);
+        assert!(!derives_a_parameter(&blocks[0]));
+        // ...and the shape that is: the block itself derives.
+        let derived_block = "# Parameters\nwidth = 60.0\ndepth = width * 2 / 3\n";
+        assert!(derives_a_parameter(&parameter_blocks(derived_block)[0]));
     }
 
     #[test]
