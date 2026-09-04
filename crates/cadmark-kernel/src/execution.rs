@@ -637,47 +637,6 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
         }
     }
 
-    fn assert_every_element_resolves(
-        result: &ExecutedModel,
-        operation: SemanticOperation,
-        line: u32,
-    ) {
-        let strategy = NullIdentification;
-        for index in 0..result.ledger.face_count() {
-            let context = resolve_context(
-                &TopologyElement::Face(FaceId(index as u32)),
-                &result.ledger,
-                &strategy,
-            )
-            .unwrap();
-            let entry = context.provenance.resolved().expect("resolved provenance");
-            assert_eq!(entry.operation, operation);
-            assert_eq!(entry.source.line, line);
-        }
-        for index in 0..result.ledger.edge_count() {
-            let context = resolve_context(
-                &TopologyElement::Edge(EdgeId(index as u32)),
-                &result.ledger,
-                &strategy,
-            )
-            .unwrap();
-            let entry = context.provenance.resolved().expect("resolved provenance");
-            assert_eq!(entry.operation, operation);
-            assert_eq!(entry.source.line, line);
-        }
-        for index in 0..result.ledger.vertex_count() {
-            let context = resolve_context(
-                &TopologyElement::Vertex(VertexId(index as u32)),
-                &result.ledger,
-                &strategy,
-            )
-            .unwrap();
-            let entry = context.provenance.resolved().expect("resolved provenance");
-            assert_eq!(entry.operation, operation);
-            assert_eq!(entry.source.line, line);
-        }
-    }
-
     fn resolved_contexts(result: &ExecutedModel) -> Vec<GeometryContext> {
         let strategy = NullIdentification;
         let mut contexts = Vec::new();
@@ -751,6 +710,21 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
         );
     }
 
+    fn assert_every_element_resolves_to(
+        result: &ExecutedModel,
+        expected: (SemanticOperation, ProvenanceRelation, u32),
+    ) {
+        for context in resolved_contexts(result) {
+            let provenance = entry(&context);
+            let actual = (
+                provenance.operation,
+                provenance.relation.clone(),
+                provenance.source.line,
+            );
+            assert_eq!(actual, expected, "{}", context.element.display_label());
+        }
+    }
+
     /// The resolved entry of a context, for assertions on single-source elements.
     fn entry(context: &GeometryContext) -> &ProvenanceEntry {
         context.provenance.resolved().expect("resolved provenance")
@@ -768,7 +742,10 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 6);
         assert_eq!(result.ledger.edge_count(), 12);
         assert_eq!(result.ledger.vertex_count(), 8);
-        assert_every_element_resolves(&result, SemanticOperation::Box, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (SemanticOperation::Box, ProvenanceRelation::Generated, 4),
+        );
         assert!(matches!(
             result.ledger.lookup_face(FaceId(0)),
             Some(LedgerValue::Resolved(_))
@@ -784,7 +761,14 @@ with BuildPart() as part:
     Cylinder(5, 10)
 "#);
         let result = result.unwrap();
-        assert_every_element_resolves(&result, SemanticOperation::Cylinder, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::Cylinder,
+                ProvenanceRelation::Generated,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -914,7 +898,7 @@ with BuildPart() as part:
     }
 
     #[test]
-    fn real_locations_transport_primitive_provenance() {
+    fn real_locations_resolve_to_the_pattern_line() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -925,12 +909,19 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 12);
         assert_eq!(result.ledger.edge_count(), 24);
         assert_eq!(result.ledger.vertex_count(), 16);
-        assert_every_element_resolves(&result, SemanticOperation::Box, 5);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::LocationPattern,
+                ProvenanceRelation::Modified,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn real_grid_locations_transport_primitive_provenance() {
+    fn real_grid_locations_resolve_to_the_pattern_line() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -941,12 +932,19 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 24);
         assert_eq!(result.ledger.edge_count(), 48);
         assert_eq!(result.ledger.vertex_count(), 32);
-        assert_every_element_resolves(&result, SemanticOperation::Box, 5);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::LocationPattern,
+                ProvenanceRelation::Modified,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
     #[test]
-    fn real_polar_locations_transport_rotated_primitive_provenance() {
+    fn real_polar_locations_resolve_to_the_pattern_line() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -957,8 +955,203 @@ with BuildPart() as part:
         assert_eq!(result.ledger.face_count(), 18);
         assert_eq!(result.ledger.edge_count(), 36);
         assert_eq!(result.ledger.vertex_count(), 24);
-        assert_every_element_resolves(&result, SemanticOperation::Box, 5);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::LocationPattern,
+                ProvenanceRelation::Modified,
+                4,
+            ),
+        );
         assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn location_patterns_resolve_every_element_to_the_pattern_line() {
+        for source in [
+            r#"from build123d import *
+
+with BuildPart() as part:
+    with Locations((0, 0, 0), (10, 0, 0)):
+        Box(2, 2, 2)
+"#,
+            r#"from build123d import *
+
+with BuildPart() as part:
+    with GridLocations(10, 10, 2, 2):
+        Box(2, 2, 2)
+"#,
+            r#"from build123d import *
+
+with BuildPart() as part:
+    with PolarLocations(10, 3):
+        Box(2, 2, 2)
+"#,
+        ] {
+            let (_scratch, result) = run(source);
+            let result = result.unwrap();
+            assert_every_element_resolves_to(
+                &result,
+                (
+                    SemanticOperation::LocationPattern,
+                    ProvenanceRelation::Modified,
+                    4,
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn transforms_modify_every_final_element_at_the_transform_line() {
+        for (source, operation) in [
+            (
+                r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+result = box.mirror(Plane.YZ).moved(Location((10, 0, 0)))
+"#,
+                SemanticOperation::Mirror,
+            ),
+            (
+                r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+result = box.rotate(Axis.Z, 30, transform=True).moved(Location((10, 0, 0)))
+"#,
+                SemanticOperation::Rotate,
+            ),
+            (
+                r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+result = box.scale(2).moved(Location((10, 0, 0)))
+"#,
+                SemanticOperation::Scale,
+            ),
+        ] {
+            let (_scratch, result) = run(source);
+            let result = result.unwrap();
+            assert_every_element_resolves_to(&result, (operation, ProvenanceRelation::Modified, 4));
+        }
+    }
+
+    #[test]
+    fn default_rotate_records_every_final_element_at_the_rotate_line() {
+        for (source, line) in [
+            (
+                r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+result = box.rotate(Axis.Z, 30)
+"#,
+                4,
+            ),
+            (
+                r#"from build123d import *
+
+with BuildPart() as part:
+    Box(2, 2, 2)
+result = part.part.rotate(Axis.Z, 30)
+"#,
+                5,
+            ),
+        ] {
+            let (_scratch, result) = run(source);
+            let result = result.unwrap();
+            assert_every_element_resolves_to(
+                &result,
+                (
+                    SemanticOperation::Rotate,
+                    ProvenanceRelation::Modified,
+                    line,
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn default_rotate_keeps_retained_receiver_at_its_own_line() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+turned = box.rotate(Axis.Z, 30)
+result = Compound(children=[box, turned])
+"#);
+        let result = result.unwrap();
+        let mut original = 0;
+        let mut rotated = 0;
+        for context in resolved_contexts(&result) {
+            let provenance = entry(&context);
+            match (
+                provenance.operation,
+                provenance.relation.clone(),
+                provenance.source.line,
+            ) {
+                (SemanticOperation::Box, ProvenanceRelation::Generated, 3) => original += 1,
+                (SemanticOperation::Rotate, ProvenanceRelation::Modified, 4) => rotated += 1,
+                found => panic!("unexpected retained-rotate provenance: {found:?}"),
+            }
+        }
+        assert_eq!(original, 26);
+        assert_eq!(rotated, 26);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn default_rotate_keeps_moved_output_at_the_rotate_line() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+box = Solid.make_box(2, 2, 2)
+turned = box.rotate(Axis.Z, 30)
+result = Compound(children=[box, turned.moved(Location((10, 0, 0)))])
+"#);
+        let result = result.unwrap();
+        let mut original = 0;
+        let mut rotated = 0;
+        for context in resolved_contexts(&result) {
+            let provenance = entry(&context);
+            match (
+                provenance.operation,
+                provenance.relation.clone(),
+                provenance.source.line,
+            ) {
+                (SemanticOperation::Box, ProvenanceRelation::Generated, 3) => original += 1,
+                (SemanticOperation::Rotate, ProvenanceRelation::Modified, 4) => rotated += 1,
+                found => panic!("unexpected moved-rotate provenance: {found:?}"),
+            }
+        }
+        assert_eq!(original, 26);
+        assert_eq!(rotated, 26);
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn builder_mirror_preserves_every_mirror_relation_through_the_fuse() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    Box(10, 5, 5)
+    mirror(about=Plane.YZ)
+"#);
+        let result = result.unwrap();
+        assert_every_element_resolves_to(
+            &result,
+            (SemanticOperation::Mirror, ProvenanceRelation::Modified, 5),
+        );
+    }
+
+    #[test]
+    fn semantic_lineage_is_deterministic_across_executions() {
+        let source = r#"from build123d import *
+
+with BuildPart() as part:
+    with GridLocations(10, 10, 2, 2):
+        Box(2, 2, 2)
+result = part.part.rotate(Axis.Z, 30, transform=True)
+"#;
+        let (_first_scratch, first) = run(source);
+        let (_second_scratch, second) = run(source);
+        assert_eq!(first.unwrap().ledger, second.unwrap().ledger);
     }
 
     #[test]
@@ -972,7 +1165,14 @@ with BuildPart() as part:
 "#);
         let result = result.unwrap();
         assert_eq!(result.ledger.face_count(), 6);
-        assert_every_element_resolves(&result, SemanticOperation::Extrude, 6);
+        assert_every_element_resolves_to(
+            &result,
+            (
+                SemanticOperation::Extrude,
+                ProvenanceRelation::GeneratedDescendant,
+                6,
+            ),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -1206,34 +1406,78 @@ with BuildPart() as part:
     revolve(axis=Axis.Z)
 "#);
         let result = result.unwrap();
-        assert_every_element_resolves(&result, SemanticOperation::Revolve, 7);
+        for context in resolved_contexts(&result) {
+            let expected_relation = match context.element {
+                TopologyElement::Face(_) => ProvenanceRelation::Generated,
+                TopologyElement::Edge(_) | TopologyElement::Vertex(_) => {
+                    ProvenanceRelation::GeneratedDescendant
+                }
+            };
+            let provenance = entry(&context);
+            assert_eq!(provenance.operation, SemanticOperation::Revolve);
+            assert_eq!(provenance.relation, expected_relation);
+            assert_eq!(provenance.source.line, 7);
+        }
         assert_bridge_consumers(&result);
     }
 
     #[test]
     fn real_sphere_cone_torus_and_wedge_resolve_all_final_topology() {
-        let (_scratch, result) = run(r#"from build123d import *
-
-with BuildPart() as part:
-    Sphere(5)
-    with Locations((20, 0, 0)):
-        Cone(4, 2, 8)
-    with Locations((0, 20, 0)):
-        Torus(4, 1)
-    with Locations((0, -20, 0)):
-        Wedge(4, 4, 4, 1, 1, 3, 3)
-"#);
-        let result = result.unwrap();
-        assert_eq!(result.ledger.untraced_count(), 0);
-        for operation in [
-            SemanticOperation::Sphere,
-            SemanticOperation::Cone,
-            SemanticOperation::Torus,
-            SemanticOperation::Wedge,
+        for (source, operation) in [
+            (
+                "from build123d import *\n\nresult = Solid.make_sphere(5)\n",
+                SemanticOperation::Sphere,
+            ),
+            (
+                "from build123d import *\n\nresult = Solid.make_cone(4, 2, 8)\n",
+                SemanticOperation::Cone,
+            ),
+            (
+                "from build123d import *\n\nresult = Solid.make_torus(4, 1)\n",
+                SemanticOperation::Torus,
+            ),
+            (
+                "from build123d import *\n\nresult = Solid.make_wedge(4, 4, 4, 1, 1, 3, 3)\n",
+                SemanticOperation::Wedge,
+            ),
         ] {
-            assert_contains_operation(&result, operation);
+            let (_scratch, result) = run(source);
+            let result = result.unwrap();
+            assert_eq!(result.ledger.untraced_count(), 0);
+            assert_every_element_resolves_to(
+                &result,
+                (operation, ProvenanceRelation::Generated, 3),
+            );
+            assert_bridge_consumers(&result);
         }
-        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn builder_primitives_cover_sphere_cone_torus_and_wedge() {
+        for (source, operation) in [
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Sphere(5)\n",
+                SemanticOperation::Sphere,
+            ),
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Cone(4, 2, 8)\n",
+                SemanticOperation::Cone,
+            ),
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Torus(4, 1)\n",
+                SemanticOperation::Torus,
+            ),
+            (
+                "from build123d import *\n\nwith BuildPart() as part:\n    Wedge(4, 4, 4, 1, 1, 3, 3)\n",
+                SemanticOperation::Wedge,
+            ),
+        ] {
+            let (_scratch, result) = run(source);
+            assert_every_element_resolves_to(
+                &result.unwrap(),
+                (operation, ProvenanceRelation::Generated, 4),
+            );
+        }
     }
 
     #[test]
@@ -1591,7 +1835,10 @@ block = Solid.make_box(4, 4, 4)
 "#);
         let direct = direct.unwrap();
         assert_eq!(direct.ledger.face_count(), 6);
-        assert_every_element_resolves(&direct, SemanticOperation::Box, 3);
+        assert_every_element_resolves_to(
+            &direct,
+            (SemanticOperation::Box, ProvenanceRelation::Generated, 3),
+        );
     }
 
     #[test]
@@ -1644,7 +1891,14 @@ raise RuntimeError("deliberate execution failure")
 with BuildPart() as part:
     Cylinder(2, 4)
 "#);
-        assert_every_element_resolves(&result.unwrap(), SemanticOperation::Cylinder, 4);
+        assert_every_element_resolves_to(
+            &result.unwrap(),
+            (
+                SemanticOperation::Cylinder,
+                ProvenanceRelation::Generated,
+                4,
+            ),
+        );
     }
 
     #[test]
@@ -1663,7 +1917,10 @@ with BuildPart() as part:
         .unwrap();
         let scratch = tempfile::tempdir().unwrap();
         let result = execute_script(&path, scratch.path()).unwrap();
-        assert_every_element_resolves(&result, SemanticOperation::Box, 4);
+        assert_every_element_resolves_to(
+            &result,
+            (SemanticOperation::Box, ProvenanceRelation::Generated, 4),
+        );
     }
 
     #[test]

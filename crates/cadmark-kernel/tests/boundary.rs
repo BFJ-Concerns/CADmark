@@ -105,6 +105,10 @@ fn semantic_operation_name(operation: SemanticOperation) -> &'static str {
         SemanticOperation::BooleanCommon => "BooleanCommon",
         SemanticOperation::Fillet => "Fillet",
         SemanticOperation::Chamfer => "Chamfer",
+        SemanticOperation::LocationPattern => "LocationPattern",
+        SemanticOperation::Mirror => "Mirror",
+        SemanticOperation::Rotate => "Rotate",
+        SemanticOperation::Scale => "Scale",
     }
 }
 

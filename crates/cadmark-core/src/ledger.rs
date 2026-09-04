@@ -53,6 +53,10 @@ pub enum SemanticOperation {
     BooleanCommon,
     Fillet,
     Chamfer,
+    LocationPattern,
+    Mirror,
+    Rotate,
+    Scale,
 }
 
 impl SemanticOperation {
@@ -78,6 +82,10 @@ impl SemanticOperation {
             Self::BooleanCommon => "intersection",
             Self::Fillet => "fillet",
             Self::Chamfer => "chamfer",
+            Self::LocationPattern => "location pattern",
+            Self::Mirror => "mirror",
+            Self::Rotate => "rotate",
+            Self::Scale => "scale",
         }
     }
 }

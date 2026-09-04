@@ -173,9 +173,14 @@ class _CadmarkSession:
         self.tombstones = []
         # shape -> {"candidates": [...], "allow_partner": bool}
         self.registry = _CadmarkShapeTable()
+        # Located default-rotate results share a TShape with their retained
+        # receiver, so only an explicit subsequent move may carry their
+        # provenance to a new placement.
+        self.location_only_transforms = _CadmarkShapeTable()
         self.originals = []
         self.final_maps = {}
         self._next_operation_id = 1
+        self.semantic_stack = []
 
     def user_line(self):
         frame = _cadmark_inspect.currentframe()
@@ -302,6 +307,17 @@ class _CadmarkSession:
         )
         return operation_id
 
+    def push_semantic(self, source_line, operation, api_class):
+        self.semantic_stack.append((source_line, operation, api_class))
+
+    def pop_semantic(self):
+        self.semantic_stack.pop()
+
+    def active_semantic(self):
+        if self.semantic_stack:
+            return self.semantic_stack[-1]
+        return None
+
     @staticmethod
     def history_results(builder, method, shape):
         try:
@@ -366,7 +382,45 @@ class _CadmarkSession:
                     shape, [candidate], allow_partner=True, replace=True
                 )
 
-    def capture_history(self, builder, result, operation, api_class):
+    def capture_location_only_transform(self, result, source_line, operation, api_class):
+        operation_id = self.new_operation(source_line, operation, api_class)
+        candidate = {"operation_id": operation_id, "relation": "Modified"}
+        for _kind, shapes in self.topology(self.unwrap(result)):
+            for shape in shapes:
+                self.location_only_transforms.slot(shape, lambda: True)
+                self.register(shape, [candidate])
+
+    def has_location_only_transform(self, shape):
+        return any(
+            self.location_only_transforms.get(member) is not None
+            for _kind, members in self.topology(self.unwrap(shape))
+            for member in members
+        )
+
+    def capture_location_transport(self, original, result):
+        """Carry a located default-rotate result to one later placement.
+
+        This is deliberately exact-location transport rather than partner
+        fallback: the retained receiver has the same partner topology but was
+        not rotated.
+        """
+        inputs_by_kind = dict(self.topology(self.unwrap(original)))
+        for kind, outputs in self.topology(self.unwrap(result)):
+            for output in outputs:
+                candidates = []
+                for input_shape in inputs_by_kind[kind]:
+                    if output.IsPartner(input_shape):
+                        candidates.extend(self.lookup(input_shape))
+                self.register(output, candidates, replace=True)
+
+    def capture_active_semantic_relation(self, result, source_line, operation, api_class):
+        operation_id = self.new_operation(source_line, operation, api_class)
+        candidate = {"operation_id": operation_id, "relation": "Modified"}
+        for _kind, shapes in self.topology(result):
+            for shape in shapes:
+                self.register(shape, [candidate], allow_partner=True, replace=True)
+
+    def capture_history(self, builder, result, operation, api_class, allow_partner=False):
         operation_id = self.new_operation(
             builder._cadmark_source_line, operation, api_class
         )
@@ -404,6 +458,7 @@ class _CadmarkSession:
                     self.register(
                         output,
                         [{"operation_id": operation_id, "relation": selected}],
+                        allow_partner=allow_partner,
                         replace=True,
                     )
         return operation_id
@@ -450,6 +505,49 @@ class _CadmarkSession:
         result = self.unwrap(result)
         if result.IsNull():
             return
+        semantic = self.active_semantic()
+        if semantic is not None:
+            source_line, semantic_operation, semantic_api_class = semantic
+            if adapter == "primitive":
+                if semantic_operation == "LocationPattern":
+                    self.capture_active_semantic_relation(
+                        result,
+                        source_line,
+                        semantic_operation,
+                        semantic_api_class,
+                    )
+                    return
+                original_line = builder._cadmark_source_line
+                builder._cadmark_source_line = source_line
+                try:
+                    self.capture_primitive(
+                        builder, result, semantic_operation, semantic_api_class
+                    )
+                finally:
+                    builder._cadmark_source_line = original_line
+                return
+            if adapter == "copy":
+                if api_class == "BRepBuilderAPI_Copy":
+                    self.capture_transport(builder, result, allow_partner=True)
+                    return
+                original_line = builder._cadmark_source_line
+                builder._cadmark_source_line = source_line
+                try:
+                    self.capture_history(
+                        builder,
+                        result,
+                        semantic_operation,
+                        semantic_api_class,
+                        allow_partner=True,
+                    )
+                finally:
+                    builder._cadmark_source_line = original_line
+                return
+            if adapter == "history" and semantic_operation == "Mirror":
+                self.capture_active_semantic_relation(
+                    result, source_line, semantic_operation, semantic_api_class
+                )
+                return
         if adapter == "primitive":
             self.capture_primitive(builder, result, operation, api_class)
         elif adapter == "history":
@@ -506,6 +604,106 @@ class _CadmarkSession:
 
         return type(api_class, (original,), namespace)
 
+    def install_location_hook(self):
+        module = _cadmark_importlib.import_module("build123d.build_common")
+        session = self
+        location_list = module.LocationList
+        pattern_types = tuple(
+            getattr(module, name)
+            for name in ("Locations", "GridLocations", "PolarLocations", "HexLocations")
+        )
+        original_enter = location_list.__enter__
+        original_exit = location_list.__exit__
+
+        def enter(instance):
+            is_pattern = isinstance(instance, pattern_types)
+            if is_pattern:
+                session.push_semantic(
+                    session.user_line(), "LocationPattern", type(instance).__name__
+                )
+            try:
+                return original_enter(instance)
+            except Exception:
+                if is_pattern:
+                    session.pop_semantic()
+                raise
+
+        def exit(instance, exception_type, exception_value, traceback):
+            is_pattern = isinstance(instance, pattern_types)
+            try:
+                return original_exit(instance, exception_type, exception_value, traceback)
+            finally:
+                if is_pattern:
+                    session.pop_semantic()
+
+        location_list.__enter__ = enter
+        location_list.__exit__ = exit
+        self.originals.append((location_list, "__enter__", original_enter))
+        self.originals.append((location_list, "__exit__", original_exit))
+
+    def install_transform_hook(self, method_name, operation):
+        module = _cadmark_importlib.import_module("build123d.topology.shape_core")
+        shape = module.Shape
+        original = getattr(shape, method_name)
+        session = self
+
+        def transform(instance, *args, **kwargs):
+            source_line = session.user_line()
+            session.push_semantic(source_line, operation, method_name)
+            try:
+                result = original(instance, *args, **kwargs)
+            finally:
+                session.pop_semantic()
+            is_location_only_rotate = (
+                method_name == "rotate"
+                and not kwargs.get("transform", args[2] if len(args) > 2 else False)
+            )
+            if is_location_only_rotate:
+                session.capture_location_only_transform(
+                    result, source_line, operation, method_name
+                )
+            return result
+
+        setattr(shape, method_name, transform)
+        self.originals.append((shape, method_name, original))
+
+    def install_location_transport_hook(self):
+        module = _cadmark_importlib.import_module("build123d.topology.shape_core")
+        shape = module.Shape
+        original = shape.moved
+        session = self
+
+        def moved(instance, *args, **kwargs):
+            result = original(instance, *args, **kwargs)
+            if (
+                session.active_semantic() is None
+                and session.has_location_only_transform(instance)
+            ):
+                session.capture_location_transport(instance, result)
+            return result
+
+        shape.moved = moved
+        self.originals.append((shape, "moved", original))
+
+    def install_generic_mirror_hook(self):
+        module = _cadmark_importlib.import_module("build123d.operations_generic")
+        build123d = _cadmark_importlib.import_module("build123d")
+        original = module.mirror
+        original_export = build123d.mirror
+        session = self
+
+        def mirror(*args, **kwargs):
+            session.push_semantic(session.user_line(), "Mirror", "mirror")
+            try:
+                return original(*args, **kwargs)
+            finally:
+                session.pop_semantic()
+
+        module.mirror = mirror
+        build123d.mirror = mirror
+        self.originals.append((module, "mirror", original))
+        self.originals.append((build123d, "mirror", original_export))
+
     def install(self, manifest=None):
         manifest = _cadmark_manifest if manifest is None else manifest
         installed = []
@@ -525,9 +723,17 @@ class _CadmarkSession:
                     )
                 installed.append((module, attribute, original))
             self.originals = installed
+            self.install_location_hook()
+            self.install_transform_hook("mirror", "Mirror")
+            self.install_transform_hook("rotate", "Rotate")
+            self.install_transform_hook("scale", "Scale")
+            self.install_location_transport_hook()
+            self.install_generic_mirror_hook()
         except Exception:
-            for module, attribute, original in reversed(installed):
+            originals = self.originals or installed
+            for module, attribute, original in reversed(originals):
                 setattr(module, attribute, original)
+            self.originals = []
             raise
 
     def restore(self):
