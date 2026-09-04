@@ -146,6 +146,126 @@ impl DocLookup {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cadmark_core::ledger::SemanticOperation;
+
+    #[derive(Debug, Clone, Copy)]
+    enum DocumentationSource {
+        Objects,
+        Operations,
+        DirectApi,
+    }
+
+    impl DocumentationSource {
+        fn contents(self) -> &'static str {
+            match self {
+                Self::Objects => OBJECTS_REFERENCE,
+                Self::Operations => OPERATIONS_REFERENCE,
+                Self::DirectApi => DIRECT_API_REFERENCE,
+            }
+        }
+    }
+
+    /// Maps every operation whose provenance CADmark instruments to its
+    /// explanatory build123d documentation entry. This match deliberately has
+    /// no catch-all: an added `SemanticOperation` cannot compile until its
+    /// documentation contract is recorded here.
+    fn documentation_for(
+        operation: SemanticOperation,
+    ) -> (&'static str, DocumentationSource, &'static str) {
+        match operation {
+            SemanticOperation::Box => (
+                "Box",
+                DocumentationSource::Objects,
+                "**Box** - Box defined by length, width, height",
+            ),
+            SemanticOperation::Cylinder => (
+                "Cylinder",
+                DocumentationSource::Objects,
+                "**Cylinder** - Cylinder defined by radius and height",
+            ),
+            SemanticOperation::Sphere => (
+                "Sphere",
+                DocumentationSource::Objects,
+                "**Sphere** - Sphere defined by radius and arc angles",
+            ),
+            SemanticOperation::Cone => (
+                "Cone",
+                DocumentationSource::Objects,
+                "**Cone** - Cone defined by radii and height",
+            ),
+            SemanticOperation::Torus => (
+                "Torus",
+                DocumentationSource::Objects,
+                "**Torus** - Torus defined by major and minor radii",
+            ),
+            SemanticOperation::Wedge => (
+                "Wedge",
+                DocumentationSource::Objects,
+                "**Wedge** - Wedge defined by lengths along multiple axes",
+            ),
+            SemanticOperation::Extrude => (
+                "extrude",
+                DocumentationSource::Operations,
+                "### extrude\nDraw a 2D Shape into a 3D solid",
+            ),
+            SemanticOperation::Revolve => (
+                "revolve",
+                DocumentationSource::Operations,
+                "### revolve\nRotate a 2D shape around an axis",
+            ),
+            SemanticOperation::Loft => (
+                "loft",
+                DocumentationSource::Operations,
+                "### loft\nCreate a 3D form by interpolating",
+            ),
+            SemanticOperation::Sweep => (
+                "sweep",
+                DocumentationSource::Operations,
+                "### sweep\nExtrude a 2D or 3D section",
+            ),
+            SemanticOperation::Thicken => (
+                "thicken",
+                DocumentationSource::Operations,
+                "### thicken\nExpand a 2D face into a 3D solid",
+            ),
+            SemanticOperation::Shell => ("Shell", DocumentationSource::DirectApi, "*class *Shell("),
+            SemanticOperation::Draft => (
+                "draft",
+                DocumentationSource::Operations,
+                "### draft\nApply a taper angle",
+            ),
+            SemanticOperation::Split => (
+                "split",
+                DocumentationSource::Operations,
+                "### split\nDivide an object by a plane",
+            ),
+            SemanticOperation::BooleanFuse => (
+                "fuse",
+                DocumentationSource::DirectApi,
+                "fuse(**to_fuse: Shape*",
+            ),
+            SemanticOperation::BooleanCut => (
+                "cut",
+                DocumentationSource::DirectApi,
+                "cut(**to_cut: Shape*)",
+            ),
+            SemanticOperation::BooleanCommon => (
+                "common",
+                DocumentationSource::DirectApi,
+                "intersect(**to_intersect: Shape | Vector | Location | Axis | Plane*",
+            ),
+            SemanticOperation::Fillet => (
+                "fillet",
+                DocumentationSource::Operations,
+                "### fillet\nRadius a vertex or edge",
+            ),
+            SemanticOperation::Chamfer => (
+                "chamfer",
+                DocumentationSource::Operations,
+                "### chamfer\nBevel a vertex or edge",
+            ),
+        }
+    }
 
     #[test]
     fn build_prompt_carries_the_query_and_the_corpus() {
@@ -206,64 +326,42 @@ mod tests {
     #[test]
     fn documentation_consumer_covers_instrumented_build123d_operations() {
         // Each anchor is the construct's explanatory entry, not merely a
-        // word in a table or a neighbouring API name. The whole source must
-        // also reach lookup_docs, so removing either the entry or its source
-        // from the payload reddens this test.
-        for (construct, anchor) in [
-            ("Box", "**Box** - Box defined by length, width, height"),
-            (
-                "Cylinder",
-                "**Cylinder** - Cylinder defined by radius and height",
-            ),
-            (
-                "Sphere",
-                "**Sphere** - Sphere defined by radius and arc angles",
-            ),
-            ("Cone", "**Cone** - Cone defined by radii and height"),
-            (
-                "Torus",
-                "**Torus** - Torus defined by major and minor radii",
-            ),
-            (
-                "Wedge",
-                "**Wedge** - Wedge defined by lengths along multiple axes",
-            ),
+        // word in a table or a neighbouring API name. The exhaustive mapping
+        // above ties this list to the provenance instrumenter's operation
+        // vocabulary: adding an operation requires a documentation anchor.
+        for operation in [
+            SemanticOperation::Box,
+            SemanticOperation::Cylinder,
+            SemanticOperation::Sphere,
+            SemanticOperation::Cone,
+            SemanticOperation::Torus,
+            SemanticOperation::Wedge,
+            SemanticOperation::Extrude,
+            SemanticOperation::Revolve,
+            SemanticOperation::Loft,
+            SemanticOperation::Sweep,
+            SemanticOperation::Thicken,
+            SemanticOperation::Shell,
+            SemanticOperation::Draft,
+            SemanticOperation::Split,
+            SemanticOperation::BooleanFuse,
+            SemanticOperation::BooleanCut,
+            SemanticOperation::BooleanCommon,
+            SemanticOperation::Fillet,
+            SemanticOperation::Chamfer,
         ] {
+            let (construct, source, anchor) = documentation_for(operation);
             assert!(
-                OBJECTS_REFERENCE.contains(anchor),
-                "objects reference is missing the documented {construct} entry"
+                source.contents().contains(anchor),
+                "{source:?} reference is missing the documented {construct} entry"
+            );
+            assert!(
+                DOC_CORPUS.contains(source.contents()),
+                "lookup_docs payload no longer contains the {source:?} reference for {construct}"
             );
         }
-        for (construct, anchor) in [
-            ("extrude", "### extrude\nDraw a 2D Shape into a 3D solid"),
-            ("revolve", "### revolve\nRotate a 2D shape around an axis"),
-            ("loft", "### loft\nCreate a 3D form by interpolating"),
-            ("sweep", "### sweep\nExtrude a 2D or 3D section"),
-            ("thicken", "### thicken\nExpand a 2D face into a 3D solid"),
-            ("draft", "### draft\nApply a taper angle"),
-            ("split", "### split\nDivide an object by a plane"),
-            ("fillet", "### fillet\nRadius a vertex or edge"),
-            ("chamfer", "### chamfer\nBevel a vertex or edge"),
-            (
-                "mirror",
-                "### mirror\nMirror the shape about a specified plane",
-            ),
-            ("scale", "### scale\nChange the size of a shape"),
-            ("offset", "### offset\nInset or outset a shape"),
-        ] {
-            assert!(
-                OPERATIONS_REFERENCE.contains(anchor),
-                "operations reference is missing the documented {construct} entry"
-            );
-        }
-        assert!(
-            OBJECTS_REFERENCE.contains("**Box**") && DOC_CORPUS.contains(OBJECTS_REFERENCE),
-            "lookup_docs payload no longer contains the objects reference"
-        );
-        assert!(
-            DOC_CORPUS.contains(OPERATIONS_REFERENCE),
-            "lookup_docs payload no longer contains the operations reference"
-        );
+        // Location patterns and rotation are real consumer constructs but are
+        // not provenance operations, so they remain separately explicit.
         for (construct, anchor) in [
             (
                 "Locations",
