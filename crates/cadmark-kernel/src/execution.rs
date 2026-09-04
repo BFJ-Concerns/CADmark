@@ -710,6 +710,25 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
         );
     }
 
+    fn assert_operation_relation(
+        result: &ExecutedModel,
+        operation: SemanticOperation,
+        relation: ProvenanceRelation,
+        line: u32,
+        element: impl Fn(&TopologyElement) -> bool,
+    ) {
+        assert!(
+            resolved_contexts(result).iter().any(|context| {
+                let provenance = entry(context);
+                provenance.operation == operation
+                    && provenance.relation == relation
+                    && provenance.source.line == line
+                    && element(&context.element)
+            }),
+            "no final topology resolved to {operation:?}/{relation:?} at line {line}"
+        );
+    }
+
     fn assert_every_element_resolves_to(
         result: &ExecutedModel,
         expected: (SemanticOperation, ProvenanceRelation, u32),
@@ -782,7 +801,20 @@ with BuildPart() as part:
         Box(10, 10, 10)
 "#);
         let result = result.unwrap();
-        assert_contains_operation(&result, SemanticOperation::BooleanFuse);
+        assert_operation_relation(
+            &result,
+            SemanticOperation::BooleanFuse,
+            ProvenanceRelation::Modified,
+            6,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_operation_relation(
+            &result,
+            SemanticOperation::BooleanFuse,
+            ProvenanceRelation::Generated,
+            6,
+            |element| matches!(element, TopologyElement::Edge(_)),
+        );
         assert_contains_operation(&result, SemanticOperation::Box);
         assert_bridge_consumers(&result);
     }
@@ -797,7 +829,20 @@ with BuildPart() as part:
         Box(4, 4, 14, mode=Mode.SUBTRACT)
 "#);
         let result = result.unwrap();
-        assert_contains_operation(&result, SemanticOperation::BooleanCut);
+        assert_operation_relation(
+            &result,
+            SemanticOperation::BooleanCut,
+            ProvenanceRelation::Modified,
+            6,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_operation_relation(
+            &result,
+            SemanticOperation::BooleanCut,
+            ProvenanceRelation::Generated,
+            6,
+            |element| matches!(element, TopologyElement::Edge(_)),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -811,7 +856,20 @@ with BuildPart() as part:
         Box(10, 10, 10, mode=Mode.INTERSECT)
 "#);
         let result = result.unwrap();
-        assert_contains_operation(&result, SemanticOperation::BooleanCommon);
+        assert_operation_relation(
+            &result,
+            SemanticOperation::BooleanCommon,
+            ProvenanceRelation::Modified,
+            6,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_operation_relation(
+            &result,
+            SemanticOperation::BooleanCommon,
+            ProvenanceRelation::Generated,
+            6,
+            |element| matches!(element, TopologyElement::Edge(_)),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -1481,7 +1539,7 @@ with BuildPart() as part:
     }
 
     #[test]
-    fn real_loft_and_sweep_resolve_all_final_topology() {
+    fn real_loft_resolves_typed_topology() {
         let (_scratch, result) = run(r#"from build123d import *
 
 with BuildPart() as part:
@@ -1490,6 +1548,31 @@ with BuildPart() as part:
     with BuildSketch(Plane.XY.offset(8)) as top:
         Circle(2)
     loft()
+"#);
+        let result = result.unwrap();
+        assert_eq!(result.ledger.untraced_count(), 0);
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Loft,
+            ProvenanceRelation::Generated,
+            8,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Loft,
+            ProvenanceRelation::GeneratedDescendant,
+            8,
+            |element| matches!(element, TopologyElement::Edge(_)),
+        );
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_sweep_resolves_typed_topology() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
     with BuildLine() as path:
         Polyline((20, 0, 0), (20, 0, 10), (25, 0, 15))
     with BuildSketch(Plane.XZ):
@@ -1498,9 +1581,20 @@ with BuildPart() as part:
     sweep(path=path.line)
 "#);
         let result = result.unwrap();
-        assert_eq!(result.ledger.untraced_count(), 0);
-        assert_contains_operation(&result, SemanticOperation::Loft);
-        assert_contains_operation(&result, SemanticOperation::Sweep);
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Sweep,
+            ProvenanceRelation::Generated,
+            9,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Sweep,
+            ProvenanceRelation::GeneratedDescendant,
+            9,
+            |element| matches!(element, TopologyElement::Edge(_)),
+        );
         assert_bridge_consumers(&result);
     }
 
@@ -1519,7 +1613,85 @@ with BuildPart() as part:
 "#);
         let result = result.unwrap();
         assert_eq!(result.ledger.untraced_count(), 0);
-        assert_contains_operation(&result, SemanticOperation::Split);
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Split,
+            ProvenanceRelation::Modified,
+            7,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Split,
+            ProvenanceRelation::ModifiedDescendant,
+            7,
+            |element| matches!(element, TopologyElement::Edge(_)),
+        );
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_shell_resolves_typed_topology() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    Box(20, 20, 10)
+    offset(amount=-2, openings=part.faces().sort_by(Axis.Z)[-1])
+"#);
+        let result = result.unwrap();
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Shell,
+            ProvenanceRelation::Generated,
+            5,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_thicken_resolves_typed_topology() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    with BuildSketch():
+        Rectangle(10, 10)
+    thicken(amount=3)
+"#);
+        let result = result.unwrap();
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Thicken,
+            ProvenanceRelation::Generated,
+            6,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_bridge_consumers(&result);
+    }
+
+    #[test]
+    fn real_draft_resolves_typed_topology() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildPart() as part:
+    Box(20, 20, 10)
+    draft(part.faces().sort_by(Axis.X)[-1], Plane.XY, 5)
+"#);
+        let result = result.unwrap();
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Draft,
+            ProvenanceRelation::Modified,
+            5,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
+        assert_operation_relation(
+            &result,
+            SemanticOperation::Draft,
+            ProvenanceRelation::Generated,
+            5,
+            |element| matches!(element, TopologyElement::Face(_)),
+        );
         assert_bridge_consumers(&result);
     }
 
