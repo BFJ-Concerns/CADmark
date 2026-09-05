@@ -15,4 +15,5 @@ pub mod message;
 pub mod pending_comment;
 pub mod sketch;
 pub mod sketch_lineage;
+pub mod skills;
 pub mod version;

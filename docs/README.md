@@ -9,7 +9,9 @@ CADmark's documentation covers installing, configuring, and using the applicatio
 <!-- doc-index:start (generated region; do not hand-edit. Regenerate with the project-docs skill: doc-indexes.sh) -->
 ## Guides
 
+- **[Design for 3D printing](guides/3d-printing.md)** — Use the built-in printing skill to review designs, plan orientation, and check fits
 - **[Getting started](guides/getting-started.md)** — Install CADmark, connect an AI provider, and make your first edit
+- **[Common modelling tasks](guides/modelling.md)** — How to approach bolts, helix sweeps, mating parts, holes, enclosures, and edge finishing
 
 ## Reference
 
