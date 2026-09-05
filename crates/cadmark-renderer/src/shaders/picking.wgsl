@@ -3,8 +3,7 @@
 //
 // The marker sizing comes from the shared snippet prepended at pipeline
 // creation, and the edge and vertex-marker geometry is expanded through
-// the same functions the visible passes use: an element picks at exactly
-// the width it is drawn.
+// the same functions the visible passes use, with wider hit targets.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -148,4 +147,13 @@ fn fs_marker(in: MarkerVertexOutput) -> @location(0) vec4<u32> {
         discard;
     }
     return encode_id(u32(in.vertex_id + 0.5));
+}
+
+@fragment
+fn fs_marker_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
+    let depth = marker_surface_depth(in.clip_pos.z, PICKING_MARKER_REACH, uniforms.marker_size, uniforms.view_proj);
+    if !section_keeps(uniforms.section_plane, in.world_pos) {
+        discard;
+    }
+    return depth;
 }

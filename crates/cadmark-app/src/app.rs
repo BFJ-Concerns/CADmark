@@ -1468,19 +1468,6 @@ impl CadmarkApp {
                 self.apply_window_title(ctx);
             }
             ToolbarAction::OpenProject => self.pick_project_folder(frame),
-            ToolbarAction::NewConversation => {
-                let Some(project) = self.project_mut() else {
-                    return;
-                };
-                match project.start_fresh_conversation() {
-                    Ok(()) => {
-                        self.turn = None;
-                        self.chat.focus_input();
-                        self.status = Some(Status::info("Started a new conversation"));
-                    }
-                    Err(error) => self.status = Some(Status::error(error)),
-                }
-            }
             ToolbarAction::OpenRecent(path) => self.open_project(ctx, path),
             ToolbarAction::RevealProject => {
                 if let Some(dir) = self.project().map(|project| project.dir.clone()) {
@@ -1752,7 +1739,22 @@ impl CadmarkApp {
             });
     }
 
+    fn start_new_conversation(&mut self) {
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        match project.start_fresh_conversation() {
+            Ok(()) => {
+                self.turn = None;
+                self.chat.focus_input();
+                self.status = Some(Status::info("Started a new conversation"));
+            }
+            Err(error) => self.status = Some(Status::error(error)),
+        }
+    }
+
     fn show_chat(&mut self, ctx: &egui::Context) {
+        let mut new_conversation = false;
         let mut action = ChatAction::None;
         egui::SidePanel::right("chat_panel")
             .resizable(true)
@@ -1780,6 +1782,20 @@ impl CadmarkApp {
                         last_event: *last_event,
                     }),
                 };
+                ui.horizontal(|ui| {
+                    ui.strong("Conversation");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        new_conversation = ui
+                            .add_enabled(
+                                project.busy.is_none(),
+                                egui::Button::new("New conversation"),
+                            )
+                            .on_hover_text("Archive this chat and start a blank one")
+                            .on_disabled_hover_text("Wait for the build or AI turn to finish")
+                            .clicked();
+                    });
+                });
+                ui.separator();
                 let usage = context_usage(
                     &project.conversation,
                     reference_image_count(&project.dir),
@@ -1789,6 +1805,9 @@ impl CadmarkApp {
                     self.chat
                         .show(ui, &project.conversation, usage, &mut self.pending_comments);
             });
+        if new_conversation {
+            self.start_new_conversation();
+        }
         match action {
             ChatAction::Send(text) => self.send_chat_message(text),
             ChatAction::SendPending { chat } => self.send_pending_comments(chat),

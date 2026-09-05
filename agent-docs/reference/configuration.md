@@ -61,4 +61,4 @@ When the provider refuses a request, the cause is identified and reported:
 
 When no provider is configured: "no AI provider is configured; open Settings to add one". The model still loads and rebuilds without AI.
 
-Source: `crates/cadmark-bridge/src/backend.rs:19–36`, `crates/cadmark-app/src/app.rs:2269`.
+Source: `crates/cadmark-bridge/src/backend.rs:19–36`, `crates/cadmark-app/src/app.rs` (`ai_services`).

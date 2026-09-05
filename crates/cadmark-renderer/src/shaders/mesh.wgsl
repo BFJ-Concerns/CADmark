@@ -119,8 +119,7 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
-@fragment
-fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+fn shade_surface(in: VertexOutput, front_facing: bool) -> vec4<f32> {
     if !section_keeps(uniforms.section_plane, in.world_pos) {
         discard;
     }
@@ -179,4 +178,23 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @loca
         colour = linear_to_srgb(colour);
     }
     return vec4<f32>(colour, uniforms.mesh_alpha);
+}
+
+struct SurfaceOutput {
+    @location(0) colour: vec4<f32>,
+    @builtin(frag_depth) depth: f32,
+}
+
+@fragment
+fn fs_surface(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> SurfaceOutput {
+    let depth = marker_surface_depth(in.clip_pos.z, VISIBLE_MARKER_REACH, uniforms.marker_size, uniforms.view_proj);
+    var out: SurfaceOutput;
+    out.colour = shade_surface(in, front_facing);
+    out.depth = depth;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    return shade_surface(in, front_facing);
 }

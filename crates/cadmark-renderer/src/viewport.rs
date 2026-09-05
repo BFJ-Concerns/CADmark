@@ -111,6 +111,34 @@ pub fn render_scene_into(
     }
 }
 
+fn render_topology_depth(
+    encoder: &mut wgpu::CommandEncoder,
+    pipelines: &RenderPipelines,
+    all_meshes: &[GpuMesh],
+    pipeline: &wgpu::RenderPipeline,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("topology_picking_depth_prepass"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &pipelines.depth_texture,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    for mesh in all_meshes {
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
+        pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+        pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+    }
+}
+
 /// Render every pickable element into the colour-ID texture: faces
 /// first, then edges drawn over them, then vertex markers over those, so
 /// a cursor on an edge picks the edge and one on a vertex picks the
@@ -133,27 +161,13 @@ pub fn render_picking(
     // IDs are rendered afterwards, but hidden geometry must still lose to a
     // different part in front of it. This pass has no colour attachment: it
     // must not manufacture IDs for non-active parts.
-    {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("topology_picking_depth_prepass"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &pipelines.depth_texture,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
-        for mesh in all_meshes {
-            pass.set_pipeline(&pipelines.topology_depth_pipeline);
-            pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
-            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-        }
+    if filter.faces {
+        render_topology_depth(
+            encoder,
+            pipelines,
+            all_meshes,
+            &pipelines.topology_depth_pipeline,
+        );
     }
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -187,6 +201,17 @@ pub fn render_picking(
             pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..mesh.index_count, 0, 0..1);
         }
+    }
+
+    // Face IDs use exact occlusion. Markers need a surface-slope allowance
+    // across their wider targets; establish that depth only after faces.
+    if filter.edges || filter.vertices {
+        render_topology_depth(
+            encoder,
+            pipelines,
+            all_meshes,
+            &pipelines.marker_depth_pipeline,
+        );
     }
 
     for mesh in meshes

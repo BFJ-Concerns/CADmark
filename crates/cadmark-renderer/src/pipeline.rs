@@ -85,7 +85,7 @@ pub struct MeshUniforms {
     pub _pad6: f32,
     pub _pad7: f32,
     pub _pad8: f32,
-    /// Edge and vertex-marker sizes, shared with the picking uniforms.
+    /// Visible edge and vertex-marker extents.
     pub marker_size: MarkerExtent,
 }
 
@@ -95,13 +95,13 @@ pub struct MeshUniforms {
 const HIGHLIGHT_INITIAL_CAPACITY: u64 = 64;
 
 /// Uniforms for the picking shaders: the camera, the section plane, and
-/// the same marker sizes the visible passes draw with.
+/// the generous edge and vertex hit-target sizes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct SimpleUniforms {
     pub view_proj: [[f32; 4]; 4],
     pub section_plane: [f32; 4],
-    /// Edge and vertex-marker sizes, shared with the mesh uniforms.
+    /// Edge and vertex hit-target extents.
     pub marker_size: MarkerExtent,
 }
 
@@ -121,6 +121,8 @@ pub struct RenderPipelines {
     pub picking_pipeline: wgpu::RenderPipeline,
     /// Writes scene depth for topology picking without producing a colour ID.
     pub topology_depth_pipeline: wgpu::RenderPipeline,
+    /// Scene depth with room for screen-space marker targets on the surface.
+    pub marker_depth_pipeline: wgpu::RenderPipeline,
     pub part_picking_pipeline: wgpu::RenderPipeline,
     pub picking_uniform_buffer: wgpu::Buffer,
     pub picking_bind_group: wgpu::BindGroup,
@@ -170,7 +172,17 @@ const MARKERS_COMMON_WGSL: &str = include_str!("shaders/markers_common.wgsl");
 
 /// A shader's full source: the shared marker snippet, then its own body.
 fn shader_source(body: &str) -> String {
-    format!("{MARKERS_COMMON_WGSL}\n{body}")
+    let reach = |sizing: MarkerSizing| {
+        sizing
+            .edge_half_width_px
+            .max(sizing.vertex_radius_px)
+            .ceil()
+    };
+    format!(
+        "const VISIBLE_MARKER_REACH: f32 = {:.1};\nconst PICKING_MARKER_REACH: f32 = {:.1};\n{MARKERS_COMMON_WGSL}\n{body}",
+        reach(MarkerSizing::default()),
+        reach(MarkerSizing::picking()),
+    )
 }
 
 /// Vertex layout for an edge segment's expanded quad, shared by the
@@ -306,7 +318,7 @@ impl RenderPipelines {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &mesh_shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some("fs_surface"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -470,40 +482,20 @@ impl RenderPipelines {
             cache: None,
         });
 
-        let topology_depth_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("topology_depth_pipeline"),
-                layout: Some(&picking_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &picking_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: std::mem::size_of::<GpuVertex>() as u64,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &wgpu::vertex_attr_array![
-                            0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Float32,
-                            4 => Float32, 5 => Float32x3,
-                        ],
-                    }],
-                    compilation_options: Default::default(),
-                },
-                fragment: None,
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview: None,
-                cache: None,
-            });
+        let topology_depth_pipeline = topology_depth_pipeline(
+            device,
+            &picking_pipeline_layout,
+            &picking_shader,
+            "topology_depth_pipeline",
+            None,
+        );
+        let marker_depth_pipeline = self::topology_depth_pipeline(
+            device,
+            &picking_pipeline_layout,
+            &picking_shader,
+            "marker_depth_pipeline",
+            Some("fs_marker_depth"),
+        );
 
         let edge_picking_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -654,7 +646,7 @@ impl RenderPipelines {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -700,7 +692,7 @@ impl RenderPipelines {
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
-                        blend: Some(wgpu::BlendState::REPLACE),
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -922,6 +914,7 @@ impl RenderPipelines {
             marker_capacity: 1,
             picking_pipeline,
             topology_depth_pipeline,
+            marker_depth_pipeline,
             part_picking_pipeline,
             picking_uniform_buffer,
             picking_bind_group,
@@ -963,6 +956,53 @@ impl RenderPipelines {
             ],
         });
     }
+}
+
+fn topology_depth_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+    fragment_entry: Option<&str>,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<GpuVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Float32,
+                    4 => Float32, 5 => Float32x3,
+                ],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: fragment_entry.map(|entry| wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(entry),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: Default::default(),
+        multiview: None,
+        cache: None,
+    })
 }
 
 fn create_viewport_colour_texture(
@@ -1034,10 +1074,6 @@ pub struct Renderer {
     pub ghost_solid: bool,
     pub section: SectionPlane,
     pub transparent: bool,
-    /// How wide edges are drawn and how large vertex markers are, in
-    /// screen pixels — the one value both the visible and the picking
-    /// passes are sized from.
-    pub marker_sizing: MarkerSizing,
     /// Which kinds of element a click may land on.
     pub selection_filter: crate::picking::SelectionFilter,
 }
@@ -1062,7 +1098,6 @@ impl Renderer {
             ghost_solid: false,
             section: SectionPlane::default(),
             transparent: false,
-            marker_sizing: MarkerSizing::default(),
             selection_filter: crate::picking::SelectionFilter::default(),
         }
     }
@@ -1112,19 +1147,18 @@ impl Renderer {
             _pad6: 0.0,
             _pad7: 0.0,
             _pad8: 0.0,
-            marker_size: self.marker_sizing.extent(viewport.0, viewport.1),
+            marker_size: MarkerSizing::default().extent(viewport.0, viewport.1),
         }
     }
 
-    /// Build the picking uniforms for the current frame, sized from the
-    /// same `marker_sizing` as the visible passes.
+    /// Build picking uniforms with the generous hit-target dimensions.
     pub fn simple_uniforms(&self, viewport: (u32, u32)) -> SimpleUniforms {
         let view = self.camera.view_matrix();
         let proj = self.camera.projection_matrix(aspect_ratio(viewport));
         SimpleUniforms {
             view_proj: mat4_mul(proj, view),
             section_plane: self.section.equation(),
-            marker_size: self.marker_sizing.extent(viewport.0, viewport.1),
+            marker_size: MarkerSizing::picking().extent(viewport.0, viewport.1),
         }
     }
 }
@@ -2142,27 +2176,6 @@ mod tests {
     #[test]
     fn a_model_with_no_vertices_has_no_markers() {
         assert!(marker_vertices(&[]).is_empty());
-    }
-
-    #[test]
-    fn the_visible_and_picking_passes_are_sized_from_the_same_value() {
-        // Drawn width and hit width are the same claim to the user, so
-        // they are one value here rather than two that agree today.
-        let mut renderer = Renderer::new();
-        let viewport = (1280, 720);
-        assert_eq!(
-            renderer.mesh_uniforms(viewport).marker_size,
-            renderer.simple_uniforms(viewport).marker_size
-        );
-
-        renderer.marker_sizing.edge_half_width_px *= 2.0;
-        renderer.marker_sizing.vertex_radius_px *= 2.0;
-        let widened = renderer.mesh_uniforms(viewport).marker_size;
-        assert_eq!(widened, renderer.simple_uniforms(viewport).marker_size);
-        assert_ne!(
-            widened,
-            MarkerSizing::default().extent(viewport.0, viewport.1)
-        );
     }
 
     #[test]

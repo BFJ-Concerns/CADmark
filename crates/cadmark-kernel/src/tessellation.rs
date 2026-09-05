@@ -24,6 +24,35 @@ pub enum TessellationError {
     },
 }
 
+/// Both solid surfaces and sketch curves use a scale-relative display
+/// tolerance. Exact modelling and export geometry are unaffected.
+pub(crate) fn prepare_display_tessellation(
+    py: Python<'_>,
+    namespace: &Bound<'_, PyDict>,
+) -> Result<(), TessellationError> {
+    py.run(
+        c"
+from OCP.Bnd import Bnd_Box
+from OCP.BRepBndLib import BRepBndLib
+
+
+def _cadmark_display_deflection(shape):
+    box = Bnd_Box()
+    BRepBndLib.AddOptimal_s(shape, box, False, False)
+    if box.IsVoid():
+        return 1e-7, 0.1
+    bounds = box.Get()
+    span = max(bounds[axis + 3] - bounds[axis] for axis in range(3))
+    # At a 1000-pixel fit, chord error is about 0.1 pixels. The angular
+    # bound preserves small curved details within a much larger model.
+    return max(span * 1e-4, 1e-7), 0.1
+",
+        Some(namespace),
+        None,
+    )
+    .map_err(TessellationError::Python)
+}
+
 /// Python source for tessellation extraction.
 /// Uses OCP's BRepMesh and topology explorers.
 const TESSELLATION_SOURCE: &std::ffi::CStr = c"
@@ -49,8 +78,9 @@ def _cadmark_node_normal(triangulation, index, transform):
     return [normal.X(), normal.Y(), normal.Z()]
 
 
-def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
+def _cadmark_tessellate(shape):
     \"\"\"Tessellate an OCP shape into vertices, normals, indices, and face IDs.\"\"\"
+    linear_deflection, angular_deflection = _cadmark_display_deflection(shape)
     mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
     mesh.Perform()
     # Meshing alone stores no per-node normals; this derives them from the
@@ -118,9 +148,15 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
 
         explorer.Next()
 
+    seen_edges = set()
     edge_explorer = TopExp_Explorer(shape, TopAbs_EDGE)
     while edge_explorer.More():
         edge = TopoDS.Edge_s(edge_explorer.Current())
+        edge_id = _cadmark_session.topology_index(edge, 'edge')
+        edge_explorer.Next()
+        if edge_id in seen_edges:
+            continue
+        seen_edges.add(edge_id)
         try:
             adaptor = BRepAdaptor_Curve(edge)
             deflector = GCPnts_TangentialDeflection(adaptor, angular_deflection, linear_deflection)
@@ -131,14 +167,13 @@ def _cadmark_tessellate(shape, linear_deflection=0.1, angular_deflection=0.5):
             if points:
                 edges.append({
                     'points': points,
-                    'edge_id': _cadmark_session.topology_index(edge, 'edge'),
+                    'edge_id': edge_id,
                 })
         except Exception:
             # Some edges (seam edges, degenerate edges from boolean ops)
             # cannot be tessellated. Skip them — the mesh renders without
             # those wireframe segments, which is acceptable.
             pass
-        edge_explorer.Next()
 
     return {
         'vertices': all_vertices,
@@ -171,6 +206,7 @@ pub(crate) fn tessellate_shape(
 
     // Inject tessellation helper after extracting the user result so helper
     // imports don't pollute shape-discovery diagnostics.
+    prepare_display_tessellation(py, namespace)?;
     py.run(TESSELLATION_SOURCE, Some(namespace), None)
         .map_err(TessellationError::Python)?;
 
