@@ -1,7 +1,8 @@
 // View gizmo — the axis triad in the viewport corner. It shows which way
 // the model's X, Y and Z run on screen, a click on an axis cap turns the
-// camera to look along that axis (a second click flips to the opposite
-// side), and a drag on the gizmo orbits the view.
+// camera to look along that axis — the +Y cap gives the front view, looking
+// along +Y from the model's front (a second click flips to the opposite
+// side) — and a drag on the gizmo orbits the view.
 
 use crate::theme;
 
@@ -48,16 +49,22 @@ impl Cap {
         direction
     }
 
-    /// Where a click on this cap turns the camera: to look from this end
-    /// of the axis, or, when the view is already looking from here, from
-    /// the opposite end, so a second click sees the other side.
-    fn look_from_target(&self) -> [f32; 3] {
+    /// The world direction a click on this cap makes the camera look
+    /// along: the cap's own direction, or, when the view already looks
+    /// along it, the opposite one, so a second click sees the other side.
+    fn look_along(&self) -> [f32; 3] {
         let direction = self.direction();
-        if self.depth > 0.999 {
+        if self.depth < -0.999 {
             direction.map(|component| -component)
         } else {
             direction
         }
+    }
+
+    /// Where the camera stands to look along this cap's axis: the end
+    /// opposite the direction of view.
+    fn look_from_target(&self) -> [f32; 3] {
+        self.look_along().map(|component| -component)
     }
 
     fn radius(&self) -> f32 {
@@ -185,11 +192,11 @@ pub fn show(ui: &mut egui::Ui, viewport: egui::Rect, axes: [[f32; 3]; 3]) -> Giz
                     .iter()
                     .find(|cap| cap.axis == axis && cap.positive == positive)
                     .expect("hovered cap is one of the six laid out");
-                let target = cap.look_from_target();
-                let sign = if target[axis] > 0.0 { "+" } else { "-" };
+                let along = cap.look_along();
+                let sign = if along[axis] > 0.0 { "+" } else { "-" };
                 response
                     .clone()
-                    .on_hover_text(format!("Look from {sign}{}", AXIS_LABELS[axis]));
+                    .on_hover_text(format!("Look along {sign}{}", AXIS_LABELS[axis]));
             } else if response.hovered() {
                 response.clone().on_hover_text("Drag to orbit");
             }
@@ -219,19 +226,43 @@ mod tests {
     }
 
     #[test]
-    fn clicking_the_facing_cap_flips_to_the_far_side() {
+    fn clicking_a_cap_looks_along_its_axis() {
+        // Looking down -Z: +Y points up the screen, +X right.
         let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let caps = layout_caps(axes, 30.0);
-        let facing = caps
+        let plus_y = caps
+            .iter()
+            .find(|cap| cap.axis == 1 && cap.positive)
+            .unwrap();
+        // The front view: camera at -Y looking along +Y.
+        assert_eq!(plus_y.look_along(), [0.0, 1.0, 0.0]);
+        assert_eq!(plus_y.look_from_target(), [0.0, -1.0, 0.0]);
+        let minus_x = caps
+            .iter()
+            .find(|cap| cap.axis == 0 && !cap.positive)
+            .unwrap();
+        assert_eq!(minus_x.look_from_target(), [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn clicking_the_cap_already_looked_along_flips_to_the_far_side() {
+        // Looking down -Z, so the view already looks along -Z: -Z points
+        // away from the viewer and +Z towards them.
+        let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let caps = layout_caps(axes, 30.0);
+        let minus_z = caps
+            .iter()
+            .find(|cap| cap.axis == 2 && !cap.positive)
+            .unwrap();
+        assert_eq!(minus_z.look_along(), [0.0, 0.0, 1.0]);
+        assert_eq!(minus_z.look_from_target(), [0.0, 0.0, -1.0]);
+        // The facing cap is not yet looked along, so it turns the view
+        // right round to look along it.
+        let plus_z = caps
             .iter()
             .find(|cap| cap.axis == 2 && cap.positive)
             .unwrap();
-        assert_eq!(facing.look_from_target(), [0.0, 0.0, -1.0]);
-        let side = caps
-            .iter()
-            .find(|cap| cap.axis == 0 && cap.positive)
-            .unwrap();
-        assert_eq!(side.look_from_target(), [1.0, 0.0, 0.0]);
+        assert_eq!(plus_z.look_from_target(), [0.0, 0.0, -1.0]);
     }
 
     #[test]
