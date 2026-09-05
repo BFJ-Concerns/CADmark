@@ -1,0 +1,129 @@
+#!/bin/sh
+# Install the built CADmark binaries as a desktop application for the
+# current user, or remove a previous installation with --uninstall.
+#
+# The layout is self-contained under <prefix>/lib/cadmark: both binaries of
+# one build side by side (the application starts the kernel worker from its
+# own directory) and a Python runtime of their own, so the installed copy
+# keeps working when the source checkout moves or its .venv is rebuilt.
+# <prefix>/bin/cadmark is a small wrapper that names that runtime in
+# VIRTUAL_ENV before starting the application.
+#
+# Run `just install` to build the current tree and install it in one step;
+# this script installs whatever is already in target/release.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+prefix="${CADMARK_PREFIX:-$HOME/.local}"
+uninstall=no
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --prefix) prefix=$2; shift 2 ;;
+        --uninstall) uninstall=yes; shift ;;
+        *) echo "usage: scripts/install-desktop-app [--prefix DIR] [--uninstall]" >&2; exit 2 ;;
+    esac
+done
+
+libdir="$prefix/lib/cadmark"
+bindir="$prefix/bin"
+datadir="$prefix/share"
+desktop_file="$datadir/applications/cadmark.desktop"
+icon_file="$datadir/icons/hicolor/scalable/apps/cadmark.svg"
+
+refresh_desktop_caches() {
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "$datadir/applications" 2>/dev/null || true
+    fi
+    if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+        gtk-update-icon-cache -q -f -t "$datadir/icons/hicolor" 2>/dev/null || true
+    fi
+}
+
+if [ "$uninstall" = yes ]; then
+    case "$libdir" in
+        */lib/cadmark) ;;
+        *) echo "install: refusing to remove $libdir" >&2; exit 1 ;;
+    esac
+    rm -rf "$libdir"
+    rm -f "$bindir/cadmark" "$desktop_file" "$icon_file"
+    refresh_desktop_caches
+    echo "install: removed CADmark from $prefix"
+    exit 0
+fi
+
+for binary in cadmark cadmark-kernel-worker; do
+    if [ ! -x "$repo_root/target/release/$binary" ]; then
+        echo "install: target/release/$binary is missing; run 'just install' or 'cargo build --workspace --release'" >&2
+        exit 1
+    fi
+done
+
+# The installed runtime must be the interpreter the binaries were built
+# against: the application embeds that interpreter's home and library path.
+interpreter=$(readlink -f "$repo_root/.venv/bin/python" 2>/dev/null || true)
+if [ -z "$interpreter" ] || [ ! -x "$interpreter" ]; then
+    echo "install: no repository .venv to take the interpreter from; run 'just bootstrap'" >&2
+    exit 1
+fi
+
+mkdir -p "$libdir/bin" "$bindir" "$datadir/applications" "$datadir/icons/hicolor/scalable/apps"
+
+install -m 755 "$repo_root/target/release/cadmark" "$libdir/bin/cadmark"
+install -m 755 "$repo_root/target/release/cadmark-kernel-worker" "$libdir/bin/cadmark-kernel-worker"
+
+"$repo_root/scripts/bootstrap-python-runtime" --python "$interpreter" --venv "$libdir/.venv"
+
+cat > "$bindir/cadmark" <<WRAPPER
+#!/bin/sh
+# CADmark launcher: names the installed Python runtime, then starts the
+# application beside its kernel worker. Written by scripts/install-desktop-app.
+VIRTUAL_ENV="$libdir/.venv"
+export VIRTUAL_ENV
+exec "$libdir/bin/cadmark" "\$@"
+WRAPPER
+chmod 755 "$bindir/cadmark"
+
+install -m 644 "$repo_root/assets/cadmark.svg" "$icon_file"
+# Absolute paths in the entry so the launcher finds both without depending
+# on the session's PATH or on the prefix being an XDG data directory.
+sed -e "s|^Exec=cadmark|Exec=$bindir/cadmark|" \
+    -e "s|^Icon=cadmark|Icon=$icon_file|" \
+    "$repo_root/assets/cadmark.desktop" > "$desktop_file"
+chmod 644 "$desktop_file"
+
+if command -v desktop-file-validate >/dev/null 2>&1; then
+    desktop-file-validate "$desktop_file"
+fi
+refresh_desktop_caches
+
+# Prove the installed pair actually runs a model: start the worker against
+# the installed runtime and execute a script through the real protocol.
+smoke=$(mktemp -d)
+trap 'rm -rf "$smoke"' EXIT
+mkdir -p "$smoke/project" "$smoke/scratch"
+cat > "$smoke/project/part.py" <<'PY'
+from build123d import *
+
+with BuildPart() as part:
+    Box(10, 10, 10)
+PY
+printf '{"kind":"execute","script_path":"%s"}\n' "$smoke/project/part.py" \
+    | "$libdir/bin/cadmark-kernel-worker" \
+        --project-dir "$smoke/project" \
+        --scratch-dir "$smoke/scratch" \
+        --venv "$libdir/.venv" \
+    > "$smoke/replies" 2> "$smoke/log" || true
+
+if ! grep -q '"outcome":"executed"' "$smoke/replies"; then
+    echo "install: the installed kernel could not build a test model" >&2
+    sed -n '1,40p' "$smoke/replies" "$smoke/log" >&2
+    exit 1
+fi
+
+echo "install: CADmark installed in $prefix"
+echo "install: launcher entry at $desktop_file"
+case ":$PATH:" in
+    *":$bindir:"*) ;;
+    *) echo "install: note — $bindir is not on PATH, so 'cadmark' will not run from a shell" ;;
+esac

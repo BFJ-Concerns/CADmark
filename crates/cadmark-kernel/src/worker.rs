@@ -84,7 +84,11 @@ pub struct WorkerLaunch {
 
 impl WorkerLaunch {
     /// The worker binary next to the running executable, which is where
-    /// Cargo puts both binaries of one build.
+    /// Cargo puts both binaries of one build, and the virtual environment
+    /// this process can see. The child's environment is cleared before it
+    /// starts, so a `VIRTUAL_ENV` that only the parent knows about — an
+    /// installed copy pointing at its own runtime — reaches the worker
+    /// only by being resolved here and passed as an argument.
     pub fn beside_current_exe(project_dir: PathBuf) -> Result<Self, WorkerError> {
         let exe = std::env::current_exe().map_err(|error| {
             WorkerError::Runtime(format!("current executable unknown: {error}"))
@@ -99,7 +103,7 @@ impl WorkerLaunch {
         Ok(Self {
             binary,
             project_dir,
-            venv: None,
+            venv: crate::execution::discover_venv(),
         })
     }
 }

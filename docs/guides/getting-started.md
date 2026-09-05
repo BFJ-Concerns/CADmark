@@ -14,12 +14,14 @@ This guide walks through installing CADmark, connecting it to an AI provider, an
 - **A GPU** — or a software adapter that wgpu can use.
 - **An OpenAI-compatible API endpoint** — OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server.
 
+[`just`](https://github.com/casey/just) is optional but shortens every command below; `just` on its own lists the available recipes.
+
 ## Set up the Python runtime
 
 CADmark embeds a Python runtime to run build123d scripts. The bootstrap script creates a virtual environment at the repository root with the exact library versions the kernel expects:
 
 ```sh
-scripts/bootstrap-python-runtime
+scripts/bootstrap-python-runtime   # or: just bootstrap
 ```
 
 It finds a Python 3.12 interpreter automatically (or accepts `--python /path/to/python3.12`), installs the pinned dependencies, and confirms that `build123d` and `OCP` import.
@@ -27,26 +29,45 @@ It finds a Python 3.12 interpreter automatically (or accepts `--python /path/to/
 ## Build
 
 ```sh
-cargo build
+cargo build   # or: just build (release)
 ```
 
 To run the test suite (some kernel tests need the `.venv`):
 
 ```sh
-cargo test
+cargo test    # or: just test
 ```
 
 ## Launch
 
 ```sh
-cargo run --bin cadmark
+cargo run --bin cadmark   # or: just run
 ```
 
 CADmark opens the start view. From here you can create a new project in an empty folder or open an existing one. To skip the start view and open a folder directly:
 
 ```sh
-cargo run --bin cadmark -- /path/to/project
+cargo run --bin cadmark -- /path/to/project   # or: just run /path/to/project
 ```
+
+## Install it properly
+
+Running from the checkout is fine for trying CADmark out. To have it in the
+applications menu like any other program:
+
+```sh
+just install
+```
+
+CADmark is installed for your user under `~/.local` — binaries and their own
+Python runtime in `~/.local/lib/cadmark`, a `cadmark` command in
+`~/.local/bin`, and a menu entry with an icon. Nothing needs root, and the
+installed copy keeps working if you move or rebuild the checkout. Set
+`CADMARK_PREFIX` to install somewhere else, and run `just uninstall` to remove
+it again.
+
+Re-run `just install` whenever you want the installed copy brought up to the
+current source.
 
 ## Connect an AI provider
 
