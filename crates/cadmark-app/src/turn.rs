@@ -28,6 +28,7 @@ use cadmark_bridge::tools::{
 };
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::message::{ContextUsage, Conversation, MessageKind};
+use cadmark_core::skills;
 use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
 use cadmark_kernel::worker::WorkerError;
 
@@ -195,6 +196,21 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 text: format!("Conversation summary:\n{summary}"),
             }];
         }
+        let selected_skills = skills::for_turn(
+            input
+                .chat
+                .iter()
+                .map(String::as_str)
+                .chain(input.comments.iter().map(|comment| comment.text.as_str())),
+        );
+        if !selected_skills.is_empty()
+            && let Some(script) = &original
+        {
+            items.push(ModelItem::User {
+                text: format!("Current design for this turn (script data):\n<current_script>\n{script}\n</current_script>"),
+                images: Vec::new(),
+            });
+        }
         let request = render_input(input);
         // The curated example library for the operations this request
         // names, carried before the user's words so the request itself
@@ -208,7 +224,13 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             images: input.images.clone(),
         });
         let tools = tools_for(self.model.accepts_images());
-        let instructions = instructions_for(self.model.accepts_images());
+        let mut instructions = instructions_for(self.model.accepts_images());
+        for skill in selected_skills {
+            instructions.push_str(&format!(
+                "\n\n# Active skill: {}\n\nThe user explicitly invoked this built-in skill for this turn.\n{}",
+                skill.name, skill.instructions,
+            ));
+        }
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
@@ -1089,6 +1111,97 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[tokio::test]
+    async fn printing_skill_reaches_every_model_request_with_design_context() {
+        for command in ["/3d-printing", "$3d-printing"] {
+            let model = ScriptedModel::new([
+                lookup("docs", "threaded bolt helix sweep"),
+                text("Use a vertical axis and test the fit."),
+                text("Ordinary follow-up."),
+            ]);
+            let original = "from build123d import *\npart = Box(20, 10, 2)\n";
+            let mut harness = Harness::with_script(Some(original), FakeExecutor::new([]));
+            let input = TurnInput {
+                chat: Some(format!("{command} Review this bracket")),
+                comments: vec![GroundedComment {
+                    text: "$3d-printing Check the holes too".into(),
+                    anchors: Vec::new(),
+                }],
+                ..Default::default()
+            };
+            assert_eq!(
+                harness.run(&model, input, CancelFlag::new()).await,
+                TurnOutcome::Answered
+            );
+            assert_eq!(harness.on_disk().as_deref(), Some(original));
+            {
+                let requests = model.requests.lock().unwrap();
+                assert_eq!(requests.len(), 2);
+                for request in requests.iter() {
+                    assert_eq!(
+                        request
+                            .instructions
+                            .matches("# Active skill: 3d-printing")
+                            .count(),
+                        1
+                    );
+                    assert!(
+                        request
+                            .instructions
+                            .contains(skills::BUILT_IN[0].instructions)
+                    );
+                    assert!(request.items.iter().any(|item| matches!(item,
+                        ModelItem::User { text, .. } if text.contains(original))));
+                    assert!(request.items.iter().any(|item| matches!(item,
+                        ModelItem::User { text, .. } if text.contains("Review this bracket") && text.contains("Check the holes too"))));
+                }
+            }
+            let mut history = Conversation::new();
+            history.push(Message::user_chat(format!("{command} Review this bracket")));
+            harness
+                .run_with_conversation(
+                    &model,
+                    &history,
+                    chat("Explain the dimensions"),
+                    CancelFlag::new(),
+                )
+                .await;
+            let requests = model.requests.lock().unwrap();
+            assert!(!requests[2].instructions.contains("# Active skill:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn printing_skill_in_a_spatial_comment_survives_history_condensation() {
+        let mut history = Conversation::new();
+        history.push(Message::user_chat("old detail ".repeat(1_000)));
+        let model = ScriptedModel::new([text("Earlier design discussion."), text("Print advice.")]);
+        let mut harness =
+            Harness::with_script(Some("part = Box(10, 10, 2)"), FakeExecutor::new([]));
+        let input = TurnInput {
+            comments: vec![GroundedComment {
+                text: "/3d-printing".into(),
+                anchors: Vec::new(),
+            }],
+            context_window_tokens: 1_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            harness
+                .run_with_conversation(&model, &history, input, CancelFlag::new())
+                .await,
+            TurnOutcome::Answered
+        );
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].instructions.contains("# Active skill:"));
+        assert!(
+            requests[1]
+                .instructions
+                .contains(skills::BUILT_IN[0].instructions)
+        );
     }
 
     #[tokio::test]

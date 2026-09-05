@@ -1,6 +1,6 @@
 //! Documentation lookup: the `lookup_docs` tool's implementation.
 //!
-//! Answers the model's build123d API question from the documentation
+//! Answers the model's build123d API and practical design questions from the documentation
 //! corpus bundled into the binary, so the modelling agent works from exact
 //! signatures rather than training-data recall.
 
@@ -18,6 +18,11 @@ pub const NO_RESULT: &str = "No relevant documentation found.";
 /// Ordered from conceptual overview to detailed API reference so the lookup
 /// consumer encounters high-level context before exhaustive signatures.
 const DOC_CORPUS: &str = concat!(
+    // Practical recipes and print guidance are available to every lookup.
+    include_str!("../../../agent-docs/guides/modelling.md"),
+    "\n\n---\n\n",
+    include_str!("../../../agent-docs/guides/3d-printing.md"),
+    "\n\n---\n\n",
     // Conceptual foundations
     include_str!("../../../docs/build123d/introduction.md"),
     "\n\n---\n\n",
@@ -141,6 +146,42 @@ mod tests {
         assert!(prompt.contains("fillet the top edges"));
         assert!(prompt.contains("<build123d_documentation>"));
         assert!(prompt.contains("build123d"));
+    }
+
+    #[tokio::test]
+    async fn practical_guides_reach_the_documentation_provider() {
+        use crate::openai_compatible::recording::{completed, recording_server};
+        let (base_url, records, server) =
+            recording_server(vec![completed("Threaded bolt recipe")]).await;
+        let client = crate::config::AiConfiguration {
+            base_url,
+            model: "m".into(),
+            accepts_images: false,
+            allow_insecure_http: true,
+        }
+        .build_client(None)
+        .unwrap();
+        let answer = DocLookup::new(client)
+            .lookup("threaded bolt helix sweep", CancelFlag::new())
+            .await;
+        server.await.unwrap();
+        assert_eq!(answer, "Threaded bolt recipe");
+        let records = records.lock().unwrap();
+        let body = &records[0].body;
+        assert_eq!(body["instructions"], LOOKUP_PROMPT);
+        let input = body["input"].to_string();
+        for topic in [
+            "threaded bolt helix sweep",
+            "is_frenet=True",
+            "radial_clearance",
+            "Hollow enclosure",
+            "hydraresearch3d.com/design-rules",
+        ] {
+            assert!(
+                input.contains(topic),
+                "missing {topic} at the provider boundary"
+            );
+        }
     }
 
     #[tokio::test]
