@@ -21,8 +21,8 @@ Commands mentioned later in prose or inside code fences are ordinary text.
 
 The skill is built in and applies to the current turn. There are no custom
 skill files or settings. Invoke it again when you want another printing
-review. The current script and geometry attached to spatial comments give the model
-context. A review asks for advice, while a request to change the design allows
+review. The current script, which every turn carries, and the geometry attached to
+spatial comments give the model context. A review asks for advice, while a request to change the design allows
 edits.
 
 ## Give the model the constraints that matter
