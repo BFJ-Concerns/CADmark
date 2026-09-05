@@ -154,8 +154,6 @@ pub enum ToolbarAction {
     NewPart,
     /// Open another part of the open project, by file name.
     OpenPart(String),
-    /// Archive the current chat and begin a blank conversation.
-    NewConversation,
     /// Open one of the recently used project folders.
     OpenRecent(std::path::PathBuf),
     /// Show the project folder in the system file manager.
@@ -298,16 +296,6 @@ pub fn show_toolbar(
                     .clicked()
                 {
                     action = ToolbarAction::OpenProject;
-                    ui.close_menu();
-                }
-                if ui
-                    .button("New conversation")
-                    .on_hover_text(
-                        "Archive this chat and start a blank one; the script is unchanged",
-                    )
-                    .clicked()
-                {
-                    action = ToolbarAction::NewConversation;
                     ui.close_menu();
                 }
                 if !state.recent_projects.is_empty() {

@@ -333,10 +333,7 @@ impl OverlayState {
                                 }
 
                                 let has_text = !text.trim().is_empty();
-                                let enter = response.has_focus()
-                                    && ui.input_mut(|input| {
-                                        input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                                    });
+                                let enter = crate::text_input::consume_submit(ui, &response);
                                 if enter && has_text {
                                     action = OverlayAction::Submit {
                                         text: text.trim().to_string(),

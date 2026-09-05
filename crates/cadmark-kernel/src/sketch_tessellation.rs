@@ -102,8 +102,9 @@ def _cadmark_sketch_plane(faces, curves):
     }
 
 
-def _cadmark_sketch_profile(shape, linear_deflection=0.1, angular_deflection=0.5):
+def _cadmark_sketch_profile(shape):
     \"\"\"Extract a sketch's curves, corners, and enclosed regions.\"\"\"
+    linear_deflection, angular_deflection = _cadmark_display_deflection(shape)
     mesh = BRepMesh_IncrementalMesh(shape, linear_deflection, False, angular_deflection, True)
     mesh.Perform()
 
@@ -205,6 +206,7 @@ pub fn extract_profile(
     namespace
         .set_item("_cadmark_sketch_result", sketch)
         .map_err(TessellationError::Python)?;
+    crate::tessellation::prepare_display_tessellation(py, namespace)?;
     py.run(SKETCH_SOURCE, Some(namespace), None)
         .map_err(TessellationError::Python)?;
     py.run(EXTRACT_CODE, Some(namespace), None)
