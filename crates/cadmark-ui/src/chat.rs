@@ -250,8 +250,7 @@ impl ChatPane {
             self.focus_input = false;
         }
 
-        let enter_sent = response.has_focus()
-            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let enter_sent = crate::text_input::consume_submit(ui, &response);
 
         ui.horizontal(|ui| {
             ui.label(
@@ -692,6 +691,48 @@ mod tests {
             operation_id: u64::from(line),
             relation: ProvenanceRelation::Generated,
         }
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_and_only_plain_enter_sends() {
+        let context = egui::Context::default();
+        let mut pane = ChatPane::new();
+        let pending = PendingComments::default();
+        let mut frame = |events: Vec<egui::Event>| {
+            let mut action = ChatAction::None;
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        action = pane.show_input(ui, &pending);
+                    });
+                },
+            );
+            (action, pane.input_text.clone())
+        };
+        let enter = |modifiers| egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        frame(vec![]);
+        frame(vec![egui::Event::Text("first line".into())]);
+        let (action, text) = frame(vec![enter(egui::Modifiers::SHIFT)]);
+        assert_eq!(action, ChatAction::None, "Shift+Enter must not submit");
+        assert_eq!(text, "first line\n");
+        frame(vec![egui::Event::Text("second line".into())]);
+        let (action, text) = frame(vec![enter(egui::Modifiers::NONE)]);
+        assert_eq!(action, ChatAction::Send("first line\nsecond line".into()));
+        assert!(text.is_empty());
     }
 
     #[test]
