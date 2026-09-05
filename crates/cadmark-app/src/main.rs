@@ -49,7 +49,10 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 860.0])
             .with_min_inner_size([900.0, 600.0])
-            .with_title("CADmark"),
+            .with_title("CADmark")
+            // Matches `StartupWMClass` in the desktop entry, so a desktop
+            // environment pairs the window with the launcher's icon.
+            .with_app_id("cadmark"),
         wgpu_options,
         // Depth testing happens in the offscreen viewport pass, not in
         // egui's render pass — the blit pipeline has no depth.
