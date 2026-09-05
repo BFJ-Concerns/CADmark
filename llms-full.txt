@@ -108,7 +108,7 @@ When the provider refuses a request, the cause is identified and reported:
 
 When no provider is configured: "no AI provider is configured; open Settings to add one". The model still loads and rebuilds without AI.
 
-Source: `crates/cadmark-bridge/src/backend.rs:19–36`, `crates/cadmark-app/src/app.rs:2269`.
+Source: `crates/cadmark-bridge/src/backend.rs:19–36`, `crates/cadmark-app/src/app.rs` (`ai_services`).
 
 
 <!-- source: agent-docs/reference/interface.md -->
@@ -131,7 +131,7 @@ A new part is "Untitled" until its first save (`Ctrl+S`), which asks for a name 
 
 Window title carries the project folder name. The project menu shows the folder path, offers "Open project folder" (`Ctrl+O`), "Open recent", opening the script in an external editor, and showing the folder in the file manager.
 
-Source: `crates/cadmark-ui/src/toolbar.rs:139–322`.
+Source: `crates/cadmark-ui/src/toolbar.rs`.
 
 ## Viewport
 
@@ -144,6 +144,10 @@ Source: `crates/cadmark-ui/src/toolbar.rs:139–322`.
 | Scroll | Zoom |
 | Click | Select geometry / place comment |
 
+Curved surfaces and edge polylines use a display tolerance relative to model size. This approximation affects the viewport mesh; the kernel retains exact CAD geometry for modelling and STEP export.
+
+Source: `crates/cadmark-kernel/src/tessellation.rs` (`prepare_display_tessellation`).
+
 The world is Z-up (build123d convention). The status bar shows navigation controls as a hint.
 
 Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/status.rs:96–99`.
@@ -152,17 +156,19 @@ Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/s
 
 Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
 
-Sketch elements are selectable when the design has reached only a sketch: curves, corners, and regions draw face-on to the sketch's plane in orthographic view, with any existing solid ghosted behind them.
+Sketch-only designs display curves, corners and filled regions face-on to the sketch plane in orthographic view, with any existing solid ghosted behind them. Viewport picking currently handles solid topology; sketch picking is not connected to the live input path.
 
 Selected elements glow in the viewport. The status bar shows which element is selected. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable.
+
+Source: `crates/cadmark-renderer/src/markers.rs` (dimensions), `crates/cadmark-renderer/src/shaders/wireframe.wgsl` and `crates/cadmark-renderer/src/shaders/vertex_markers.wgsl` (coverage).
 
 ### Select menu
 
 The "Select" menu in the toolbar controls which element kinds a viewport click can land on. Three checkboxes — "Faces", "Edges", "Vertices" — all on by default. Disabling a kind makes the click pass through it to whatever is behind. The button label reads "Select" when all kinds are on, or "Select: edges, vertices" (for example) when one is off.
 
-The filter does not affect whole-part picks or sketch element picks.
+The filter does not affect whole-part picks.
 
-Source: `crates/cadmark-ui/src/toolbar.rs:551–570` (menu UI), `crates/cadmark-renderer/src/picking.rs:38–63` (`SelectionFilter`), `crates/cadmark-renderer/src/shaders/vertex_markers.wgsl:105–109` (section discard).
+Source: `crates/cadmark-ui/src/toolbar.rs` (menu UI), `crates/cadmark-renderer/src/picking.rs:38–63` (`SelectionFilter`), `crates/cadmark-renderer/src/shaders/vertex_markers.wgsl:105–109` (section discard).
 
 ## Standard views and projection
 
@@ -170,7 +176,7 @@ Seven standard views: Front, Back, Left, Right, Top, Bottom, Isometric. Availabl
 
 Two projection modes: Perspective (default) and Orthographic. Toggled via the View menu ("Switch to Perspective/Orthographic") or the `P` key.
 
-Source: `crates/cadmark-renderer/src/camera.rs:22–37`, `crates/cadmark-ui/src/toolbar.rs:468–489`.
+Source: `crates/cadmark-renderer/src/camera.rs:22–37`, `crates/cadmark-ui/src/toolbar.rs`.
 
 ## Section plane
 
@@ -182,13 +188,13 @@ Cuts the model along X, Y, or Z. Toggled with the "Section" button in the toolba
 
 Cut-away geometry is also unclickable.
 
-Source: `crates/cadmark-ui/src/toolbar.rs:51–83`, `crates/cadmark-ui/src/toolbar.rs:491–549`.
+Source: `crates/cadmark-ui/src/toolbar.rs`.
 
 ## Ghost mode
 
 The "Ghost" button makes the model see-through. Another way to inspect internal geometry without cutting.
 
-Source: `crates/cadmark-ui/src/toolbar.rs:542–549`.
+Source: `crates/cadmark-ui/src/toolbar.rs`.
 
 ## Chat pane
 
@@ -274,7 +280,7 @@ Every accepted edit is recorded as a design step. Steps record which part they c
 
 Named versions are highlighted in the history menu. Undo and redo tooltips describe what they will restore.
 
-Source: `crates/cadmark-ui/src/toolbar.rs:328–428`.
+Source: `crates/cadmark-ui/src/toolbar.rs` (history controls), `crates/cadmark-app/src/app.rs` (`CadmarkApp::show_chat`).
 
 ## Export
 
@@ -288,7 +294,7 @@ Export menu in the toolbar. Available when a model is loaded. Formats:
 
 Export writes the file next to the part script. Multi-part models offer per-part and "Export all" options. An open or invalid solid shows a non-blocking warning before export.
 
-Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-ui/src/toolbar.rs:562–610`.
+Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-ui/src/toolbar.rs`.
 
 ## Solid validity
 
