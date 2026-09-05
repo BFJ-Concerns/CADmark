@@ -271,10 +271,12 @@ impl Camera {
         Basis { right, up, forward }
     }
 
-    /// Orbit the camera by a delta in screen-space pixels.
+    /// Orbit the camera by a delta in screen-space pixels. The model
+    /// follows the pointer: dragging right turns its near side to the
+    /// right, dragging down tips its top towards the viewer.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         let sensitivity = 0.005;
-        self.yaw += dx * sensitivity;
+        self.yaw -= dx * sensitivity;
         self.pitch = (self.pitch + dy * sensitivity).clamp(
             -std::f32::consts::FRAC_PI_2 + PITCH_MARGIN,
             std::f32::consts::FRAC_PI_2 - PITCH_MARGIN,
