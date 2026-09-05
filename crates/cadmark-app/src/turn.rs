@@ -32,6 +32,7 @@ use cadmark_core::skills;
 use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
 use cadmark_kernel::worker::WorkerError;
 
+use crate::script_parameters;
 use crate::validity::describe_validity;
 
 /// What the user sent to start a turn: any chat text, the pending
@@ -178,6 +179,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         mut emit: impl FnMut(TurnEvent) + Send,
     ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
+        let last_run = last_successful_run(conversation).map(str::to_owned);
         let mut items = history_items(conversation);
         let usage = context_usage(
             conversation,
@@ -203,14 +205,15 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 .map(String::as_str)
                 .chain(input.comments.iter().map(|comment| comment.text.as_str())),
         );
-        if !selected_skills.is_empty()
-            && let Some(script) = &original
-        {
-            items.push(ModelItem::User {
-                text: format!("Current design for this turn (script data):\n<current_script>\n{script}\n</current_script>"),
-                images: Vec::new(),
-            });
-        }
+        // The script on disk is the design. It is attached to every request
+        // because the history cannot be trusted to carry it: a fresh or
+        // condensed conversation holds no run of it, and a parameter edit,
+        // an undo, or a cancelled turn leaves the file different from the
+        // last run the history does hold.
+        items.push(ModelItem::User {
+            text: current_script_block(original.as_deref(), last_run.as_deref()),
+            images: Vec::new(),
+        });
         let request = render_input(input);
         // The curated example library for the operations this request
         // names, carried before the user's words so the request itself
@@ -534,6 +537,82 @@ fn render_input(input: &TurnInput) -> String {
     parts.join("\n\n")
 }
 
+/// The last script the model ran successfully in this conversation, as
+/// the history records it. `None` when the history holds no such run: a
+/// new conversation, or one condensed past its last run.
+fn last_successful_run(conversation: &Conversation) -> Option<&str> {
+    conversation
+        .messages()
+        .iter()
+        .rev()
+        .find_map(|message| match &message.kind {
+            MessageKind::ToolCalls(activities) => activities.iter().rev().find_map(|activity| {
+                (activity.tool == RUN_SCRIPT && !activity.failed && activity.output.is_some())
+                    .then(|| {
+                        activity
+                            .arguments
+                            .get("code")
+                            .and_then(serde_json::Value::as_str)
+                    })
+                    .flatten()
+            }),
+            _ => None,
+        })
+}
+
+/// The script the model must start from, and how it relates to the last
+/// version the model ran. When the file differs from that run, the
+/// parameter values that changed are named, so a value the user set in
+/// the panel is kept rather than overwritten from memory.
+fn current_script_block(on_disk: Option<&str>, last_run: Option<&str>) -> String {
+    let Some(script) = on_disk else {
+        return "There is no script yet: the part is empty, and the first `run_script` creates it."
+            .to_string();
+    };
+    let mut out = String::from("The current script, as it stands on disk. ");
+    match last_run {
+        Some(last_run) if last_run == script => {
+            out.push_str("It is unchanged since your last run in this conversation.");
+        }
+        Some(last_run) => {
+            out.push_str(
+                "It differs from the last script you ran: it was changed outside this \
+                 conversation (a parameter edited in the panel, a design step undone or \
+                 redone, or a turn whose run was not kept). Start from this text, not \
+                 from your last run.",
+            );
+            let changes = changed_parameter_values(last_run, script);
+            if !changes.is_empty() {
+                out.push_str("\nParameter values that changed: ");
+                out.push_str(&changes.join(", "));
+            }
+        }
+        None => out.push_str(
+            "This conversation holds no run of it, so this text is the only authoritative \
+             version; start from it, not from memory.",
+        ),
+    }
+    out.push_str(&format!("\n<current_script>\n{script}\n</current_script>"));
+    out
+}
+
+/// Each parameter whose literal value differs between two versions of the
+/// script, as `name old → new`, in the current script's order.
+fn changed_parameter_values(before: &str, after: &str) -> Vec<String> {
+    let before = script_parameters::extract(before);
+    script_parameters::extract(after)
+        .iter()
+        .filter_map(|parameter| {
+            let new = parameter.value()?;
+            let old = before
+                .iter()
+                .find(|earlier| earlier.name == parameter.name)?
+                .value()?;
+            (old != new).then(|| format!("{} {old} → {new}", parameter.name))
+        })
+        .collect()
+}
+
 /// The conversation so far as the model sees it.
 fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
     let mut items = Vec::new();
@@ -676,7 +755,7 @@ mod tests {
     use cadmark_core::ledger::ProvenanceLedger;
     use cadmark_core::limits::{ExecutionLimits, LimitHit};
     use cadmark_core::mesh::TessellatedMesh;
-    use cadmark_core::message::Message;
+    use cadmark_core::message::{Message, ToolActivity};
     use cadmark_kernel::protocol::ModelFile;
 
     /// A model that answers from a script of responses and records what
@@ -1532,6 +1611,146 @@ mod tests {
         assert_eq!(harness.on_disk(), None);
     }
 
+    /// A saved run of `code` as the chat pane records it: the tool call
+    /// with its arguments and a successful result.
+    fn recorded_run(call_id: &str, code: &str) -> Message {
+        Message::tool_calls(vec![ToolActivity {
+            call_id: call_id.into(),
+            tool: RUN_SCRIPT.into(),
+            arguments: serde_json::json!({"code": code, "summary": "Built"}),
+            output: Some("ran".into()),
+            failed: false,
+            started: chrono::Utc::now(),
+            finished: Some(chrono::Utc::now()),
+        }])
+    }
+
+    /// The current-script block of the first request, which every turn
+    /// carries whether or not a skill is active.
+    fn current_script_block_shown(model: &ScriptedModel) -> String {
+        model.requests.lock().unwrap()[0]
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ModelItem::User { text, .. } if text.contains("<current_script>") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .expect("the request carries the current script")
+    }
+
+    #[tokio::test]
+    async fn every_turn_carries_the_script_on_disk_without_a_skill() {
+        let model = ScriptedModel::new([text("The wall is 3 mm.")]);
+        let original = "from build123d import *\nwall = 3\npart = Box(20, 10, wall)\n";
+        let mut harness = Harness::with_script(Some(original), FakeExecutor::new([]));
+        harness
+            .run(&model, chat("How thick is the wall?"), CancelFlag::new())
+            .await;
+        let block = current_script_block_shown(&model);
+        assert!(block.contains(original));
+        assert!(block.contains("holds no run of it"));
+        // The block precedes the request, so the user's words stay last.
+        let requests = model.requests.lock().unwrap();
+        let texts: Vec<_> = requests[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ModelItem::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts
+                .last()
+                .is_some_and(|last| *last == "How thick is the wall?")
+        );
+        assert!(
+            texts.iter().position(|t| t.contains("<current_script>"))
+                < texts.iter().position(|t| *t == "How thick is the wall?")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_project_is_told_there_is_no_script_yet() {
+        let model = ScriptedModel::new([text("Nothing to show.")]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([]));
+        harness
+            .run(&model, chat("What is here?"), CancelFlag::new())
+            .await;
+        let context = first_request_context(&model);
+        assert!(context.contains("There is no script yet"));
+        assert!(!context.contains("<current_script>"));
+    }
+
+    #[tokio::test]
+    async fn a_parameter_edited_in_the_panel_is_named_as_a_change_since_the_last_run() {
+        let ran = "from build123d import *\nwall = 3\nwidth = 20\npart = Box(width, 10, wall)\n";
+        let edited = "from build123d import *\nwall = 5\nwidth = 20\npart = Box(width, 10, wall)\n";
+        let mut history = Conversation::new();
+        history.push(Message::user_chat("Make a plate."));
+        history.push(recorded_run("c1", ran));
+        history.push(Message::ai_response("Made a plate."));
+        let model = ScriptedModel::new([text("Kept the 5 mm wall.")]);
+        let mut harness = Harness::with_script(Some(edited), FakeExecutor::new([]));
+        harness
+            .run_with_conversation(&model, &history, chat("Add a hole."), CancelFlag::new())
+            .await;
+        let block = current_script_block_shown(&model);
+        assert!(block.contains(edited));
+        assert!(block.contains("differs from the last script you ran"));
+        assert!(block.contains("Parameter values that changed: wall 3 → 5"));
+        let changes = block
+            .lines()
+            .find(|line| line.starts_with("Parameter values that changed"));
+        assert_eq!(changes, Some("Parameter values that changed: wall 3 → 5"));
+    }
+
+    #[tokio::test]
+    async fn a_script_unchanged_since_the_last_run_is_said_to_be_so() {
+        let ran = "from build123d import *\nwall = 3\npart = Box(20, 10, wall)\n";
+        let mut history = Conversation::new();
+        history.push(recorded_run("c1", ran));
+        let model = ScriptedModel::new([text("Still the same.")]);
+        let mut harness = Harness::with_script(Some(ran), FakeExecutor::new([]));
+        harness
+            .run_with_conversation(&model, &history, chat("Anything new?"), CancelFlag::new())
+            .await;
+        let block = current_script_block_shown(&model);
+        assert!(block.contains("unchanged since your last run"));
+        assert!(!block.contains("Parameter values that changed"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_run_does_not_count_as_the_last_run() {
+        let good = "from build123d import *\npart = Box(20, 10, 3)\n";
+        let mut history = Conversation::new();
+        history.push(recorded_run("c1", good));
+        history.push(Message::tool_calls(vec![ToolActivity {
+            call_id: "c2".into(),
+            tool: RUN_SCRIPT.into(),
+            arguments: serde_json::json!({"code": "BROKEN =", "summary": "Oops"}),
+            output: Some("The script failed".into()),
+            failed: true,
+            started: chrono::Utc::now(),
+            finished: Some(chrono::Utc::now()),
+        }]));
+        let model = ScriptedModel::new([text("Same as before.")]);
+        let mut harness = Harness::with_script(Some(good), FakeExecutor::new([]));
+        harness
+            .run_with_conversation(&model, &history, chat("Check it."), CancelFlag::new())
+            .await;
+        assert!(current_script_block_shown(&model).contains("unchanged since your last run"));
+    }
+
+    #[test]
+    fn changed_parameter_values_ignore_derived_and_new_names() {
+        let before = "wall = 3\nwidth = 20\nhalf = width / 2\n";
+        let after = "wall = 4\nwidth = 20\nhalf = width / 2\ndepth = 9\n";
+        assert_eq!(changed_parameter_values(before, after), ["wall 3 → 4"]);
+    }
+
     #[tokio::test]
     async fn an_answer_without_tool_calls_changes_nothing() {
         let model = ScriptedModel::new([text("A fillet rounds an edge.")]);
@@ -1602,8 +1821,8 @@ mod tests {
         assert_eq!(harness.on_disk().as_deref(), Some("GOOD = 1"));
 
         let requests = model.requests.lock().unwrap();
-        let ModelItem::User { text, .. } = &requests[0].items[1] else {
-            panic!("the user's turn follows the example library");
+        let ModelItem::User { text, .. } = &requests[0].items[2] else {
+            panic!("the user's turn follows the current script and the example library");
         };
         for expected in [
             "- face 3",
@@ -1649,10 +1868,10 @@ mod tests {
         assert_eq!(requests[0].tools.len(), 3, "the render tool is offered");
         let second = &requests[1];
         assert!(
-            matches!(&second.items[3], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
+            matches!(&second.items[4], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
         );
         assert!(matches!(
-            &second.items[4],
+            &second.items[5],
             ModelItem::User { text, images } if text.contains("top") && images.len() == 1
         ));
     }

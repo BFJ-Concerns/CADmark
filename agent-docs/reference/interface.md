@@ -103,7 +103,9 @@ Input: multi-line text field. Enter sends, Shift+Enter breaks the line.
 
 Context occupancy shown in the chat, including reserved reference-image budget, against the configured context-window setting.
 
-Source: `crates/cadmark-ui/src/chat.rs:1–9`.
+Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation, differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
+
+Source: `crates/cadmark-ui/src/chat.rs:1–9`, `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`).
 
 The **Skills** menu inserts a built-in command into the draft. Start a message or
 spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance

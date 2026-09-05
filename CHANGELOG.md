@@ -109,6 +109,11 @@ All notable changes to this project will be documented in this file.
 - Window title carries the project name
 
 ### Fixed
+- The AI is sent the script on disk with every turn, so a reopened project,
+  a new conversation or a condensed chat no longer leaves it reconstructing
+  the file from memory or asking for it to be pasted; when the file differs
+  from the AI's last run, a value edited in the parameters panel or a step
+  undone, it is told which parameter values changed and keeps them
 - Malformed settings errors identify the affected file and repair location
   without echoing settings content
 - Completed-turn chat reports now show face count, volume, and overall size
