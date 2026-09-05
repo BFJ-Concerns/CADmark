@@ -1,7 +1,8 @@
 #!/bin/sh
-# Create the repository-root .venv the embedded kernel imports build123d from.
+# Create the virtual environment the embedded kernel imports build123d from,
+# at the repository root unless --venv names somewhere else.
 #
-# Installs the exact versions in requirements.txt into .venv/ using a Python
+# Installs the exact versions in requirements.txt into it using a Python
 # 3.12 interpreter (cadquery-ocp publishes no wheels for newer Pythons), then
 # proves build123d and OCP import. Re-running is safe: an existing .venv is
 # reused and brought up to the pinned versions.
@@ -9,6 +10,9 @@
 # Interpreter selection, in order: --python PATH, the PYO3_PYTHON environment
 # variable (the same interpreter Cargo builds against), then `uv python find
 # 3.12`, then python3.12 on PATH.
+#
+# --venv PATH builds the environment somewhere other than the repository
+# root, which is how an installed copy gets its own runtime.
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -18,7 +22,8 @@ python=${PYO3_PYTHON:-}
 while [ $# -gt 0 ]; do
     case "$1" in
         --python) python=$2; shift 2 ;;
-        *) echo "usage: scripts/bootstrap-python-runtime [--python /path/to/python3.12]" >&2; exit 2 ;;
+        --venv) venv=$2; shift 2 ;;
+        *) echo "usage: scripts/bootstrap-python-runtime [--python /path/to/python3.12] [--venv /path/to/venv]" >&2; exit 2 ;;
     esac
 done
 
@@ -47,7 +52,8 @@ else
     "$venv/bin/python" -m pip install --quiet -r "$repo_root/requirements.txt"
 fi
 
-"$venv/bin/python" - <<'PY'
+VENV="$venv" "$venv/bin/python" - <<'PY'
+import os
 import build123d, OCP
-print(f"bootstrap: .venv ready (build123d {build123d.__version__}, OCP {OCP.__file__.rsplit('/', 1)[0]})")
+print(f"bootstrap: {os.environ['VENV']} ready (build123d {build123d.__version__}, OCP {OCP.__file__.rsplit('/', 1)[0]})")
 PY

@@ -20,11 +20,15 @@ Rust workspace with six crates:
 
 ## Build & Run
 
+`justfile` wraps every routine command; `just` on its own lists the recipes.
+
 ```bash
-scripts/bootstrap-python-runtime   # One-off: create .venv with build123d + OCP
-cargo check          # Type-check
-cargo test           # Run all tests (kernel tests need the .venv)
-cargo run -- [dir]   # Run with a project directory (defaults to cwd)
+just bootstrap       # One-off: create .venv with build123d + OCP
+just check           # Type-check
+just test            # Run all tests (kernel tests need the .venv)
+just verify          # Formatting, lints, and tests
+just run [dir]       # Run with a project directory (defaults to cwd)
+just install         # Build release and install as a desktop application
 ```
 
 Requires Python 3.12 (cadquery-ocp). The `.cargo/config.toml` points PyO3
