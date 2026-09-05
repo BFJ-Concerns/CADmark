@@ -5,7 +5,7 @@
 <!-- doc-index:start (generated region; do not hand-edit. Regenerate with the project-docs skill: doc-indexes.sh) -->
 ## General
 
-- [Installation and build](agent-docs/installation.md): Build prerequisites, Python runtime setup, and launching CADmark
+- [Installation and build](agent-docs/installation.md): Build prerequisites, Python runtime setup, task runner, launching, and desktop installation
 
 ## Reference
 

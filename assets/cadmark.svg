@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <title>CADmark</title>
+  <rect width="256" height="256" rx="56" fill="#1b1c20"/>
+  <g stroke="#eceef1" stroke-width="7" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M128 56 190 92 128 128 66 92 Z" fill="#3b3f49"/>
+    <path d="M190 92 190 164 128 200 128 128 Z" fill="#2a2d35"/>
+    <path d="M66 92 128 128 128 200 66 164 Z" fill="#22252c"/>
+  </g>
+  <circle cx="190" cy="92" r="26" fill="#1b1c20"/>
+  <circle cx="190" cy="92" r="17" fill="#61adff"/>
+</svg>
