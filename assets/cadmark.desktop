@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=CADmark
+GenericName=CAD Modelling
+Comment=AI-directed CAD modelling with spatial comments
+Exec=cadmark
+Icon=cadmark
+Terminal=false
+Categories=Graphics;Engineering;3DGraphics;
+Keywords=CAD;3D;build123d;modelling;
+StartupWMClass=cadmark

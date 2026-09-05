@@ -4,29 +4,44 @@ AI-directed CAD modelling with spatial comments. Select geometry in a 3D viewpor
 
 ## Install
 
-CADmark needs Rust, Python 3.12, and a GPU (or software adapter).
+CADmark needs Rust, Python 3.12, and a GPU (or software adapter). The
+[`just`](https://github.com/casey/just) recipes below are the shortest route;
+each one wraps ordinary `cargo` and `scripts/` commands that work on their own.
 
 Set up the Python runtime once:
 
 ```sh
-scripts/bootstrap-python-runtime
+just bootstrap
 ```
 
 This creates a `.venv` at the repository root with the pinned versions of build123d and cadquery-ocp that the embedded kernel requires.
 
-Build and run:
+Build and run from the checkout:
 
 ```sh
-cargo build
-cargo run --bin cadmark            # opens the start view
-cargo run --bin cadmark -- mypart  # opens a project folder directly
+just run          # opens the start view
+just run mypart   # opens a project folder directly
 ```
 
 Run the tests (kernel tests need the `.venv`):
 
 ```sh
-cargo test
+just test         # or `just verify` for formatting and lints as well
 ```
+
+Install CADmark as a desktop application for the current user:
+
+```sh
+just install
+```
+
+This builds the workspace in release mode, copies both binaries and a Python
+runtime of their own into `~/.local/lib/cadmark`, adds a `cadmark` launcher to
+`~/.local/bin`, and registers a menu entry and icon — so the installed copy is
+independent of the checkout. Set `CADMARK_PREFIX` to install elsewhere.
+`just uninstall` removes all of it.
+
+`just` on its own lists every recipe.
 
 ## Connect an AI provider
 
