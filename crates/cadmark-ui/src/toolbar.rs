@@ -9,43 +9,6 @@ use std::path::Path;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::version::{Microversion, VersionHistory};
 
-/// The standard views the View menu offers, mirrored from the camera so
-/// the toolbar names no renderer type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StandardView {
-    Front,
-    Back,
-    Left,
-    Right,
-    Top,
-    Bottom,
-    Isometric,
-}
-
-impl StandardView {
-    pub const ALL: [StandardView; 7] = [
-        Self::Front,
-        Self::Back,
-        Self::Left,
-        Self::Right,
-        Self::Top,
-        Self::Bottom,
-        Self::Isometric,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Front => "Front",
-            Self::Back => "Back",
-            Self::Left => "Left",
-            Self::Right => "Right",
-            Self::Top => "Top",
-            Self::Bottom => "Bottom",
-            Self::Isometric => "Isometric",
-        }
-    }
-}
-
 /// The kinds of element a click may land on, mirrored from the renderer
 /// so the toolbar names no renderer type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,8 +125,6 @@ pub enum ToolbarAction {
     OpenScriptInEditor,
     /// Re-execute the current script and reload the model.
     Refresh,
-    /// Frame the whole model in the viewport.
-    FitView,
     /// The next viewport click selects a completed part, not a face or edge.
     PickPart,
     /// Show or hide the code panel.
@@ -174,10 +135,6 @@ pub enum ToolbarAction {
     ExportAll(ExportFormat),
     /// Open the settings dialog.
     OpenSettings,
-    /// Switch between perspective and orthographic projection.
-    ToggleProjection,
-    /// Snap the camera to a standard view.
-    StandardView(StandardView),
     /// Turn one kind of element on or off for clicking.
     ToggleSelectionKind(SelectionKind),
     /// Turn the section plane on or off.
@@ -221,15 +178,13 @@ pub struct ToolbarState<'a> {
     /// Undo, redo, refresh and project switching are held while the worker
     /// is busy so a checkout cannot race an edit being written.
     pub controls_enabled: bool,
-    /// Fit-view and export need a loaded model.
+    /// Export needs a loaded model.
     pub has_model: bool,
     /// The parts the executed script defines, as picking ID, script binding
     /// name, and whether the part is a closed valid solid.
     pub model_parts: &'a [(u32, String, bool)],
     /// Whether the code panel is showing.
     pub code_visible: bool,
-    /// Whether the viewport is orthographic.
-    pub orthographic: bool,
     /// A non-blocking explanation shown before an unavailable export.
     pub export_warning: Option<&'a str>,
     /// Which kinds of element a click may land on.
@@ -495,14 +450,6 @@ pub fn show_toolbar(
         }
 
         if ui
-            .add_enabled(state.has_model, egui::Button::new("\u{22A1} Fit"))
-            .on_hover_text("Frame the whole model\nF")
-            .clicked()
-        {
-            action = ToolbarAction::FitView;
-        }
-
-        if ui
             .add_enabled(
                 !state.model_parts.is_empty(),
                 egui::Button::new("Pick part"),
@@ -512,29 +459,6 @@ pub fn show_toolbar(
         {
             action = ToolbarAction::PickPart;
         }
-
-        ui.menu_button("View \u{25BE}", |ui| {
-            ui.set_min_width(180.0);
-            let projection = if state.orthographic {
-                "Perspective"
-            } else {
-                "Orthographic"
-            };
-            if ui
-                .add(egui::Button::new(format!("Switch to {projection}")).shortcut_text("P"))
-                .clicked()
-            {
-                action = ToolbarAction::ToggleProjection;
-                ui.close_menu();
-            }
-            ui.separator();
-            for view in StandardView::ALL {
-                if ui.button(view.label()).clicked() {
-                    action = ToolbarAction::StandardView(view);
-                    ui.close_menu();
-                }
-            }
-        });
 
         let selection_label = match state.selection_kinds.summary() {
             Some(summary) => format!("Select: {summary} \u{25BE}"),
