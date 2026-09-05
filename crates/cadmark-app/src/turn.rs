@@ -664,52 +664,6 @@ fn describe_view(view: RenderView) -> &'static str {
     }
 }
 
-/// Reference images the model reads with every turn: one per file in the
-/// project folder's `references/` directory.
-pub fn reference_images(project_dir: &Path) -> Vec<ImageData> {
-    let mut images = Vec::new();
-    let Ok(entries) = std::fs::read_dir(project_dir.join("references")) else {
-        return images;
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .collect();
-    paths.sort();
-    for path in paths {
-        let Some(media_type) = reference_image_media_type(&path) else {
-            continue;
-        };
-        if let Ok(bytes) = std::fs::read(&path) {
-            images.push(ImageData {
-                media_type: media_type.to_string(),
-                bytes,
-            });
-        }
-    }
-    images
-}
-
-/// Count reference images without opening them. The frame loop needs this for
-/// occupancy display, while a turn alone pays to load their bytes.
-pub fn reference_image_count(project_dir: &Path) -> usize {
-    let Ok(entries) = std::fs::read_dir(project_dir.join("references")) else {
-        return 0;
-    };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| reference_image_media_type(&entry.path()).is_some())
-        .count()
-}
-
-fn reference_image_media_type(path: &Path) -> Option<&'static str> {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("png") => Some("image/png"),
-        Some("jpg" | "jpeg") => Some("image/jpeg"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1305,21 +1259,12 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_includes_reference_images_found_in_the_project() {
-        let project = tempfile::tempdir().unwrap();
-        let references = project.path().join("references");
-        std::fs::create_dir(&references).unwrap();
-        std::fs::write(
-            references.join("bracket.png"),
-            "image bytes are not opened for counting",
-        )
-        .unwrap();
+    fn context_usage_includes_reference_images() {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("x".repeat(300)));
 
         let without_images = context_usage(&conversation, 0, 1_000);
-        let with_images =
-            context_usage(&conversation, reference_image_count(project.path()), 1_000);
+        let with_images = context_usage(&conversation, 1, 1_000);
 
         assert_eq!(with_images.conversation_tokens, 75);
         assert_eq!(with_images.reference_image_tokens, REFERENCE_IMAGE_TOKENS);

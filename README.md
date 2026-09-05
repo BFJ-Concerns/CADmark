@@ -57,7 +57,7 @@ Click a face, edge, or vertex to select it and write a spatial comment anchored 
 
 The parameters panel lists every named number in the script; drag a value to change it directly without an AI turn. Every accepted edit is a design step — undo with `Ctrl+Z`, name a version with `Ctrl+S`.
 
-Place PNG or JPEG images in a `references/` folder to give the AI visual context with every turn. The section plane and ghost mode let you inspect internal geometry. Export to STEP, STL, or 3MF from the toolbar.
+Use **Attach images…** above chat to add [project reference photos and drawings](docs/reference/interface.md#reference-images) for the AI. They remain available across conversations. The section plane and ghost mode let you inspect internal geometry. Export to STEP, STL, or 3MF from the toolbar.
 
 ## Documentation
 

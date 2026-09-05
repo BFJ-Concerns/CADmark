@@ -138,7 +138,13 @@ The export menu shows a warning before writing an invalid part.
 
 ## Reference images
 
-Place PNG or JPEG files (`.png`, `.jpg`, `.jpeg`) in a `references/` folder inside the project directory. When the provider's "accepts images" setting is on, these images are sent with every AI turn so the model knows what you are aiming for. Other file types are ignored.
+Click **Attach images…** beside **Project references**, above the conversation, and choose one or more PNG or JPEG photos or drawings. CADmark copies them into the project and shows thumbnails.
+
+The images stay with the project when you start a new conversation or reopen it, even if you move or delete the originals. All parts and conversations in that project share them. An existing image with the same filename is kept; the new copy receives a numbered name.
+
+Use an image-capable AI and tick **The model reads images** in Settings. The references then accompany every AI turn. With a text-only AI, the images remain saved and the panel shows a reminder. Import errors appear in the app.
+
+You can also place PNG or JPEG files in the project's `references/` folder and reopen the project to load them.
 
 ## Keyboard shortcuts
 

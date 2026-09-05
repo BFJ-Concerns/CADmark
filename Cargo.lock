@@ -637,6 +637,7 @@ dependencies = [
  "eframe",
  "egui",
  "env_logger",
+ "image",
  "log",
  "open",
  "png",
@@ -1971,6 +1972,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
