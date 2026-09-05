@@ -53,6 +53,31 @@ fn roomy() -> ExecutionLimits {
 
 const BOX: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n";
 
+#[test]
+fn documented_modelling_recipes_build_one_closed_valid_part_each() {
+    let guide = include_str!("../../../agent-docs/guides/modelling.md");
+    let examples: Vec<_> = guide
+        .split("```python\n")
+        .skip(1)
+        .map(|section| section.split("```").next().unwrap())
+        .collect();
+    assert_eq!(examples.len(), 2, "threaded bolt and enclosure examples");
+    for (source, expected_volume) in examples.into_iter().zip([1349.995692, 5832.0]) {
+        let (_project, script, mut worker) = project_with_script(source);
+        let model = worker
+            .execute(&script, roomy(), &CancelFlag::new())
+            .expect("the published recipe executes through the application kernel");
+        let parts = &model.solid().expect("solid geometry").parts;
+        assert_eq!(
+            parts.len(),
+            1,
+            "intermediate geometry must not appear as spare parts"
+        );
+        assert!(model.is_printable(), "closed, valid geometry");
+        assert!((parts[0].summary.volume - expected_volume).abs() < 0.01);
+    }
+}
+
 const SEPARATED_BOXES: &str = "from build123d import *\n\nwith BuildPart() as part:\n    Box(10, 10, 10)\n    with Locations((20, 0, 0)):\n        Box(10, 10, 10)\n";
 
 // Curvature makes mesh faceting observable: unlike a box, a cylinder's mesh

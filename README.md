@@ -61,6 +61,12 @@ Place PNG or JPEG images in a `references/` folder to give the AI visual context
 
 ## Documentation
 
+Use `/3d-printing` or `$3d-printing` at the start of a message for a printing
+review or a design request guided by filament-printing constraints. The chat
+pane’s Skills menu lists the built-in skill.
+
 - [Getting started](docs/guides/getting-started.md) — install, connect a provider, and make your first edit
 - [Configuration reference](docs/reference/configuration.md) — settings, credentials, limits, and provider errors
 - [Interface reference](docs/reference/interface.md) — viewport, toolbar, chat, panels, measurement, and shortcuts
+- [3D printing](docs/guides/3d-printing.md) — built-in advice, orientation, and fit checks
+- [Common modelling tasks](docs/guides/modelling.md) — threaded bolts, helix sweeps, holes, enclosures, and fillets

@@ -7,6 +7,11 @@
 
 - [Installation and build](agent-docs/installation.md): Build prerequisites, Python runtime setup, task runner, launching, and desktop installation
 
+## Guides
+
+- [3D-printing guidance](agent-docs/guides/3d-printing.md): Built-in FFF/FDM design review guidance, print orientation, tolerances, and fasteners
+- [Practical modelling recipes](agent-docs/guides/modelling.md): build123d recipes for threaded bolts, helix sweeps, fits, holes, enclosures, and fillets
+
 ## Reference
 
 - [Configuration reference](agent-docs/reference/configuration.md): Settings file, credential handling, execution limits, and context-window configuration

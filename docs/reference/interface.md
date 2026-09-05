@@ -65,6 +65,11 @@ Type with Enter to send, Shift+Enter for a line break.
 
 "New conversation" at the top of the chat pane archives the current chat and starts blank. The script stays as it is. This button is unavailable while a build or AI turn runs.
 
+The **Skills** menu inserts a built-in command into the draft. Start a message or
+spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
+to that turn; active skills are shown beside the menu. See the
+[printing skill guide](../guides/3d-printing.md).
+
 ## Spatial comments
 
 Click on geometry to open a comment overlay anchored to the selection. Type what you want changed and press Enter (Escape to cancel). While the overlay is open, clicking more geometry adds anchors — one comment can point at several elements.

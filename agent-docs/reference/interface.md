@@ -103,6 +103,11 @@ Context occupancy shown in the chat, including reserved reference-image budget, 
 
 Source: `crates/cadmark-ui/src/chat.rs:1–9`.
 
+The **Skills** menu inserts a built-in command into the draft. Start a message or
+spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
+to that turn; active skills are shown beside the menu. See the
+[printing skill guide](../guides/3d-printing.md).
+
 ## Spatial comments
 
 Click geometry to open the comment overlay near the selection point. Type free text and press Enter to submit; Escape cancels. Clicking more geometry while the overlay is open adds anchors — one comment can reference several elements.
