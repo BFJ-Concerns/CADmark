@@ -60,6 +60,8 @@ The chat pane is where you talk to the AI. Messages are distinguished by positio
 - Your messages lean right.
 - Spatial comments carry accent-tinted chips naming each anchor's element and source line.
 - The AI's replies stream in as the turn progresses.
+
+Every turn sends the AI the part's script as it stands on disk, whatever the conversation holds: a reopened project, a new conversation, or a condensed chat all start from the real file. When the file differs from the last script the AI ran, because a value was changed in the parameters panel or a design step was undone, the AI is told so and which parameter values changed, so it keeps them.
 - Tool calls appear as a collapsed group you can expand to see each call's input and result.
 - Notices from CADmark itself are quiet, or red when something failed.
 
