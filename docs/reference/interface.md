@@ -16,7 +16,7 @@ A CADmark project is just a folder. Inside it, each part is a build123d Python s
 
 The toolbar shows the open project and part. The part menu lists every part in the folder and offers "New part". A new part is called "Untitled" until you save it for the first time (`Ctrl+S`), which asks for a name — that name becomes the file name.
 
-From the project menu you can open another folder (`Ctrl+O`), switch to a recent project, open the script in your system editor, or show the folder in a file manager. "New conversation" archives the current chat and starts blank — the script stays as it is.
+From the project menu you can open another folder (`Ctrl+O`), switch to a recent project, open the script in your system editor, or show the folder in a file manager.
 
 ## The viewport
 
@@ -31,7 +31,7 @@ The world is Z-up, matching build123d's coordinate system.
 
 ## Selecting geometry
 
-Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges are drawn at a clickable width and every vertex gets a marker; both hold their size on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. To select a whole part in a multi-part model, click "Pick part" in the toolbar first.
+Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. To select a whole part in a multi-part model, click "Pick part" in the toolbar first.
 
 The **Select** menu in the toolbar turns each kind of click target on or off. Three checkboxes — "Faces", "Edges", "Vertices" — start all on. Disabling a kind makes clicks pass through it to whatever is behind. The filter does not affect whole-part picks or sketch element picks.
 
@@ -62,6 +62,8 @@ The chat pane is where you talk to the AI. Messages are distinguished by positio
 While a turn is running, the pane shows which step the AI is on, how long it has been at it, and a Cancel button. The context-occupancy bar shows how much of the configured context window is in use, including any reference images.
 
 Type with Enter to send, Shift+Enter for a line break.
+
+"New conversation" at the top of the chat pane archives the current chat and starts blank. The script stays as it is. This button is unavailable while a build or AI turn runs.
 
 ## Spatial comments
 

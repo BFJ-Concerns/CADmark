@@ -1,7 +1,6 @@
 // Screen-space sizing shared by every pass that draws or picks an edge or
 // a vertex marker. Both the visible pass and the picking pass expand their
-// geometry through these functions from the same `MarkerExtent`, so a
-// marker cannot be drawn at one size and picked at another.
+// geometry through these functions with separate visible and hit extents.
 
 // Mirror of the Rust `MarkerExtent` in `markers.rs`: marker half-extents
 // in clip space, per axis.
@@ -58,9 +57,7 @@ fn expand_marker(clip: vec4<f32>, corner: vec2<f32>, extent: MarkerExtent) -> ve
     return vec4<f32>(clip.xy + offset * clip.w, clip.z, clip.w);
 }
 
-// Whether a fragment of that quad is inside the marker's disc. The visible
-// pass and the picking pass both ask, so the disc a user aims at is the
-// disc that answers.
+// Hard boundary of the picking disc. Visible discs use smooth coverage.
 fn marker_covers(corner: vec2<f32>) -> bool {
     return length(corner) <= 1.0;
 }

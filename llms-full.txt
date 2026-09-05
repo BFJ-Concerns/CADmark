@@ -129,7 +129,7 @@ A project is a folder. A folder holds any number of parts as Python scripts. The
 
 A new part is "Untitled" until its first save (`Ctrl+S`), which asks for a name that becomes the file name. After naming, the same shortcut records a named version.
 
-Window title carries the project folder name. The project menu shows the folder path, offers "Open project folder" (`Ctrl+O`), "New conversation", "Open recent", opening the script in an external editor, and showing the folder in the file manager.
+Window title carries the project folder name. The project menu shows the folder path, offers "Open project folder" (`Ctrl+O`), "Open recent", opening the script in an external editor, and showing the folder in the file manager.
 
 Source: `crates/cadmark-ui/src/toolbar.rs:139–322`.
 
@@ -150,7 +150,7 @@ Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/s
 
 ## Selection
 
-Clicking geometry selects it: faces, edges, vertices. Edges are drawn at a clickable screen-space width and every vertex gets a marker; both hold their size on screen at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
+Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
 
 Sketch elements are selectable when the design has reached only a sketch: curves, corners, and regions draw face-on to the sketch's plane in orthographic view, with any existing solid ghosted behind them.
 
@@ -270,7 +270,7 @@ Every accepted edit is recorded as a design step. Steps record which part they c
 - Redo: `Ctrl+Shift+Z` / toolbar button
 - Jump to step: click in the History menu (newest first, current marked)
 - Name a version: `Ctrl+S` / "Name this version" in the History menu
-- "New conversation" archives the chat and starts a blank one; the script is unchanged
+- "New conversation" at the top of the chat pane archives the chat and starts a blank one; the script is unchanged. It is disabled while a build or AI turn runs.
 
 Named versions are highlighted in the history menu. Undo and redo tooltips describe what they will restore.
 

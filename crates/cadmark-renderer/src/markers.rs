@@ -1,15 +1,9 @@
-// How wide an edge is drawn and how large a vertex marker is — in screen
-// pixels, so both hold their size at any camera distance.
-//
-// One `MarkerSizing` feeds every pass. The visible passes and the picking
-// passes read their widths from `MarkerExtent`, which is a field of both
-// uniform structs and is produced only by `MarkerSizing::extent`: a pass
-// drawn wider than it picks, or picking wider than it draws, would need
-// the shared value to be split first.
+// Screen-space marker dimensions, shared by the geometry expansion code.
+// Visible strokes stay fine while picking uses a more generous target.
 
 use bytemuck::{Pod, Zeroable};
 
-/// Marker sizes in logical screen pixels.
+/// Marker sizes in physical screen pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarkerSizing {
     /// Half the width of a drawn edge, so an edge is twice this wide.
@@ -20,16 +14,22 @@ pub struct MarkerSizing {
 
 impl Default for MarkerSizing {
     fn default() -> Self {
-        // A six-pixel edge and an eleven-pixel vertex disc: wide enough to
-        // aim at with a mouse without burying small features.
         Self {
-            edge_half_width_px: 3.0,
-            vertex_radius_px: 5.5,
+            edge_half_width_px: 1.5,
+            vertex_radius_px: 2.5,
         }
     }
 }
 
 impl MarkerSizing {
+    /// A six-pixel edge target and an eleven-pixel vertex target.
+    pub fn picking() -> Self {
+        Self {
+            edge_half_width_px: 3.0,
+            vertex_radius_px: 5.5,
+        }
+    }
+
     /// The same sizes as clip-space half-extents for a viewport of
     /// `width` by `height` physical pixels. Normalised device coordinates
     /// span 2 across the viewport, so one pixel is `2 / size` of it.

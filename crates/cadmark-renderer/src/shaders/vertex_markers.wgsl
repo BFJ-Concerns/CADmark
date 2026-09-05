@@ -83,7 +83,7 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) vertex_id: f32,
-    @location(1) corner: vec2<f32>,
+    @location(1) @interpolate(linear) corner: vec2<f32>,
     // The marker's own vertex, not the expanded corner: a marker is
     // clipped away with the vertex it stands for, as a whole.
     @location(2) world_pos: vec3<f32>,
@@ -102,28 +102,28 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if !section_keeps(uniforms.section_plane, in.world_pos) {
-        discard;
-    }
-    if !marker_covers(in.corner) {
+    let distance = length(in.corner);
+    let pixel_width = max(length(vec2<f32>(dpdx(distance), dpdy(distance))), 1e-6);
+    let coverage = clamp((1.0 - distance) / pixel_width, 0.0, 1.0);
+    if coverage == 0.0 || !section_keeps(uniforms.section_plane, in.world_pos) {
         discard;
     }
     let ghost = clamp(uniforms.ghost, 0.0, 1.0);
     let vid = u32(in.vertex_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if vid == markers[index].element_id && vid != 0u {
-            return vec4<f32>(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), 1.0);
+            return vec4<f32>(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), coverage);
         }
     }
     if vid == uniforms.selected_id && uniforms.selected_id != 0u {
-        return vec4<f32>(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), 1.0);
+        return vec4<f32>(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), coverage);
     }
     if vid == uniforms.hover_id && uniforms.hover_id != 0u {
-        return vec4<f32>(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), 1.0);
+        return vec4<f32>(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), coverage);
     }
     if in_highlight(vid) {
-        return vec4<f32>(uniforms.hover_colour.rgb, 1.0);
+        return vec4<f32>(uniforms.hover_colour.rgb, coverage);
     }
     // Dark discs, already display-encoded, matching the wireframe.
-    return vec4<f32>(mix(vec3<f32>(0.10, 0.10, 0.12), GHOST_COLOUR, ghost), 1.0);
+    return vec4<f32>(mix(vec3<f32>(0.10, 0.10, 0.12), GHOST_COLOUR, ghost), coverage);
 }

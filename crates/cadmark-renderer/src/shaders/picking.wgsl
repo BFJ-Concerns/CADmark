@@ -3,8 +3,7 @@
 //
 // The marker sizing comes from the shared snippet prepended at pipeline
 // creation, and the edge and vertex-marker geometry is expanded through
-// the same functions the visible passes use: an element picks at exactly
-// the width it is drawn.
+// the same functions the visible passes use, with wider hit targets.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,

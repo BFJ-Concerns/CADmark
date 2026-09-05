@@ -14,6 +14,7 @@ pub mod part_name_dialog;
 pub mod settings_dialog;
 pub mod start_view;
 pub mod status;
+mod text_input;
 pub mod theme;
 pub mod toolbar;
 pub mod version_dialog;

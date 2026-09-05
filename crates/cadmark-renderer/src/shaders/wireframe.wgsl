@@ -4,7 +4,7 @@
 //
 // The marker expansion comes from the shared snippet prepended at
 // pipeline creation. The picking pass expands the same buffer through the
-// same function, so what is drawn is what picks.
+// same function with a wider hit target.
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -90,6 +90,9 @@ struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) edge_id: f32,
     @location(1) world_pos: vec3<f32>,
+    // Screen-linear coordinates in units of the expanded half-width.
+    @location(2) @interpolate(linear) stroke: vec2<f32>,
+    @location(3) @interpolate(flat) segment_length: f32,
 }
 
 @vertex
@@ -98,6 +101,11 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let here = uniforms.view_proj * vec4<f32>(in.position, 1.0);
     let other = uniforms.view_proj * vec4<f32>(in.other, 1.0);
     out.clip_pos = expand_edge(here, other, in.side, in.cap, in.end_sign, uniforms.marker_size);
+    let k = max(uniforms.marker_size.edge_half_width_ndc, vec2<f32>(1e-9));
+    let a = here.xy / max(abs(here.w), 1e-6);
+    let b = other.xy / max(abs(other.w), 1e-6);
+    out.segment_length = length((b - a) / k);
+    out.stroke = vec2<f32>(in.side, select(out.segment_length - in.cap, in.cap, in.end_sign > 0.0));
     out.edge_id = in.edge_id;
     out.world_pos = in.position;
     return out;
@@ -105,25 +113,31 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    if !section_keeps(uniforms.section_plane, in.world_pos) {
+    // A capsule with a one-pixel coverage fringe, evaluated before any
+    // discard so derivatives remain defined across neighbouring fragments.
+    let beyond_end = max(max(-in.stroke.y, in.stroke.y - in.segment_length), 0.0);
+    let distance = length(vec2<f32>(in.stroke.x, beyond_end));
+    let pixel_width = max(length(vec2<f32>(dpdx(distance), dpdy(distance))), 1e-6);
+    let coverage = clamp((1.0 - distance) / pixel_width, 0.0, 1.0);
+    if coverage == 0.0 || !section_keeps(uniforms.section_plane, in.world_pos) {
         discard;
     }
     let ghost = clamp(uniforms.ghost, 0.0, 1.0);
     let eid = u32(in.edge_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if eid == markers[index].element_id && eid != 0u {
-            return vec4<f32>(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), 1.0);
+            return vec4<f32>(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), coverage);
         }
     }
     if eid == uniforms.selected_id && uniforms.selected_id != 0u {
-        return vec4<f32>(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), 1.0);
+        return vec4<f32>(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), coverage);
     }
     if eid == uniforms.hover_id && uniforms.hover_id != 0u {
-        return vec4<f32>(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), 1.0);
+        return vec4<f32>(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), coverage);
     }
     if in_highlight(eid) {
-        return vec4<f32>(uniforms.hover_colour.rgb, 1.0);
+        return vec4<f32>(uniforms.hover_colour.rgb, coverage);
     }
     // Dark edges, already display-encoded.
-    return vec4<f32>(mix(vec3<f32>(0.10, 0.10, 0.12), GHOST_COLOUR, ghost), 1.0);
+    return vec4<f32>(mix(vec3<f32>(0.10, 0.10, 0.12), GHOST_COLOUR, ghost), coverage);
 }
