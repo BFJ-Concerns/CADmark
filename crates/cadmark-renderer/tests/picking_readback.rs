@@ -418,7 +418,6 @@ fn a_marker_on_a_clipped_vertex_is_neither_drawn_nor_pickable(gpu: &Gpu) {
     );
 }
 
-/// One named check and the function that runs it.
 /// Read the visible scene through the same pass used by the viewport.
 fn draw_scene(
     gpu: &Gpu,
@@ -426,8 +425,23 @@ fn draw_scene(
     mesh: &TessellatedMesh,
     vertices: &[[f32; 3]],
 ) -> Vec<u8> {
-    let pipelines =
-        RenderPipelines::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, WIDTH, HEIGHT);
+    draw_scene_format(
+        gpu,
+        renderer,
+        mesh,
+        vertices,
+        wgpu::TextureFormat::Rgba8Unorm,
+    )
+}
+
+fn draw_scene_format(
+    gpu: &Gpu,
+    renderer: &Renderer,
+    mesh: &TessellatedMesh,
+    vertices: &[[f32; 3]],
+    format: wgpu::TextureFormat,
+) -> Vec<u8> {
+    let pipelines = RenderPipelines::new(&gpu.device, format, WIDTH, HEIGHT);
     let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("visible_marker_readback"),
         size: wgpu::Extent3d {
@@ -438,7 +452,7 @@ fn draw_scene(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
@@ -448,10 +462,12 @@ fn draw_scene(
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
+    let mut uniforms = renderer.mesh_uniforms((WIDTH, HEIGHT));
+    uniforms.encode_srgb = u32::from(!format.is_srgb());
     gpu.queue.write_buffer(
         &pipelines.mesh_uniform_buffer,
         0,
-        bytemuck::bytes_of(&renderer.mesh_uniforms((WIDTH, HEIGHT))),
+        bytemuck::bytes_of(&uniforms),
     );
     let mesh = upload_mesh(&gpu.device, mesh, PartId(0), vertices);
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
@@ -544,35 +560,41 @@ fn diagonal_edges_and_discs_have_a_smooth_coverage_fringe(gpu: &Gpu) {
         vertex.position[0] += 100.0;
     }
     mesh.edges[0].points = vec![[-2.0, 0.0, -0.5], [2.0, 0.0, 0.3]];
-    for (with_edge, with_vertex) in [(true, false), (false, true)] {
-        let mut input = mesh.clone();
-        if !with_edge {
-            input.edges.clear();
+    for format in [
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    ] {
+        for (with_edge, with_vertex) in [(true, false), (false, true)] {
+            let mut input = mesh.clone();
+            if !with_edge {
+                input.edges.clear();
+            }
+            let image = draw_scene_format(
+                gpu,
+                &renderer,
+                &input,
+                if with_vertex { &vertices } else { &[] },
+                format,
+            );
+            let dark = image
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[0] <= 30)
+                .count();
+            let fringe = image
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|pixel| pixel[0] > 30 && pixel[0] < 250)
+                .count();
+            assert!(dark > 0, "the marker needs a solid centre");
+            assert!(
+                fringe > 4,
+                "the boundary must blend rather than switch abruptly: {fringe} pixels"
+            );
+            assert!(image.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
         }
-        let image = draw_scene(
-            gpu,
-            &renderer,
-            &input,
-            if with_vertex { &vertices } else { &[] },
-        );
-        let dark = image
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|pixel| pixel[0] <= 30)
-            .count();
-        let fringe = image
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|pixel| pixel[0] > 30 && pixel[0] < 250)
-            .count();
-        assert!(dark > 0, "the marker needs a solid centre");
-        assert!(
-            fringe > 4,
-            "the boundary must blend rather than switch abruptly: {fringe} pixels"
-        );
-        assert!(image.as_chunks::<4>().0.iter().all(|pixel| pixel[3] == 255));
     }
 }
 
@@ -612,35 +634,106 @@ fn an_edge_on_a_sloping_face_has_no_depth_gaps(gpu: &Gpu) {
 }
 
 fn surface_markers_keep_their_full_picking_area(gpu: &Gpu) {
-    let renderer = front_facing_renderer(0);
-    let view_proj = renderer.simple_uniforms((WIDTH, HEIGHT)).view_proj;
-    let (mut mesh, _) = scene(view_proj);
-    // The line has constant depth. Only the underlying face slopes:
-    // an offset based on the line's own depth gradient cannot cover this.
-    for vertex in &mut mesh.vertices {
-        vertex.position[1] = 0.6 * vertex.position[2];
+    for framed in [false, true] {
+        for projection in [
+            cadmark_renderer::camera::Projection::Perspective,
+            cadmark_renderer::camera::Projection::Orthographic,
+        ] {
+            let mut renderer = front_facing_renderer(0);
+            if framed {
+                renderer.camera.frame_bounds(
+                    cadmark_renderer::camera::Bounds3 {
+                        min: [-2.0; 3],
+                        max: [2.0; 3],
+                    },
+                    WIDTH as f32 / HEIGHT as f32,
+                );
+            }
+            renderer.camera.set_projection(projection);
+            for (slope, vertex) in [(0.6, [0.0, 0.6, 1.0]), (2.5, [1.0, 0.0, 0.0])] {
+                let view_proj = renderer.simple_uniforms((WIDTH, HEIGHT)).view_proj;
+                let (mut mesh, _) = scene(view_proj);
+                // The line has constant depth. Only the underlying face slopes:
+                // an offset based on the line's own depth gradient cannot cover this.
+                for vertex in &mut mesh.vertices {
+                    vertex.position[1] = slope * vertex.position[2];
+                }
+                mesh.edges[0].points = vec![[-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+                for (point, offsets, expected) in [
+                    (
+                        [0.0, 0.0, 0.0],
+                        [-2.0, 2.0],
+                        TopologyElement::Edge(EdgeId(EDGE_ID)),
+                    ),
+                    (vertex, [-4.0, 4.0], TopologyElement::Vertex(VertexId(0))),
+                ] {
+                    for offset in offsets {
+                        assert_eq!(
+                            pick_at_in(
+                                gpu,
+                                &renderer,
+                                SelectionFilter::default(),
+                                pixels_below(view_proj, point, offset),
+                                |_| vec![(mesh.clone(), vec![vertex])]
+                            ),
+                            Some(expected.clone()),
+                            "surface clips the target at offset {offset}"
+                        );
+                    }
+                }
+            }
+        }
     }
-    mesh.edges[0].points = vec![[-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
-    let vertex = [0.0, 0.6, 1.0];
-    for (point, offsets, expected) in [
-        (
-            [0.0, 0.0, 0.0],
-            [-2.0, 2.0],
-            TopologyElement::Edge(EdgeId(EDGE_ID)),
-        ),
-        (vertex, [-4.0, 4.0], TopologyElement::Vertex(VertexId(0))),
-    ] {
-        for offset in offsets {
+}
+
+fn a_grazing_surface_does_not_reveal_hidden_markers(gpu: &Gpu) {
+    for framed in [false, true] {
+        for projection in [
+            cadmark_renderer::camera::Projection::Perspective,
+            cadmark_renderer::camera::Projection::Orthographic,
+        ] {
+            let mut renderer = front_facing_renderer(0);
+            if framed {
+                renderer.camera.frame_bounds(
+                    cadmark_renderer::camera::Bounds3 {
+                        min: [-2.0; 3],
+                        max: [2.0; 3],
+                    },
+                    WIDTH as f32 / HEIGHT as f32,
+                );
+            }
+            renderer.camera.set_projection(projection);
+            let view_proj = renderer.simple_uniforms((WIDTH, HEIGHT)).view_proj;
+            let (mut mesh, _) = scene(view_proj);
+            for vertex in &mut mesh.vertices {
+                vertex.position[2] *= 0.025;
+                vertex.position[1] = 20.0 * vertex.position[2];
+            }
+            let behind =
+                if project(view_proj, [0.0, 0.3, 0.0]).2 > project(view_proj, [0.0, 0.0, 0.0]).2 {
+                    0.3
+                } else {
+                    -0.3
+                };
+            mesh.edges[0].points = vec![[-1.0, behind, 0.0], [1.0, behind, 0.0]];
+            let vertex = [0.0, behind, 0.0];
+            let image = draw_scene(gpu, &renderer, &mesh, &[vertex]);
+            let mut plain = mesh.clone();
+            plain.edges.clear();
+            let background = draw_scene(gpu, &renderer, &plain, &[]);
+            let pixel = pixels_below(view_proj, vertex, 0.0);
+            let index = ((pixel.1 * WIDTH + pixel.0) * 4) as usize;
             assert_eq!(
-                pick_at_in(
-                    gpu,
-                    &renderer,
-                    SelectionFilter::default(),
-                    pixels_below(view_proj, point, offset),
-                    |_| vec![(mesh.clone(), vec![vertex])]
-                ),
-                Some(expected.clone()),
-                "surface clips the target at offset {offset}"
+                &image[index..index + 4],
+                &background[index..index + 4],
+                "hidden markers show through a grazing face"
+            );
+            assert_eq!(
+                pick_at_in(gpu, &renderer, SelectionFilter::default(), pixel, |_| vec![
+                    (mesh.clone(), vec![vertex])
+                ]),
+                Some(TopologyElement::Face(FaceId(0))),
+                "a grazing face must occlude hidden markers"
             );
         }
     }
@@ -658,11 +751,15 @@ fn main() {
 
     let gpu = software_adapter();
     println!(
-        "\nrunning 11 tests on software adapter: {}",
+        "\nrunning 12 tests on software adapter: {}",
         gpu.adapter_name
     );
 
-    let checks: [Check; 11] = [
+    let checks: [Check; 12] = [
+        (
+            "a_grazing_surface_does_not_reveal_hidden_markers",
+            a_grazing_surface_does_not_reveal_hidden_markers,
+        ),
         (
             "surface_markers_keep_their_full_picking_area",
             surface_markers_keep_their_full_picking_area,

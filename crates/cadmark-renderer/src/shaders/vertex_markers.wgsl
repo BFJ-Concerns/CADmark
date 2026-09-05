@@ -42,8 +42,8 @@ fn section_keeps(section_plane: vec4<f32>, world_pos: vec3<f32>) -> bool {
 }
 
 // What a ghosted solid's markers fade towards — the viewport background,
-// display-encoded like the rest of this shader's output.
-const GHOST_COLOUR: vec3<f32> = vec3<f32>(0.157, 0.165, 0.188);
+// in linear colour like the shared highlight uniforms.
+const GHOST_COLOUR: vec3<f32> = vec3<f32>(0.021, 0.023, 0.030);
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
@@ -112,18 +112,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let vid = u32(in.vertex_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if vid == markers[index].element_id && vid != 0u {
-            return vec4<f32>(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), coverage);
+            return marker_colour(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), coverage, uniforms.encode_srgb);
         }
     }
     if vid == uniforms.selected_id && uniforms.selected_id != 0u {
-        return vec4<f32>(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), coverage);
+        return marker_colour(mix(uniforms.selected_colour.rgb, GHOST_COLOUR, ghost), coverage, uniforms.encode_srgb);
     }
     if vid == uniforms.hover_id && uniforms.hover_id != 0u {
-        return vec4<f32>(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), coverage);
+        return marker_colour(mix(uniforms.hover_colour.rgb, GHOST_COLOUR, ghost), coverage, uniforms.encode_srgb);
     }
     if in_highlight(vid) {
-        return vec4<f32>(uniforms.hover_colour.rgb, coverage);
+        return marker_colour(uniforms.hover_colour.rgb, coverage, uniforms.encode_srgb);
     }
-    // Dark discs, already display-encoded, matching the wireframe.
-    return vec4<f32>(mix(vec3<f32>(0.10, 0.10, 0.12), GHOST_COLOUR, ghost), coverage);
+    // Dark discs in linear colour, matching the wireframe.
+    return marker_colour(mix(vec3<f32>(0.010023, 0.010023, 0.013412), GHOST_COLOUR, ghost), coverage, uniforms.encode_srgb);
 }

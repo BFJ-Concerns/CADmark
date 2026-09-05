@@ -1791,6 +1791,7 @@ impl CadmarkApp {
                                 egui::Button::new("New conversation"),
                             )
                             .on_hover_text("Archive this chat and start a blank one")
+                            .on_disabled_hover_text("Wait for the build or AI turn to finish")
                             .clicked();
                     });
                 });

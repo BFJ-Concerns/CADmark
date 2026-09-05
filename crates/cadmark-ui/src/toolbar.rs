@@ -154,7 +154,6 @@ pub enum ToolbarAction {
     NewPart,
     /// Open another part of the open project, by file name.
     OpenPart(String),
-    /// Archive the current chat and begin a blank conversation.
     /// Open one of the recently used project folders.
     OpenRecent(std::path::PathBuf),
     /// Show the project folder in the system file manager.

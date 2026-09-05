@@ -172,7 +172,17 @@ const MARKERS_COMMON_WGSL: &str = include_str!("shaders/markers_common.wgsl");
 
 /// A shader's full source: the shared marker snippet, then its own body.
 fn shader_source(body: &str) -> String {
-    format!("{MARKERS_COMMON_WGSL}\n{body}")
+    let reach = |sizing: MarkerSizing| {
+        sizing
+            .edge_half_width_px
+            .max(sizing.vertex_radius_px)
+            .ceil()
+    };
+    format!(
+        "const VISIBLE_MARKER_REACH: f32 = {:.1};\nconst PICKING_MARKER_REACH: f32 = {:.1};\n{MARKERS_COMMON_WGSL}\n{body}",
+        reach(MarkerSizing::default()),
+        reach(MarkerSizing::picking()),
+    )
 }
 
 /// Vertex layout for an edge segment's expanded quad, shared by the
@@ -308,7 +318,7 @@ impl RenderPipelines {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &mesh_shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some("fs_surface"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -326,7 +336,7 @@ impl RenderPipelines {
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: Default::default(),
-                bias: marker_depth_bias(MarkerSizing::default()),
+                bias: Default::default(),
             }),
             multisample: Default::default(),
             multiview: None,
@@ -477,14 +487,14 @@ impl RenderPipelines {
             &picking_pipeline_layout,
             &picking_shader,
             "topology_depth_pipeline",
-            Default::default(),
+            None,
         );
         let marker_depth_pipeline = self::topology_depth_pipeline(
             device,
             &picking_pipeline_layout,
             &picking_shader,
             "marker_depth_pipeline",
-            marker_depth_bias(MarkerSizing::picking()),
+            Some("fs_marker_depth"),
         );
 
         let edge_picking_pipeline =
@@ -948,26 +958,12 @@ impl RenderPipelines {
     }
 }
 
-/// Offset surface depth by the screen-space reach of its overlay. Surface
-/// slope matters here: an edge or vertex can have constant depth while
-/// the face under its expanded target slopes towards the camera.
-fn marker_depth_bias(sizing: MarkerSizing) -> wgpu::DepthBiasState {
-    wgpu::DepthBiasState {
-        constant: 2,
-        slope_scale: sizing
-            .edge_half_width_px
-            .max(sizing.vertex_radius_px)
-            .ceil(),
-        clamp: 0.0,
-    }
-}
-
 fn topology_depth_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     label: &str,
-    bias: wgpu::DepthBiasState,
+    fragment_entry: Option<&str>,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -985,7 +981,12 @@ fn topology_depth_pipeline(
             }],
             compilation_options: Default::default(),
         },
-        fragment: None,
+        fragment: fragment_entry.map(|entry| wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(entry),
+            targets: &[],
+            compilation_options: Default::default(),
+        }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
             cull_mode: None,
@@ -996,7 +997,7 @@ fn topology_depth_pipeline(
             depth_write_enabled: true,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: Default::default(),
-            bias,
+            bias: Default::default(),
         }),
         multisample: Default::default(),
         multiview: None,

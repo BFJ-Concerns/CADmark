@@ -148,3 +148,12 @@ fn fs_marker(in: MarkerVertexOutput) -> @location(0) vec4<u32> {
     }
     return encode_id(u32(in.vertex_id + 0.5));
 }
+
+@fragment
+fn fs_marker_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
+    let depth = marker_surface_depth(in.clip_pos.z, PICKING_MARKER_REACH, uniforms.marker_size, uniforms.view_proj);
+    if !section_keeps(uniforms.section_plane, in.world_pos) {
+        discard;
+    }
+    return depth;
+}

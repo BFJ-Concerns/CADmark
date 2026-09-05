@@ -33,9 +33,9 @@ The world is Z-up, matching build123d's coordinate system.
 
 Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. To select a whole part in a multi-part model, click "Pick part" in the toolbar first.
 
-The **Select** menu in the toolbar turns each kind of click target on or off. Three checkboxes — "Faces", "Edges", "Vertices" — start all on. Disabling a kind makes clicks pass through it to whatever is behind. The filter does not affect whole-part picks or sketch element picks.
+The **Select** menu in the toolbar turns each kind of click target on or off. Three checkboxes — "Faces", "Edges", "Vertices" — start all on. Disabling a kind makes clicks pass through it to whatever is behind. The filter does not affect whole-part picks.
 
-When a design has reached only a sketch (no solid yet), sketch curves, corners, and regions are selectable. The view switches to face the sketch plane in orthographic projection, and any existing solid is ghosted behind it.
+When a design contains only a sketch, the view switches to face its plane in orthographic projection, and any existing solid is ghosted behind it. Sketch curves, corners and filled regions are displayed, but cannot yet be selected in the viewport.
 
 ## Standard views and projection
 

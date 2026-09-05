@@ -2199,6 +2199,85 @@ with BuildPart() as part:
     }
 
     #[test]
+    fn shared_topological_edges_are_drawn_once() {
+        let (_scratch, result) =
+            run("from build123d import *\nwith BuildPart() as part:\n    Box(10, 20, 30)\n");
+        let mesh = result.unwrap().mesh;
+        let ids: std::collections::BTreeSet<_> =
+            mesh.edges.iter().map(|edge| edge.edge_id).collect();
+        assert_eq!(ids.len(), 12);
+        assert_eq!(
+            ids.len(),
+            mesh.edges.len(),
+            "duplicate strokes darken the antialiasing fringe"
+        );
+    }
+
+    #[test]
+    fn display_curves_and_surfaces_stay_smooth_across_model_scales() {
+        for radius in [0.1_f32, 10.0, 1000.0] {
+            let (_scratch, result) = run(&format!(
+                "from build123d import *\nwith BuildPart() as part:\n    Cylinder({radius}, {})\n",
+                radius * 2.0
+            ));
+            let mesh = result.unwrap().mesh;
+            let mut curved_segments = 0;
+            for edge in &mesh.edges {
+                for pair in edge.points.windows(2) {
+                    if (pair[0][2] - pair[1][2]).abs() > radius * 1e-4 {
+                        continue;
+                    }
+                    curved_segments += 1;
+                    let midpoint = [
+                        (pair[0][0] + pair[1][0]) * 0.5,
+                        (pair[0][1] + pair[1][1]) * 0.5,
+                    ];
+                    let sag = radius - midpoint[0].hypot(midpoint[1]);
+                    assert!(
+                        sag <= radius * 0.00022,
+                        "edge chord error {sag} at radius {radius}"
+                    );
+                }
+            }
+            assert!(curved_segments > 100);
+            for triangle in mesh.indices.as_chunks::<3>().0 {
+                for index in 0..3 {
+                    let a = mesh.vertices[triangle[index] as usize];
+                    let b = mesh.vertices[triangle[(index + 1) % 3] as usize];
+                    if a.normal[2].abs() > 0.1 || b.normal[2].abs() > 0.1 {
+                        continue;
+                    }
+                    let midpoint = [
+                        (a.position[0] + b.position[0]) * 0.5,
+                        (a.position[1] + b.position[1]) * 0.5,
+                    ];
+                    let sag = radius - midpoint[0].hypot(midpoint[1]);
+                    assert!(
+                        sag <= radius * 0.00022,
+                        "surface chord error {sag} at radius {radius}"
+                    );
+                }
+            }
+            let sketch = sketch_of(&format!(
+                "from build123d import *\nwith BuildSketch() as sketch:\n    Circle({radius})\n"
+            ));
+            for curve in sketch.curves {
+                for pair in curve.points.windows(2) {
+                    let midpoint = [
+                        (pair[0][0] + pair[1][0]) * 0.5,
+                        (pair[0][1] + pair[1][1]) * 0.5,
+                    ];
+                    let sag = radius - midpoint[0].hypot(midpoint[1]);
+                    assert!(
+                        sag <= radius * 0.00022,
+                        "sketch chord error {sag} at radius {radius}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn tessellation_carries_outward_surface_normals() {
         let (_scratch, result) = run(r#"from build123d import *
 

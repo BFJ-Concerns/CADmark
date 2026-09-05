@@ -161,12 +161,14 @@ pub fn render_picking(
     // IDs are rendered afterwards, but hidden geometry must still lose to a
     // different part in front of it. This pass has no colour attachment: it
     // must not manufacture IDs for non-active parts.
-    render_topology_depth(
-        encoder,
-        pipelines,
-        all_meshes,
-        &pipelines.topology_depth_pipeline,
-    );
+    if filter.faces {
+        render_topology_depth(
+            encoder,
+            pipelines,
+            all_meshes,
+            &pipelines.topology_depth_pipeline,
+        );
+    }
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("picking_pass"),
