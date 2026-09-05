@@ -59,13 +59,15 @@ The filter does not affect whole-part picks.
 
 Source: `crates/cadmark-ui/src/toolbar.rs` (menu UI), `crates/cadmark-renderer/src/picking.rs:38–63` (`SelectionFilter`), `crates/cadmark-renderer/src/shaders/vertex_markers.wgsl:105–109` (section discard).
 
-## Standard views and projection
+## View cube
 
-Seven standard views: Front, Back, Left, Right, Top, Bottom, Isometric. Available from the "View" menu in the toolbar.
+A labelled cube in the viewport's top-right corner, drawn only when geometry is loaded. It turns with the camera. Each visible face is divided into nine click regions: the centre looks square at that face (six axis views), an edge strip looks from the 45° between two faces (twelve views), a corner looks from the three-way diagonal (eight isometric views). Hovered regions highlight on every face sharing them; a tooltip names the view ("Look from the front-top-right"). Primary drag on the cube orbits. Two curved arrows in the canvas's top corners, shown on hover, roll the view ±90° about the line of sight; any snap to a named view resets the roll to zero.
 
-Two projection modes: Perspective (default) and Orthographic. Toggled via the View menu ("Switch to Perspective/Orthographic") or the `P` key.
+A row of small buttons beneath: "Fit" (frames the model; `F`), the projection toggle labelled with the current mode, "Persp" or "Ortho" (`P`), and "XYZ" (toggles an axis triad in the canvas's bottom-left; off by default, persisted in user settings as `show_axes`).
 
-Source: `crates/cadmark-renderer/src/camera.rs:22–37`, `crates/cadmark-ui/src/toolbar.rs`.
+The camera's orbit distance ranges from 0.001 to 10,000,000 units. Clip planes are derived per frame from the framed model's bounding sphere and the eye position, so the model is never cut by the near or far plane; the near plane stays at least 1/10,000 of the far plane for depth precision.
+
+Source: `crates/cadmark-ui/src/view_cube.rs` (cube, regions, arrows, triad), `crates/cadmark-renderer/src/camera.rs` (`roll_quarter_turn`, `clip_planes`), `crates/cadmark-app/src/app.rs` (`apply_view_action`).
 
 ## Section plane
 
