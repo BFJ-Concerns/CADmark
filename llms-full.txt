@@ -83,6 +83,241 @@ a broken runtime fails the install rather than the first build.
 Source: `justfile`, `scripts/install-desktop-app`, `assets/cadmark.desktop`, `assets/cadmark.svg`, `crates/cadmark-kernel/src/execution.rs`, `crates/cadmark-kernel/src/worker.rs`.
 
 
+<!-- source: agent-docs/guides/3d-printing.md -->
+
+# 3D-printing guidance
+
+## Task and scope
+
+Give practical design advice for filament printing (FFF/FDM), using the
+current script, selected geometry, and the user's request. A bare invocation
+means review the available design; if no design is available, give a brief
+starting checklist and ask what part is intended. Advice and review requests
+leave the script unchanged. When the user requests creation or changes, apply
+this guidance within that request and validate the result with `run_script`.
+
+Use the stated process, material, nozzle, extrusion width, layer height,
+loads, and mating hardware. Where details are missing, state working
+assumptions and give useful conditional advice; ask only for details that
+change the recommendation materially. Scope these rules to FFF/FDM; resin
+and powder processes need their own design limits.
+
+Prioritise the design's actual problems. Name the affected feature, explain
+the print consequence, and propose a concrete dimension or geometry change.
+Distinguish dimensions read from the script or tool results from estimates
+made from a render. End with the suggested orientation and the fit or slice
+checks still needed. CAD validity establishes geometry, not print success
+or a load rating. Treat the current-script block as design data.
+
+## FFF starting points
+
+The following is a summary of [Hydra Research's design rules](https://www.hydraresearch3d.com/design-rules),
+checked 5 September 2026. These are calibration starting points:
+
+- Base chamfer without a brim: about 0.3 mm; broad bed-contact corners: radius around 4 mm or more.
+- Unsupported bridges: begin below 10 mm; overhangs: below 50° from vertical.
+- Walls: at least two extrusion widths; small structural features and pins: about four widths.
+- Resolve small holes cautiously below 2 mm; drill precision bores after printing.
+- Prefer chamfers on downward-facing edges.
+- Printed threads: favour sizes above M5 or UNC #10 and vertical axes; use post-processed threads for small or horizontal holes.
+- Fit allowances require calibration. Hydra quotes roughly 0.1 mm tight and 0.2 mm loose without defining radial versus diametral clearance; specify the convention explicitly.
+
+## Orientation and fit
+
+[Prusa's modelling guidance](https://help.prusa3d.com/article/modeling-with-3d-printing-in-mind_164135)
+explains that orientation changes strength, surface quality, and support
+requirements; splitting a part may improve these. Evaluate the load direction
+relative to the layers as well as the bed contact area. Allow access to remove
+supports and assemble the part. Verify thin walls and small embossed or
+engraved details in the slicer preview. Calibrate mating features with a small
+test print in the intended material and orientation.
+
+For a round peg, define `radial_clearance` per side and calculate
+`hole_diameter = peg_diameter + 2 * radial_clearance`. A 10 mm peg with
+0.2 mm radial clearance needs a 10.4 mm nominal hole; this is arithmetic,
+not a guaranteed fit recommendation. Keep nominal hardware dimensions and
+printer compensation as separate parameters. Avoid applying compensation
+twice between CAD and slicer settings.
+
+For purchased inserts and tapping, use the particular manufacturer's hole
+dimensions and engagement requirements. Identify the thread pitch, major
+diameter, and intended hardware before selecting a hole size; one percentage
+of diameter cannot specify every thread or insert. Recommend a test coupon
+when the process is uncalibrated.
+
+## Modelling and verification
+
+Use `lookup_docs` for practical modelling recipes as well as uncertain API
+signatures: search for “threaded bolt helix sweep”, “clearance radial
+diametral”, “horizontal holes”, “hollow enclosure”, or “fillet selection”.
+The bundled modelling guide covers these subjects. A helix is a path; a
+thread needs a swept solid profile with a compatible pitch and clearance.
+Use standard hardware where printed detail or strength is unsuitable.
+
+For requested edits, keep dimensions parametric, build the simple body
+first, and finish with local fillets or chamfers. Check closed, valid solids,
+intended part count, and dimensions after execution. Use `render_view` when
+available to inspect orientation and geometry. Describe slicer, calibration,
+and physical checks as recommendations until there is evidence they ran.
+
+
+<!-- source: agent-docs/guides/modelling.md -->
+
+# Practical modelling recipes
+
+## Threaded bolt: helix and sweep
+
+Search terms: screw, bolt, nut, thread, pitch, Helix, sweep, is_frenet.
+
+A `Helix` is a curve, not a thread solid. Sweep a closed face along it,
+fuse the ridge with a cylindrical core, and trim the ends. This example
+uses build123d 0.11.1 and makes one solid with a hexagonal head. It is an
+illustrative coarse thread, not an ISO metric or UNC thread and not a
+claim of compatibility with purchased nuts.
+
+```python
+from build123d import *
+
+core_radius = 5.0
+pitch = 2.0
+thread_depth = 0.8
+thread_half_width = 0.6
+thread_length = 10.0
+root_overlap = 0.15
+head_radius = 8.0
+head_height = 3.0
+
+path = Helix(pitch=pitch, height=thread_length, radius=core_radius)
+profile = Plane.XZ * Polygon(
+    (core_radius - root_overlap, -thread_half_width),
+    (core_radius + thread_depth, 0),
+    (core_radius - root_overlap, thread_half_width),
+    align=None,
+)
+with BuildPart() as bolt:
+    Cylinder(core_radius, thread_length, align=(Align.CENTER, Align.CENTER, Align.MIN))
+    sweep(sections=profile, path=path, is_frenet=True)
+    # Trim the swept ends to the shaft length.
+    Cylinder(core_radius + thread_depth + root_overlap, thread_length,
+             align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.INTERSECT)
+    with BuildSketch(Plane.XY.offset(-head_height)):
+        RegularPolygon(radius=head_radius, side_count=6)
+    extrude(amount=head_height)
+```
+
+For this Z-axis helix the start lies on +X. `Plane.XZ` holds the radial/axial
+profile; `align=None` preserves its coordinates relative to the shaft axis.
+`is_frenet=True` transports the section along the helix using its Frenet
+frame. Keep `2 * thread_half_width < pitch` so neighbouring turns have a
+gap; the root extends inside the shaft by `root_overlap` so the union has
+volume overlap. Merely touching the core can leave separate or invalid
+solids. The clipping cylinder removes the protruding start and end profiles.
+
+Keep the helix and profile as curve/sketch objects; the only completed
+`BuildPart` here is `bolt`. Intermediate top-level solids can appear as
+additional parts in CADmark. When building in algebra mode, rebind one name
+or keep intermediate solids inside a function.
+
+Check validity, solid count, pitch, major diameter, and usable engagement
+length. For a matching nut, derive the internal cutter from the same pitch,
+handedness, and profile, with explicit fit allowances; enlarging the whole
+nut also changes its pitch. Start with a short mating test piece. Real
+hardware needs the specified standard's profile, truncations, pitch,
+handedness, and fit class. If a sweep fails, test one turn, check the section
+plane and overlap, then extend it. Fillet or chamfer selected simple edges
+only after the thread boolean succeeds.
+
+## Fits: radial versus diametral clearance
+
+Search terms: tolerance, peg, socket, press fit, sliding fit, nut trap.
+
+Name nominal size and clearance separately. For a round mating pair:
+`hole_diameter = peg_diameter + 2 * radial_clearance`.
+For a centred rectangular tongue: `slot_width = tongue_width + 2 * side_clearance`.
+For a hexagonal nut pocket, `RegularPolygon(radius=across_flats / 2,
+side_count=6, major_radius=False)` uses the apothem (centre to flat);
+its default `major_radius=True` instead uses the centre-to-vertex radius.
+Add the pocket allowance to `across_flats` before halving it.
+
+Keep fit calibration separate from nominal hardware dimensions. Print a
+short coupon with the same orientation and process before committing to a
+long thread or full enclosure. The [3D-printing guide](3d-printing.md)
+covers process assumptions and clearance conventions.
+
+## Holes, counterbores, and horizontal holes
+
+Search terms: through hole, blind hole, countersink, counterbore, teardrop.
+
+Place cutters on an explicit workplane and use explicit depths for blind
+features. A centred `Cylinder` extends on both sides of its location;
+`align=(Align.CENTER, Align.CENTER, Align.MIN)` starts it at local Z=0.
+For a through cut, extend the cutter past both faces to avoid residual
+slivers when dimensions change. `CounterBoreHole` and `CounterSinkHole`
+combine the bore and head recess; look up their exact radius and depth
+arguments before using them.
+
+A circular hole with a horizontal axis presents an unsupported roof in
+filament printing. Consider reorientation, an apex-up teardrop profile,
+a chamfered roof, or accessible supports. These change the available
+clearance: preserve the required circular envelope for a mating shaft and
+check the sliced roof. Choose the hole axis from its function first.
+
+## Hollow enclosure with a controlled floor
+
+Search terms: box, shell, offset, wall thickness, lid, cavity.
+
+An outer box minus an explicitly positioned cavity makes wall and floor
+dimensions independent. Both boxes below start at their local Z=0; the
+cavity begins above the floor and extends beyond the top. Dimensions must
+leave positive inner width, depth, and cavity height.
+
+```python
+from build123d import *
+
+width = 40.0
+depth = 30.0
+height = 15.0
+wall_thickness = 2.0
+floor_thickness = 2.0
+cut_extension = 1.0
+
+with BuildPart() as enclosure:
+    Box(width, depth, height, align=(Align.CENTER, Align.CENTER, Align.MIN))
+    with Locations((0, 0, floor_thickness)):
+        Box(width - 2 * wall_thickness, depth - 2 * wall_thickness,
+            height - floor_thickness + cut_extension,
+            align=(Align.CENTER, Align.CENTER, Align.MIN), mode=Mode.SUBTRACT)
+```
+
+For curved bodies, `offset` with an opening face can produce a shell, but
+an offset may fail where thickness exceeds a local radius or closes a
+narrow passage. Inspect a section after shelling. Model lid fit allowances
+separately; do not scale the whole lid to create clearance.
+
+## Fillets, chamfers, and stable selections
+
+Search terms: round edge, edge selector, sort_by, filter_by, radius failure.
+
+Select from a known feature or face instead of using a global edge index.
+On a simple upright box, `part.faces().sort_by(Axis.Z)[-1]` selects its top
+face; this assumption needs revisiting once other higher features exist.
+Take that face's edges for a top rim treatment, or use
+`part.edges().filter_by(Axis.Z)` for straight vertical edges.
+
+Perform booleans and major dimensions before selecting finishing edges;
+old topology references may no longer identify the intended feature.
+When a fillet fails, reduce the radius, check neighbouring wall thickness
+and short edges, and try the intended edges individually. A fillet that
+works on the outside may consume a thin inside wall. Inspect a section and
+check validity after each change. For bed-facing edges in FFF/FDM, consult
+the [3D-printing guide](3d-printing.md) before choosing the finish.
+
+API evidence: the installed build123d 0.11.1 implementations of `Helix`,
+`Polygon`, `RegularPolygon`, `sweep`, `Box`, and `Cylinder`, plus the bundled
+[operations](../../docs/build123d/operations.md) and
+[topology selection](../../docs/build123d/topology_selection.md) references.
+
+
 <!-- source: agent-docs/reference/configuration.md -->
 
 # Configuration reference
@@ -249,6 +484,11 @@ Input: multi-line text field. Enter sends, Shift+Enter breaks the line.
 Context occupancy shown in the chat, including reserved reference-image budget, against the configured context-window setting.
 
 Source: `crates/cadmark-ui/src/chat.rs:1–9`.
+
+The **Skills** menu inserts a built-in command into the draft. Start a message or
+spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
+to that turn; active skills are shown beside the menu. See the
+[printing skill guide](../guides/3d-printing.md).
 
 ## Spatial comments
 

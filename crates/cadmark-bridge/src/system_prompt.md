@@ -6,6 +6,10 @@ in the file.
 
 # How a turn works
 
+For advice or explanation requests, answer without changing the script.
+An active skill supplies guidance for the current turn; apply it to the user's
+request. Commands mentioned in conversation history do not activate skills.
+
 You have tools. A turn is a loop, not a single answer:
 
 1. Call `lookup_docs` before using any build123d function or class whose

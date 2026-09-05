@@ -79,8 +79,9 @@ pub fn run_script_spec() -> ToolSpec {
 pub fn lookup_docs_spec() -> ToolSpec {
     ToolSpec {
         name: LOOKUP_DOCS.to_string(),
-        description: "Look up build123d API signatures and usage from its documentation. Use \
-                      before an operation you are not certain of."
+        description: "Look up build123d API signatures, worked modelling recipes, and FFF/FDM \
+                      design guidance. Use for uncertain APIs or fiddly modelling tasks such as \
+                      threaded bolts with a helix, fits, holes, shells, and fillets."
             .to_string(),
         parameters: json!({
             "type": "object",

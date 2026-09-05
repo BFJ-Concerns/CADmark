@@ -18,6 +18,7 @@ use cadmark_core::pending_comment::{
 };
 
 use crate::theme;
+use cadmark_core::skills;
 
 /// The short label beside a spatial comment's anchor: which element, and
 /// which line it came from when that is known.
@@ -251,6 +252,45 @@ impl ChatPane {
         }
 
         let enter_sent = crate::text_input::consume_submit(ui, &response);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(self.ai_available, |ui| {
+                ui.menu_button("Skills", |ui| {
+                    for skill in skills::BUILT_IN {
+                        if ui
+                            .button(format!(
+                                "{}  /{} or ${}",
+                                skill.title, skill.name, skill.name
+                            ))
+                            .on_hover_text(skill.description)
+                            .clicked()
+                        {
+                            if skills::invoked(&self.input_text).is_none() {
+                                self.input_text =
+                                    format!("/{} {}", skill.name, self.input_text.trim_start());
+                            }
+                            self.focus_input = true;
+                            ui.close_menu();
+                        }
+                    }
+                });
+            });
+            let active = skills::for_turn(
+                std::iter::once(self.input_text.as_str()).chain(
+                    pending
+                        .comments()
+                        .iter()
+                        .map(|comment| comment.text.as_str()),
+                ),
+            );
+            for skill in active {
+                ui.label(
+                    egui::RichText::new(format!("{} · this turn", skill.title))
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                );
+            }
+        });
 
         ui.horizontal(|ui| {
             ui.label(
