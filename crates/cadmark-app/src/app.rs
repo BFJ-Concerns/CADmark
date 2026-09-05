@@ -26,6 +26,7 @@ use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
 use cadmark_ui::parameters::{ParameterRow, ParametersAction, ParametersPanel, ParametersView};
 use cadmark_ui::part_name_dialog::{PartNameAction, PartNameDialog};
+use cadmark_ui::reference_images::{ReferenceImageView, ReferenceImagesPanel};
 use cadmark_ui::settings_dialog::{SettingsAction, SettingsDialog, SettingsForm};
 use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
 use cadmark_ui::status::{Status, StatusView};
@@ -37,12 +38,10 @@ use crate::launch::LaunchTarget;
 use crate::orchestrator::OrchestratorResult;
 use crate::parts::{self, OpenPart};
 use crate::project::{Busy, Project, SCRIPT_WATCH_INTERVAL};
+use crate::reference_images::ReferenceImagePicker;
 use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
 use crate::script_parameters::{self, Parameter};
-use crate::turn::{
-    NoRender, RenderSource, TurnEvent, TurnInput, TurnOutcome, context_usage,
-    reference_image_count, reference_images,
-};
+use crate::turn::{NoRender, RenderSource, TurnEvent, TurnInput, TurnOutcome, context_usage};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::validity::{ExportDecision, describe_validity, export_decision, export_warning};
 use crate::viewport::{
@@ -200,6 +199,8 @@ pub struct CadmarkApp {
     settings: UserSettings,
     settings_store: Option<SettingsStore>,
     chat: ChatPane,
+    reference_panel: ReferenceImagesPanel,
+    reference_picker: ReferenceImagePicker,
     /// Editable spatial comments for the current design state, not yet sent.
     pending_comments: PendingComments,
     overlay: OverlayState,
@@ -294,6 +295,8 @@ impl CadmarkApp {
             settings,
             settings_store,
             chat: ChatPane::new(),
+            reference_panel: ReferenceImagesPanel::default(),
+            reference_picker: ReferenceImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::new(),
@@ -412,6 +415,7 @@ impl CadmarkApp {
             render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
         self.chat = ChatPane::new();
+        self.reference_panel = ReferenceImagesPanel::default();
         self.chat.ai_available = project.ai_model.is_some();
         self.project = Some(project);
         self.start_notice = None;
@@ -471,12 +475,11 @@ impl CadmarkApp {
         };
         let history = project.conversation.clone();
         project.conversation.push(Message::user_chat(&text));
-        let dir = project.dir.clone();
         self.start_turn(
             TurnInput {
                 chat: Some(text),
                 comments: Vec::new(),
-                images: reference_images(&dir),
+                images: Vec::new(),
                 context_window_tokens: self.settings.context_window_tokens,
             },
             history,
@@ -509,7 +512,7 @@ impl CadmarkApp {
         let pending = self.pending_comments.drain();
         let mut comment_ids = Vec::with_capacity(pending.len());
         let comments = grounded_comments(&pending);
-        let (chat_id, dir) = {
+        let chat_id = {
             let project = self.project_mut().expect("project was checked above");
             for comment in &pending {
                 let anchors = comment
@@ -521,17 +524,15 @@ impl CadmarkApp {
                         .push(Message::spatial_comment(&comment.text, anchors)),
                 );
             }
-            let chat_id = chat
-                .as_ref()
-                .map(|text| project.conversation.push(Message::user_chat(text)));
-            (chat_id, project.dir.clone())
+            chat.as_ref()
+                .map(|text| project.conversation.push(Message::user_chat(text)))
         };
         let rollback_ids = comment_ids.clone();
         if !self.start_turn(
             TurnInput {
                 chat,
                 comments,
-                images: reference_images(&dir),
+                images: Vec::new(),
                 context_window_tokens: self.settings.context_window_tokens,
             },
             history,
@@ -845,6 +846,32 @@ impl CadmarkApp {
                     }
                 }
             }
+        }
+
+        match self.reference_picker.poll() {
+            Ok(Some(result)) => {
+                if let Some(project) = self.project.as_mut()
+                    && project.dir == result.project
+                {
+                    project.reference_images = result.references;
+                    self.reference_panel = ReferenceImagesPanel::default();
+                }
+                self.status = Some(if result.errors.is_empty() {
+                    Status::info(format!(
+                        "Attached {} reference image(s) to {}",
+                        result.added,
+                        result.project.display()
+                    ))
+                } else {
+                    Status::error(format!(
+                        "Attached {} image(s). {}",
+                        result.added,
+                        result.errors.join("; ")
+                    ))
+                });
+            }
+            Ok(None) => {}
+            Err(error) => self.status = Some(Status::error(error)),
         }
 
         if let Some(rx) = &self.folder_pick_rx {
@@ -1753,7 +1780,8 @@ impl CadmarkApp {
         }
     }
 
-    fn show_chat(&mut self, ctx: &egui::Context) {
+    fn show_chat(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let mut attach = false;
         let mut new_conversation = false;
         let mut action = ChatAction::None;
         egui::SidePanel::right("chat_panel")
@@ -1768,6 +1796,18 @@ impl CadmarkApp {
                 let Some(project) = self.project.as_ref() else {
                     return;
                 };
+                let images: Vec<_> = project.reference_images.images.iter().map(|image| ReferenceImageView {
+                    name: &image.name, thumbnail: &image.thumbnail,
+                }).collect();
+                attach = self.reference_panel.show(ui, &images, self.reference_picker.pending());
+                for error in &project.reference_images.errors {
+                    ui.colored_label(cadmark_ui::theme::ERROR, error);
+                }
+                if !images.is_empty() && !project.ai_accepts_images {
+                    ui.colored_label(cadmark_ui::theme::WARNING,
+                        "Images are saved. Choose an image-capable AI and enable ‘The model reads images’ in Settings to use them.");
+                }
+                ui.separator();
                 self.chat.activity = match &project.busy {
                     None => ChatActivity::Idle,
                     Some(Busy::Building) => ChatActivity::Building,
@@ -1798,13 +1838,19 @@ impl CadmarkApp {
                 ui.separator();
                 let usage = context_usage(
                     &project.conversation,
-                    reference_image_count(&project.dir),
+                    if project.ai_accepts_images { project.reference_images.images.len() } else { 0 },
                     self.settings.context_window_tokens,
                 );
                 action =
                     self.chat
                         .show(ui, &project.conversation, usage, &mut self.pending_comments);
             });
+        if attach
+            && let Some(project) = &self.project
+            && let Err(error) = self.reference_picker.open(frame, ctx, project.dir.clone())
+        {
+            self.status = Some(Status::error(error));
+        }
         if new_conversation {
             self.start_new_conversation();
         }
@@ -2321,6 +2367,7 @@ impl eframe::App for CadmarkApp {
             || measuring
             || self.pick_in_flight.is_some()
             || self.folder_pick_rx.is_some()
+            || self.reference_picker.pending()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -2348,7 +2395,7 @@ impl eframe::App for CadmarkApp {
 
         self.show_toolbar(ctx, frame);
         self.show_status_bar(ctx);
-        self.show_chat(ctx);
+        self.show_chat(ctx, frame);
         self.show_parameters(ctx);
         if self.code_visible {
             self.show_code_panel(ctx);
@@ -2396,10 +2443,10 @@ mod tests {
 
     use super::{
         Bounds3, CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, ParametersPanel,
-        PartNameDialog, Project, Renderer, SceneHandle, SettingsDialog, SettingsStore,
-        TurnGeometry, TurnOutcome, TurnRecord, UserSettings, VersionDialog, ai_services,
-        camera_change, candidate_highlight_ids, measurement_pair, measurement_readout,
-        record_tool_start, turn_chat_message,
+        PartNameDialog, Project, ReferenceImagePicker, ReferenceImagesPanel, Renderer, SceneHandle,
+        SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome, TurnRecord, UserSettings,
+        VersionDialog, ai_services, camera_change, candidate_highlight_ids, measurement_pair,
+        measurement_readout, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2542,6 +2589,8 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
+            reference_panel: ReferenceImagesPanel::default(),
+            reference_picker: ReferenceImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::default(),
@@ -2597,6 +2646,8 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
+            reference_panel: ReferenceImagesPanel::default(),
+            reference_picker: ReferenceImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::default(),

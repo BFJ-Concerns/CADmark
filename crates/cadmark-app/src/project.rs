@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use cadmark_bridge::AiServices;
+use cadmark_bridge::backend::TurnModel;
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
@@ -23,6 +24,7 @@ use cadmark_renderer::camera::Bounds3;
 
 use crate::orchestrator::{OrchestratorCommand, OrchestratorResult, spawn_orchestrator};
 use crate::parts::{self, OpenPart};
+use crate::reference_images::ReferenceImages;
 use crate::turn::{RenderSource, TurnInput};
 use crate::validity::{ExportDecision, export_decision, export_warning};
 
@@ -125,6 +127,8 @@ impl Busy {
 /// An open project folder.
 pub struct Project {
     pub dir: PathBuf,
+    pub reference_images: ReferenceImages,
+    pub ai_accepts_images: bool,
     /// The part of the folder currently being modelled.
     part: OpenPart,
     /// Every part script in the folder, for the switcher.
@@ -198,6 +202,9 @@ impl Project {
                 part.file_name()
             )));
         }
+        let ai_accepts_images = ai
+            .as_ref()
+            .is_ok_and(|services| services.model.accepts_images());
         let ai_model = match &ai {
             Ok(services) => Some(services.model.model_name().to_string()),
             Err(reason) => {
@@ -221,6 +228,8 @@ impl Project {
         let history = load_history(&dir);
 
         let mut project = Self {
+            reference_images: ReferenceImages::load(&dir),
+            ai_accepts_images,
             parts: parts::list_parts(&dir),
             part,
             dir,
@@ -350,9 +359,14 @@ impl Project {
     /// shown twice.
     pub fn start_turn(
         &mut self,
-        input: TurnInput,
+        mut input: TurnInput,
         history: Conversation,
     ) -> Result<CancelFlag, String> {
+        input.images = if self.ai_accepts_images {
+            self.reference_images.inputs()
+        } else {
+            Vec::new()
+        };
         let cancel = CancelFlag::new();
         self.send(OrchestratorCommand::Turn {
             input,
@@ -698,6 +712,8 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (_result_tx, result_rx) = mpsc::channel();
         let project = Project {
+            reference_images: ReferenceImages::load(&dir),
+            ai_accepts_images: false,
             parts: Vec::new(),
             part: OpenPart::Named("bracket.py".to_string()),
             dir,
@@ -722,6 +738,64 @@ mod tests {
             measurements_in_flight: 0,
         };
         (project, cmd_rx)
+    }
+
+    #[test]
+    fn project_references_survive_fresh_conversations_and_reopening_and_feed_each_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("drawing.png");
+        image::RgbImage::from_pixel(48, 24, image::Rgb([20, 80, 160]))
+            .save(&source)
+            .unwrap();
+        let bytes = std::fs::read(&source).unwrap();
+        crate::reference_images::attach(dir.path(), &source).unwrap();
+        source_dir.close().unwrap();
+        let (mut project, commands) = project_for_test(dir.path().to_path_buf());
+        project.ai_accepts_images = true;
+        for _ in 0..2 {
+            project
+                .conversation
+                .push(Message::user_chat("old-session-marker"));
+            project.start_fresh_conversation().unwrap();
+            project
+                .start_turn(TurnInput::default(), project.conversation.clone())
+                .unwrap();
+            let OrchestratorCommand::Turn {
+                input,
+                conversation,
+                ..
+            } = commands.recv().unwrap()
+            else {
+                panic!("expected a turn");
+            };
+            assert!(
+                !serde_json::to_string(&conversation)
+                    .unwrap()
+                    .contains("old-session-marker")
+            );
+            assert_eq!(input.images.len(), 1);
+            assert_eq!(input.images[0].bytes, bytes);
+        }
+        drop(project);
+        let (mut reopened, commands) = project_for_test(dir.path().to_path_buf());
+        reopened.ai_accepts_images = true;
+        reopened
+            .start_turn(TurnInput::default(), Conversation::new())
+            .unwrap();
+        let OrchestratorCommand::Turn { input, .. } = commands.recv().unwrap() else {
+            panic!("expected a turn");
+        };
+        assert_eq!(input.images[0].bytes, bytes);
+        reopened.ai_accepts_images = false;
+        reopened
+            .start_turn(TurnInput::default(), Conversation::new())
+            .unwrap();
+        let OrchestratorCommand::Turn { input, .. } = commands.recv().unwrap() else {
+            panic!("expected a turn");
+        };
+        assert!(input.images.is_empty());
+        assert_eq!(reopened.reference_images.images.len(), 1);
     }
 
     fn part_for_export_test(model: ModelFile, validity: Vec<SolidValidity>) -> LoadedPart {
