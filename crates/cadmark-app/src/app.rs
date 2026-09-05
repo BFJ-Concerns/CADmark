@@ -18,7 +18,7 @@ use cadmark_core::geometry::{
 };
 use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
 use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
-use cadmark_renderer::camera::{Bounds3, Camera, Projection, StandardView};
+use cadmark_renderer::camera::{Bounds3, Camera, Projection};
 use cadmark_renderer::pipeline::{Renderer, ViewportMarker};
 use cadmark_renderer::section::{self, Axis};
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
@@ -32,7 +32,7 @@ use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
 use cadmark_ui::status::{Status, StatusView};
 use cadmark_ui::toolbar::{self, PartOption, ToolbarAction, ToolbarState};
 use cadmark_ui::version_dialog::{VersionDialog, VersionDialogAction};
-use cadmark_ui::view_gizmo::GizmoAction;
+use cadmark_ui::view_cube::{ViewCubeAction, ViewCubeState};
 
 use crate::launch::LaunchTarget;
 use crate::orchestrator::OrchestratorResult;
@@ -1416,17 +1416,60 @@ impl CadmarkApp {
                 && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F5))
             {
                 action = ToolbarAction::Refresh;
-            } else if !typing
-                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F))
-            {
-                action = ToolbarAction::FitView;
-            } else if !typing
-                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::P))
-            {
-                action = ToolbarAction::ToggleProjection;
             }
         });
         action
+    }
+
+    /// Bare-key shortcuts for the view: they act only when no text field
+    /// has focus, and land on the same handlers as the view cube.
+    fn handle_view_shortcuts(&mut self, ctx: &egui::Context) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let action = ctx.input_mut(|input| {
+            if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::F)) {
+                ViewCubeAction::Fit
+            } else if input.consume_shortcut(&KeyboardShortcut::new(Modifiers::NONE, Key::P)) {
+                ViewCubeAction::ToggleProjection
+            } else {
+                ViewCubeAction::None
+            }
+        });
+        self.apply_view_action(action);
+    }
+
+    fn apply_view_action(&mut self, action: ViewCubeAction) {
+        match action {
+            ViewCubeAction::LookFrom(direction) => self.renderer.camera.look_from(direction),
+            ViewCubeAction::Orbit(delta) => self.renderer.camera.orbit(delta.x, delta.y),
+            ViewCubeAction::Roll { clockwise } => self.renderer.camera.roll_quarter_turn(clockwise),
+            ViewCubeAction::Fit => {
+                let model = self.project().and_then(|project| project.model.as_ref());
+                // Fitting a sketch returns to the flat view of its own
+                // plane, which is how it was first shown.
+                let plane_normal = model
+                    .and_then(|model| model.sketch())
+                    .map(|sketch| sketch.plane.normal);
+                self.pending_camera_bounds = model.and_then(|model| model.bounds);
+                if let Some(normal) = plane_normal {
+                    self.renderer.camera.view_plane_face_on(normal);
+                }
+            }
+            ViewCubeAction::ToggleProjection => {
+                let next = match self.renderer.camera.projection() {
+                    Projection::Perspective => Projection::Orthographic,
+                    Projection::Orthographic => Projection::Perspective,
+                };
+                self.renderer.camera.set_projection(next);
+            }
+            ViewCubeAction::ToggleAxes => {
+                self.settings.show_axes = !self.settings.show_axes;
+                self.save_settings();
+            }
+            ViewCubeAction::None => {}
+        }
     }
 
     fn model_bounds(&self) -> Option<Bounds3> {
@@ -1515,18 +1558,6 @@ impl CadmarkApp {
                     project.request_reload();
                 }
             }
-            ToolbarAction::FitView => {
-                let model = self.project().and_then(|project| project.model.as_ref());
-                // Fitting a sketch returns to the flat view of its own
-                // plane, which is how it was first shown.
-                let plane_normal = model
-                    .and_then(|model| model.sketch())
-                    .map(|sketch| sketch.plane.normal);
-                self.pending_camera_bounds = model.and_then(|model| model.bounds);
-                if let Some(normal) = plane_normal {
-                    self.renderer.camera.view_plane_face_on(normal);
-                }
-            }
             ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
             ToolbarAction::PickPart => {
                 self.part_selection_mode = true;
@@ -1550,16 +1581,6 @@ impl CadmarkApp {
                 // What is under the cursor may have changed kind.
                 self.renderer.hover_id = 0;
                 self.last_hover_probe = None;
-            }
-            ToolbarAction::ToggleProjection => {
-                let next = match self.renderer.camera.projection() {
-                    Projection::Perspective => Projection::Orthographic,
-                    Projection::Orthographic => Projection::Perspective,
-                };
-                self.renderer.camera.set_projection(next);
-            }
-            ToolbarAction::StandardView(view) => {
-                self.renderer.camera.look_at_standard(standard_view(view));
             }
             ToolbarAction::ToggleSection => {
                 let bounds = self.model_bounds();
@@ -1633,7 +1654,6 @@ impl CadmarkApp {
                     has_model: project.model.is_some(),
                     model_parts: &model_parts,
                     code_visible: self.code_visible,
-                    orthographic: self.renderer.camera.projection() == Projection::Orthographic,
                     export_warning: export_warning.as_deref(),
                     selection_kinds: crate::viewport::selection_kinds(
                         self.renderer.selection_filter,
@@ -2141,11 +2161,12 @@ impl CadmarkApp {
                 let view = self.renderer.camera.view_matrix();
                 let axes =
                     std::array::from_fn(|axis| [view[axis][0], view[axis][1], view[axis][2]]);
-                match cadmark_ui::view_gizmo::show(ui, rect, axes) {
-                    GizmoAction::LookFrom(direction) => self.renderer.camera.look_from(direction),
-                    GizmoAction::Orbit(delta) => self.renderer.camera.orbit(delta.x, delta.y),
-                    GizmoAction::None => {}
-                }
+                let state = ViewCubeState {
+                    orthographic: self.renderer.camera.projection() == Projection::Orthographic,
+                    axes_shown: self.settings.show_axes,
+                };
+                let action = cadmark_ui::view_cube::show(ui, rect, axes, state);
+                self.apply_view_action(action);
             }
 
             let action = self.overlay.show(ui, rect);
@@ -2286,18 +2307,6 @@ fn section_axis_label(axis: Axis) -> toolbar::SectionAxis {
     }
 }
 
-fn standard_view(view: toolbar::StandardView) -> StandardView {
-    match view {
-        toolbar::StandardView::Front => StandardView::Front,
-        toolbar::StandardView::Back => StandardView::Back,
-        toolbar::StandardView::Left => StandardView::Left,
-        toolbar::StandardView::Right => StandardView::Right,
-        toolbar::StandardView::Top => StandardView::Top,
-        toolbar::StandardView::Bottom => StandardView::Bottom,
-        toolbar::StandardView::Isometric => StandardView::Isometric,
-    }
-}
-
 /// Construct the AI services from the user's settings, or say why not.
 /// The picking IDs of every element the ledger attributes to one
 /// candidate's operation — what the viewport lights up while the pointer
@@ -2392,6 +2401,7 @@ impl eframe::App for CadmarkApp {
 
         let shortcut = self.handle_shortcuts(ctx);
         self.apply_toolbar_action(ctx, frame, shortcut);
+        self.handle_view_shortcuts(ctx);
 
         self.show_toolbar(ctx, frame);
         self.show_status_bar(ctx);

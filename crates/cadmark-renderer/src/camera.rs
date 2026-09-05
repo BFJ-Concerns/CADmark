@@ -15,8 +15,13 @@ const WORLD_UP: [f32; 3] = [0.0, 0.0, 1.0];
 /// Pitch stops this far short of straight up or down when orbiting, so the
 /// screen's up direction never flips mid-drag.
 const PITCH_MARGIN: f32 = 0.01;
-const MIN_DISTANCE: f32 = 0.1;
-const MAX_DISTANCE: f32 = 500.0;
+/// The orbit distance is free across the range a model in millimetres
+/// could ever need: from a thousandth of a unit to ten kilometres.
+const MIN_DISTANCE: f32 = 0.001;
+const MAX_DISTANCE: f32 = 10_000_000.0;
+/// The near plane sits no closer than this fraction of the far plane, so
+/// the 32-bit depth buffer keeps its precision across the whole range.
+const MIN_NEAR_TO_FAR: f32 = 1e-4;
 
 /// Perspective or orthographic projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,14 +92,19 @@ pub struct Camera {
     /// Elevation in radians. Orbiting stops just short of the poles; the
     /// axis views reach them exactly.
     pitch: f32,
+    /// Turn of the screen about the line of sight, in radians, positive
+    /// anticlockwise as the viewer sees it. Zero puts world up as near
+    /// screen up as the pitch allows; a standard view resets it.
+    roll: f32,
     /// Field of view in radians (perspective), and the angle that sizes
     /// the orthographic frustum so switching projection keeps the model
     /// the same size on screen.
     fov: f32,
-    /// Near clipping plane.
-    near: f32,
-    /// Far clipping plane.
-    far: f32,
+    /// The sphere the clip planes always bracket: the framed model's, or
+    /// a nominal one before a model is framed. Zooming and panning move
+    /// the eye freely; the planes follow so the model never clips.
+    scene_centre: [f32; 3],
+    scene_radius: f32,
     projection: Projection,
 }
 
@@ -163,9 +173,10 @@ impl Default for Camera {
             distance: 5.0,
             yaw: std::f32::consts::FRAC_PI_4,
             pitch: std::f32::consts::FRAC_PI_6,
+            roll: 0.0,
             fov: std::f32::consts::FRAC_PI_4,
-            near: 0.01,
-            far: 1000.0,
+            scene_centre: [0.0, 0.0, 0.0],
+            scene_radius: 5.0,
             projection: Projection::Perspective,
         }
     }
@@ -186,6 +197,10 @@ impl Camera {
 
     pub fn pitch(&self) -> f32 {
         self.pitch
+    }
+
+    pub fn roll(&self) -> f32 {
+        self.roll
     }
 
     pub fn projection(&self) -> Projection {
@@ -212,8 +227,20 @@ impl Camera {
         self.target = bounds.centre();
         self.distance =
             (radius / limiting_half_angle.sin() * 1.15).clamp(MIN_DISTANCE, MAX_DISTANCE);
-        self.near = (radius * 0.001).max(0.0001);
-        self.far = (self.distance + radius * 3.0).max(self.near + 1.0);
+        self.scene_centre = bounds.centre();
+        self.scene_radius = radius;
+    }
+
+    /// The near and far clip distances for the current eye: the scene
+    /// sphere and the target are always inside them, with room to spare,
+    /// and the near plane stays a fixed fraction of the far so depth
+    /// precision holds however far out the view is.
+    pub fn clip_planes(&self) -> (f32, f32) {
+        let forward = self.basis().forward;
+        let along = dot(sub(self.scene_centre, self.eye_position()), forward);
+        let far = (along + self.scene_radius).max(self.distance) * 2.0;
+        let near = ((along - self.scene_radius) * 0.5).max(far * MIN_NEAR_TO_FAR);
+        (near, far)
     }
 
     /// Compute the camera's eye position from orbit parameters.
@@ -228,9 +255,11 @@ impl Camera {
 
     /// Turn the camera to look at the target from the given world-space
     /// direction, keeping the target and distance. A vertical direction
-    /// gives the top or bottom view with +Y up the screen.
+    /// gives the top or bottom view with +Y up the screen. Any roll is
+    /// undone, so the view arrives the way round its name implies.
     pub fn look_from(&mut self, direction: [f32; 3]) {
         let direction = normalize(direction);
+        self.roll = 0.0;
         self.pitch = direction[2].clamp(-1.0, 1.0).asin();
         let horizontal = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
         self.yaw = if horizontal < 1e-4 {
@@ -259,6 +288,7 @@ impl Camera {
     /// The camera's axes in world space. Looking straight down or up, where
     /// world up is no guide, the screen's up is the direction the eye would
     /// face from the same yaw at the horizon, so the top view has +Y up.
+    /// The roll then turns right and up about the line of sight.
     pub fn basis(&self) -> Basis {
         let forward = normalize(sub(self.target, self.eye_position()));
         let up_reference = if dot(forward, WORLD_UP).abs() > 0.9999 {
@@ -266,16 +296,31 @@ impl Camera {
         } else {
             WORLD_UP
         };
-        let right = normalize(cross(forward, up_reference));
-        let up = cross(right, forward);
+        let level_right = normalize(cross(forward, up_reference));
+        let level_up = cross(level_right, forward);
+        let (sin, cos) = self.roll.sin_cos();
+        let right = std::array::from_fn(|axis| cos * level_right[axis] - sin * level_up[axis]);
+        let up = std::array::from_fn(|axis| sin * level_right[axis] + cos * level_up[axis]);
         Basis { right, up, forward }
+    }
+
+    /// Turn the view a quarter turn about the line of sight, the way the
+    /// model appears to turn on screen.
+    pub fn roll_quarter_turn(&mut self, clockwise: bool) {
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let turned = self.roll + if clockwise { -quarter } else { quarter };
+        self.roll = turned.rem_euclid(std::f32::consts::TAU);
     }
 
     /// Orbit the camera by a delta in screen-space pixels. The model
     /// follows the pointer: dragging right turns its near side to the
-    /// right, dragging down tips its top towards the viewer.
+    /// right, dragging down tips its top towards the viewer. Under a
+    /// roll the drag is read in the rolled screen's frame, so the model
+    /// still follows the pointer.
     pub fn orbit(&mut self, dx: f32, dy: f32) {
         let sensitivity = 0.005;
+        let (sin, cos) = self.roll.sin_cos();
+        let (dx, dy) = (dx * cos - dy * sin, dx * sin + dy * cos);
         self.yaw -= dx * sensitivity;
         self.pitch = (self.pitch + dy * sensitivity).clamp(
             -std::f32::consts::FRAC_PI_2 + PITCH_MARGIN,
@@ -329,11 +374,12 @@ impl Camera {
     /// perspective view shows at the target's distance, so toggling
     /// projection leaves the model the same size on screen.
     pub fn projection_matrix(&self, aspect_ratio: f32) -> [[f32; 4]; 4] {
+        let (near, far) = self.clip_planes();
         match self.projection {
-            Projection::Perspective => perspective(self.fov, aspect_ratio, self.near, self.far),
+            Projection::Perspective => perspective(self.fov, aspect_ratio, near, far),
             Projection::Orthographic => {
                 let half_height = (self.fov * 0.5).tan() * self.distance;
-                orthographic(half_height, aspect_ratio, self.near, self.far)
+                orthographic(half_height, aspect_ratio, near, far)
             }
         }
     }
@@ -508,6 +554,50 @@ mod tests {
     }
 
     #[test]
+    fn rolling_turns_the_screen_about_the_line_of_sight() {
+        let mut cam = Camera::default();
+        cam.look_from([0.0, -1.0, 0.0]);
+        cam.roll_quarter_turn(false);
+        // An anticlockwise quarter turn carries world X from screen right
+        // to screen up.
+        let basis = cam.basis();
+        assert!(approx_eq_vec(basis.up, [1.0, 0.0, 0.0]), "{basis:?}");
+        assert!(approx_eq_vec(basis.right, [0.0, 0.0, -1.0]), "{basis:?}");
+        assert!(approx_eq_vec(basis.forward, [0.0, 1.0, 0.0]));
+        assert!(approx_eq(cam.roll(), std::f32::consts::FRAC_PI_2));
+
+        cam.roll_quarter_turn(true);
+        assert!(approx_eq(cam.roll(), 0.0));
+        assert!(approx_eq_vec(cam.basis().up, [0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn a_standard_view_undoes_the_roll() {
+        let mut cam = Camera::default();
+        cam.roll_quarter_turn(true);
+        cam.look_from([0.0, 0.0, 1.0]);
+        assert_eq!(cam.roll(), 0.0);
+        assert!(approx_eq_vec(cam.basis().up, [0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn orbit_follows_the_pointer_on_a_rolled_screen() {
+        let mut level = Camera::default();
+        level.look_from([0.0, -1.0, 0.0]);
+        level.orbit(0.0, 100.0);
+
+        let mut rolled = Camera::default();
+        rolled.look_from([0.0, -1.0, 0.0]);
+        rolled.roll_quarter_turn(false);
+        // Screen right on the rolled screen is screen down on the level
+        // one, so the same drag must tip the model the same way.
+        rolled.orbit(100.0, 0.0);
+
+        assert!(approx_eq(rolled.pitch(), level.pitch()));
+        assert!(approx_eq(rolled.yaw(), level.yaw()));
+    }
+
+    #[test]
     fn orbit_clamps_pitch() {
         let mut cam = Camera::default();
         // Orbit far enough to hit the clamp.
@@ -674,8 +764,9 @@ mod tests {
 
         assert_eq!(camera.target(), [0.0, 0.0, 0.0]);
         assert!(camera.distance() > bounds.radius());
-        assert!(camera.near > 0.0);
-        assert!(camera.far > camera.distance() + bounds.radius());
+        let (near, far) = camera.clip_planes();
+        assert!(near > 0.0);
+        assert!(far > camera.distance() + bounds.radius());
 
         let eye = camera.eye_position();
         assert!(
@@ -684,6 +775,45 @@ mod tests {
                 .any(|(axis, coordinate)| *coordinate < bounds.min[axis]
                     || *coordinate > bounds.max[axis])
         );
+    }
+
+    #[test]
+    fn clip_planes_bracket_the_model_however_far_the_view_zooms() {
+        let bounds = Bounds3::from_positions([[-100.0; 3], [100.0; 3]]).unwrap();
+        let mut camera = Camera::default();
+        camera.frame_bounds(bounds, 1.0);
+        let radius = bounds.radius();
+
+        // Zoomed right out, the model is still inside the far plane.
+        for _ in 0..200 {
+            camera.zoom(-10.0);
+        }
+        assert!(camera.distance() > 100_000.0, "{}", camera.distance());
+        let (near, far) = camera.clip_planes();
+        assert!(far > camera.distance() + radius);
+        assert!(near > 0.0 && near < camera.distance() - radius);
+        assert!(near >= far * MIN_NEAR_TO_FAR * 0.999);
+
+        // Panned well off the model, the planes still bracket it.
+        camera.pan(5_000.0, 0.0);
+        let (near, far) = camera.clip_planes();
+        let along = dot(
+            sub(camera.scene_centre, camera.eye_position()),
+            camera.basis().forward,
+        );
+        assert!(near <= along - radius);
+        assert!(far >= along + radius);
+
+        // Zoomed right in, the eye is inside the model's sphere and the
+        // near plane closes up rather than cutting it away.
+        camera.frame_bounds(bounds, 1.0);
+        for _ in 0..400 {
+            camera.zoom(10.0);
+        }
+        assert!(camera.distance() < radius);
+        let (near, far) = camera.clip_planes();
+        assert!(near < 0.01 * radius, "{near}");
+        assert!(far > radius);
     }
 
     #[test]

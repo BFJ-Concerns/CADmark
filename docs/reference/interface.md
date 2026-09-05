@@ -37,9 +37,13 @@ The **Select** menu in the toolbar turns each kind of click target on or off. Th
 
 When a design contains only a sketch, the view switches to face its plane in orthographic projection, and any existing solid is ghosted behind it. Sketch curves, corners and filled regions are displayed, but cannot yet be selected in the viewport.
 
-## Standard views and projection
+## View cube
 
-The View menu offers seven standard orientations: Front, Back, Left, Right, Top, Bottom, and Isometric. Two projection modes — Perspective (default) and Orthographic — can be toggled from the same menu or with `P`.
+The cube in the viewport's top-right corner turns with the model and is the way to reorient the view. Its six faces are labelled Front, Back, Left, Right, Top and Bottom. Click the middle of a face to look squarely at it, the strip along an edge to look from halfway between two faces, or a corner to look from an isometric direction — the region under the pointer lights up, and a tooltip names the view. Drag the cube to orbit freely. The curved arrows that appear beside it turn the view a quarter turn either way about the line of sight; snapping to any named view undoes the turn.
+
+Beneath the cube: **Fit** frames the whole model (`F`), the projection button switches between perspective and orthographic (`P`) and reads which one is current, and **XYZ** shows or hides a small axis triad indicating which way X, Y and Z run. The triad is off by default, and the choice is remembered across sessions.
+
+The camera zooms from a fraction of a millimetre to kilometres away, and the model stays drawn however far in or out you go.
 
 ## Seeing inside the model
 

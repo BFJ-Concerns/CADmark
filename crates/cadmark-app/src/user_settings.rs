@@ -40,6 +40,8 @@ pub struct UserSettings {
     pub context_window_tokens: usize,
     /// Recently opened project folders, most recent first.
     pub recent_projects: Vec<PathBuf>,
+    /// Whether the view cube shows the axis triad beside it.
+    pub show_axes: bool,
 }
 
 fn default_context_window_tokens() -> usize {
@@ -53,6 +55,7 @@ impl Default for UserSettings {
             limits: ExecutionLimits::default(),
             context_window_tokens: default_context_window_tokens(),
             recent_projects: Vec::new(),
+            show_axes: false,
         }
     }
 }
