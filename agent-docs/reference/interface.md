@@ -203,9 +203,13 @@ Source: `crates/cadmark-app/src/validity.rs:33–53`, `crates/cadmark-app/src/ap
 
 ## Reference images
 
-PNG and JPEG files (extensions `.png`, `.jpg`, `.jpeg`) placed in a `references/` directory inside the project folder are sent to the AI with every turn when `accepts_images` is enabled. Other file types are ignored. Their token budget is included in the context-occupancy display.
+**Project references → Attach images…** opens a multi-file picker for PNG and JPEG images. Validated original bytes are copied into the project folder's `references/` directory; filename collisions receive a numeric suffix. Chat shows bounded thumbnails with the original aspect ratio. Import failures are shown in-app.
 
-Source: `crates/cadmark-app/src/turn.rs:646–689`.
+References belong to the project. New conversations and reopening the project retain them, independently of the original source files. All conversations and part scripts in the same project share the references. Files placed manually in `references/` are loaded when the project opens; `.png`, `.jpg` and `.jpeg` extensions are case-insensitive.
+
+Every turn includes the saved references as image inputs when `ai.accepts_images` is enabled, and reserves their token budget in the context-occupancy display. With an unavailable or text-only AI, images remain saved and the panel explains how to enable image input.
+
+Source: `crates/cadmark-app/src/reference_images.rs` (`ReferenceImages::load`, `attach`, `ReferenceImagePicker::open`), `project.rs` (`Project::open`, `Project::start_turn`) and `crates/cadmark-ui/src/reference_images.rs` (`ReferenceImagesPanel::show`).
 
 ## Keyboard shortcuts
 

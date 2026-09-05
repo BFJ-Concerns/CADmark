@@ -11,6 +11,7 @@ mod launch;
 pub mod orchestrator;
 pub mod parts;
 mod project;
+mod reference_images;
 mod render_source;
 mod script_parameters;
 pub mod turn;
