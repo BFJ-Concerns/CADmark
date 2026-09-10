@@ -149,6 +149,10 @@ pub struct Project {
     /// The AI model in use, for the toolbar badge; absent when AI is
     /// unavailable and the reason is in the conversation.
     pub ai_model: Option<String>,
+    /// The model's context window as the endpoint advertised it at open,
+    /// which takes precedence over the manual setting; absent when the
+    /// endpoint advertised none.
+    pub detected_context_window: Option<usize>,
     pub busy: Option<Busy>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: ProvenanceLedger,
@@ -247,6 +251,7 @@ impl Project {
             history,
             conversation,
             ai_model,
+            detected_context_window: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
@@ -758,6 +763,7 @@ mod tests {
             history: VersionHistory::new(),
             conversation: Conversation::new(),
             ai_model: None,
+            detected_context_window: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),

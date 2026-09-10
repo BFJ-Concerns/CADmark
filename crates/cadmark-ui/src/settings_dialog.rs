@@ -27,6 +27,9 @@ pub struct SettingsForm {
     pub wall_clock_seconds: u64,
     pub memory_megabytes: u64,
     pub context_window_tokens: usize,
+    /// What the endpoint advertised for the model, when it did: shown so
+    /// the user knows the manual figure is the fallback.
+    pub detected_context_window: Option<usize>,
 }
 
 impl SettingsForm {
@@ -57,6 +60,11 @@ impl SettingsDialog {
     pub fn open(&mut self, form: SettingsForm) {
         self.form = Some(form);
         self.error = None;
+    }
+
+    /// The form as it stands while the dialog is open.
+    pub fn form(&self) -> Option<&SettingsForm> {
+        self.form.as_ref()
     }
 
     pub fn is_open(&self) -> bool {
@@ -201,6 +209,20 @@ impl SettingsDialog {
                         );
                         ui.end_row();
                     });
+                ui.label(
+                    egui::RichText::new(match form.detected_context_window {
+                        Some(detected) => format!(
+                            "The endpoint reports {detected} tokens for this model, and that \
+                             figure is used. This setting applies only to an endpoint that \
+                             reports none."
+                        ),
+                        None => "Used when the endpoint does not report the model's context \
+                                 window. Checked each time a project opens."
+                            .to_string(),
+                    })
+                    .small()
+                    .color(theme::TEXT_MUTED),
+                );
 
                 if let Some(error) = &self.error {
                     ui.add_space(8.0);
@@ -255,6 +277,7 @@ mod tests {
             wall_clock_seconds: 0,
             memory_megabytes: 1,
             context_window_tokens: 1,
+            detected_context_window: None,
         };
         let limits = form.limits();
         assert_eq!(limits.wall_clock, Duration::from_secs(1));
