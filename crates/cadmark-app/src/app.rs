@@ -13,8 +13,8 @@ use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryContext, GeometryDescriptors, MinimumDistance, PartId, PickedElement, ScreenPosition,
-    SelectionState, TopologyElement,
+    GeometryContext, GeometryDescriptors, MinimumDistance, PartId, PartMeasurements, PickedElement,
+    ScreenPosition, SelectionState, TopologyElement, describe_model_change,
 };
 use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
 use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
@@ -86,15 +86,14 @@ fn record_tool_start(
     (group, conversation.push(Message::ai_response("")))
 }
 
-/// The chat line for a completed turn: the AI's summary, then what
-/// measurably changed so an edit that did more than asked is visible.
-/// What a finished turn reports about the geometry it produced: a solid
-/// compared with the solid before it, or a sketch described in its own
-/// terms, because a profile has nothing to compare a volume against.
+/// What a finished turn reports about the geometry it produced: each part
+/// compared with the part of the same name before it, or a sketch described
+/// in its own terms, because a profile has nothing to compare a volume
+/// against.
 enum TurnGeometry<'a> {
     Solid {
-        before: Option<&'a cadmark_core::geometry::ModelSummary>,
-        after: &'a cadmark_core::geometry::ModelSummary,
+        before: &'a [PartMeasurements],
+        after: &'a [PartMeasurements],
     },
     Sketch(&'a cadmark_core::sketch::SketchProfile),
 }
@@ -117,31 +116,15 @@ fn camera_change(
     }
 }
 
+/// The chat line for a completed turn: the AI's summary, then what
+/// measurably changed, part by part, so an edit that did more than asked is
+/// visible at once.
 fn turn_chat_message(response_message: &str, geometry: TurnGeometry<'_>) -> String {
-    let mut message = response_message.to_string();
-    let (before, after) = match geometry {
-        TurnGeometry::Solid { before, after } => (before, after),
-        TurnGeometry::Sketch(sketch) => {
-            message.push_str(&format!("\n\n{}.", sketch.describe()));
-            return message;
-        }
+    let report = match geometry {
+        TurnGeometry::Solid { before, after } => describe_model_change(before, after),
+        TurnGeometry::Sketch(sketch) => format!("{}.", sketch.describe()),
     };
-    match before {
-        Some(before) => match after.describe_change_from(before) {
-            Some(change) => message.push_str(&format!(
-                "\n\nModel change: {change}. Before: {}. After: {}.",
-                before.describe(),
-                after.describe()
-            )),
-            None => message.push_str(&format!(
-                "\n\nModel unchanged. Before: {}. After: {}.",
-                before.describe(),
-                after.describe()
-            )),
-        },
-        None => message.push_str(&format!("\n\nModel: {}.", after.describe())),
-    }
-    message
+    format!("{response_message}\n\n{report}")
 }
 
 /// The pair C21 measures: exactly the two anchors currently held for the
@@ -185,8 +168,8 @@ struct TurnRecord {
     tools: Option<MessageId>,
     /// The spatial comments the turn is acting on.
     comment_ids: Vec<MessageId>,
-    /// The model summary before the turn, for the change report.
-    summary_before: Option<cadmark_core::geometry::ModelSummary>,
+    /// Every part's measurements before the turn, for the change report.
+    parts_before: Vec<PartMeasurements>,
     /// Messages before the active turn, which a condensation event may replace.
     history_len: usize,
 }
@@ -561,10 +544,7 @@ impl CadmarkApp {
         let Some(project) = self.project.as_mut() else {
             return false;
         };
-        let summary_before = project
-            .model
-            .as_ref()
-            .and_then(|model| model.summary().cloned());
+        let parts_before = project.part_measurements();
         let response = project.conversation.push(Message::ai_response(""));
         match project.start_turn(input, history) {
             Ok(_cancel) => {
@@ -572,7 +552,7 @@ impl CadmarkApp {
                     response,
                     tools: None,
                     comment_ids,
-                    summary_before,
+                    parts_before,
                     history_len,
                 });
                 true
@@ -680,6 +660,10 @@ impl CadmarkApp {
                     .message_mut(turn.response)
                     .map(|message| message.text.clone())
                     .unwrap_or_default();
+                let parts_after = match &model.form {
+                    cadmark_kernel::protocol::ModelForm::Solid(solid) => solid.part_measurements(),
+                    cadmark_kernel::protocol::ModelForm::Sketch(_) => Vec::new(),
+                };
                 let text = turn_chat_message(
                     if reply.trim().is_empty() {
                         &summary
@@ -687,9 +671,9 @@ impl CadmarkApp {
                         &reply
                     },
                     match &model.form {
-                        cadmark_kernel::protocol::ModelForm::Solid(solid) => TurnGeometry::Solid {
-                            before: turn.summary_before.as_ref(),
-                            after: &solid.summary,
+                        cadmark_kernel::protocol::ModelForm::Solid(_) => TurnGeometry::Solid {
+                            before: &turn.parts_before,
+                            after: &parts_after,
                         },
                         cadmark_kernel::protocol::ModelForm::Sketch(sketch) => {
                             TurnGeometry::Sketch(sketch)
@@ -2445,7 +2429,7 @@ mod tests {
     use cadmark_bridge::backend::{ModelItem, ModelRequest, TurnModel};
     use cadmark_core::geometry::{
         EdgeDescriptor, EdgeId, FaceId, GeometryContext, GeometryDescriptors, ModelSummary,
-        PickedElement, SelectionState, TopologyElement,
+        PartMeasurements, PickedElement, SelectionState, TopologyElement,
     };
     use cadmark_core::ledger::LedgerValue;
     use cadmark_core::limits::ExecutionLimits;
@@ -2633,7 +2617,7 @@ mod tests {
                 response,
                 tools: None,
                 comment_ids: vec![],
-                summary_before: None,
+                parts_before: Vec::new(),
                 history_len: 1,
             }),
         }
@@ -2750,7 +2734,7 @@ mod tests {
             response,
             tools: None,
             comment_ids: vec![],
-            summary_before: None,
+            parts_before: Vec::new(),
             history_len: 1,
         });
         std::fs::write(dir.path().join("bracket.py"), "width = 120\ndepth = 40\n").unwrap();
@@ -2839,13 +2823,17 @@ mod tests {
         }
     }
 
+    fn part(name: &str, volume: f64, faces: usize) -> PartMeasurements {
+        PartMeasurements::new(name, summary(volume, faces))
+    }
+
     #[test]
     fn first_model_reports_its_measurements() {
         let message = turn_chat_message(
             "Made a box",
             TurnGeometry::Solid {
-                before: None,
-                after: &summary(1000.0, 6),
+                before: &[],
+                after: &[part("result", 1000.0, 6)],
             },
         );
         assert_eq!(
@@ -2856,11 +2844,11 @@ mod tests {
 
     #[test]
     fn unchanged_edit_reports_measurements_before_and_after() {
-        let before = summary(1000.0, 6);
+        let before = [part("result", 1000.0, 6)];
         let same = turn_chat_message(
             "Renamed a parameter",
             TurnGeometry::Solid {
-                before: Some(&before),
+                before: &before,
                 after: &before,
             },
         );
@@ -2872,18 +2860,135 @@ mod tests {
 
     #[test]
     fn changed_edit_reports_every_measurement_before_and_after() {
-        let before = summary(1000.0, 6);
         let message = turn_chat_message(
             "Added a hole",
             TurnGeometry::Solid {
-                before: Some(&before),
-                after: &summary(900.0, 9),
+                before: &[part("result", 1000.0, 6)],
+                after: &[part("result", 900.0, 9)],
             },
         );
         assert_eq!(
             message,
             "Added a hole\n\nModel change: faces 6 to 9; volume 1000 to 900 mm³ (-10.0%). Before: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm. After: 9 faces, volume 900 mm³, 10 × 10 × 10 mm."
         );
+    }
+
+    #[test]
+    fn a_multi_part_edit_reports_each_part_by_name() {
+        let message = turn_chat_message(
+            "Thickened the lid",
+            TurnGeometry::Solid {
+                before: &[part("bracket", 1000.0, 6), part("lid", 200.0, 6)],
+                after: &[part("bracket", 1000.0, 6), part("lid", 400.0, 6)],
+            },
+        );
+        assert_eq!(
+            message,
+            "Thickened the lid\n\nModel change per part:\n\
+             bracket: unchanged, 6 faces, volume 1000 mm³, 10 × 10 × 10 mm.\n\
+             lid: volume 200 to 400 mm³ (+100.0%). This is a large change; check the model is still what you intended. Before: 6 faces, volume 200 mm³, 10 × 10 × 10 mm. After: 6 faces, volume 400 mm³, 10 × 10 × 10 mm."
+        );
+    }
+
+    #[test]
+    fn a_turn_compares_against_the_parts_that_were_on_screen_when_it_started() {
+        let (_dir, mut app) = two_part_project();
+        let project = app.project_mut().unwrap();
+        project
+            .model_parts
+            .push(loaded_part(1, "bracket", 1000.0, 6));
+        project.model_parts.push(loaded_part(2, "lid", 200.0, 6));
+        assert_eq!(
+            project.part_measurements(),
+            vec![part("bracket", 1000.0, 6), part("lid", 200.0, 6)]
+        );
+
+        let response = project
+            .conversation
+            .push(Message::ai_response("Thickened the lid"));
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            comment_ids: vec![],
+            parts_before: app.project().unwrap().part_measurements(),
+            history_len: 1,
+        });
+        app.finish_turn(TurnOutcome::Completed {
+            summary: "Thicken the lid".to_string(),
+            model: Box::new(two_part_model(&[("bracket", 1000.0, 6), ("lid", 400.0, 6)])),
+            source: "width = 80\ndepth = 40\n".to_string(),
+        });
+
+        let reply = app
+            .project_mut()
+            .unwrap()
+            .conversation
+            .message_mut(response)
+            .unwrap()
+            .text
+            .clone();
+        assert!(
+            reply.starts_with("Thickened the lid\n\nModel change per part:\n"),
+            "{reply}"
+        );
+        assert!(reply.contains("bracket: unchanged"), "{reply}");
+        assert!(
+            reply.contains("lid: volume 200 to 400 mm³ (+100.0%)"),
+            "{reply}"
+        );
+    }
+
+    fn loaded_part(id: u32, name: &str, volume: f64, faces: usize) -> crate::project::LoadedPart {
+        crate::project::LoadedPart {
+            id,
+            name: name.to_string(),
+            summary: summary(volume, faces),
+            ledger: cadmark_core::ledger::ProvenanceLedger::new(),
+            sketch_lineage: Default::default(),
+            descriptors: GeometryDescriptors::default(),
+            model: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(format!(
+                "/scratch/part-{id}.brep"
+            ))),
+            validity: vec![],
+        }
+    }
+
+    /// A solid result of several completed parts, each a plain box.
+    fn two_part_model(parts: &[(&str, f64, usize)]) -> cadmark_kernel::protocol::ExecutedModel {
+        let parts: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .map(
+                |(id, (name, volume, faces))| cadmark_kernel::protocol::ExecutedPart {
+                    id: id as u32 + 1,
+                    name: name.to_string(),
+                    mesh: cadmark_core::mesh::TessellatedMesh::default(),
+                    ledger: cadmark_core::ledger::ProvenanceLedger::new(),
+                    sketch_lineage: Default::default(),
+                    descriptors: GeometryDescriptors::default(),
+                    summary: summary(*volume, *faces),
+                    validity: vec![],
+                    file: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(format!(
+                        "/scratch/part-{id}.brep"
+                    ))),
+                },
+            )
+            .collect();
+        let whole = parts.last().expect("at least one part");
+        cadmark_kernel::protocol::ExecutedModel {
+            mesh: cadmark_core::mesh::TessellatedMesh::default(),
+            ledger: cadmark_core::ledger::ProvenanceLedger::new(),
+            sketch_lineage: Default::default(),
+            descriptors: GeometryDescriptors::default(),
+            form: cadmark_kernel::protocol::ModelForm::Solid(
+                cadmark_kernel::protocol::SolidResult {
+                    summary: whole.summary.clone(),
+                    validity: vec![],
+                    file: whole.file.clone(),
+                    parts,
+                },
+            ),
+        }
     }
 
     #[test]

@@ -27,6 +27,7 @@ use cadmark_bridge::tools::{
     RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
+use cadmark_core::geometry::describe_parts;
 use cadmark_core::message::{ContextUsage, Conversation, MessageKind};
 use cadmark_core::skills;
 use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
@@ -675,7 +676,9 @@ pub fn context_usage(
     }
 }
 
-/// What the model reads after a successful execution.
+/// What the model reads after a successful execution: the whole model's
+/// measurements, each part's own when the script completed several, and
+/// whether each is a closed valid solid.
 fn describe_model(model: &ExecutedModel) -> String {
     let mut text = match &model.form {
         ModelForm::Solid(solid) => {
@@ -683,6 +686,12 @@ fn describe_model(model: &ExecutedModel) -> String {
                 "Executed successfully. Model: {}.",
                 solid.summary.describe()
             );
+            if solid.parts.len() > 1 {
+                text.push_str(&format!(
+                    " Parts: {}.",
+                    describe_parts(&solid.part_measurements())
+                ));
+            }
             text.push(' ');
             text.push_str(&describe_validity(&solid.validity));
             text
@@ -949,6 +958,45 @@ mod tests {
                 regions: Vec::new(),
             }),
         }
+    }
+
+    #[test]
+    fn a_multi_part_result_tells_the_model_each_part_by_name() {
+        let mut model = sample_model();
+        let ModelForm::Solid(solid) = &mut model.form else {
+            unreachable!("sample model is a solid");
+        };
+        let part = |id: u32, name: &str, volume: f64| cadmark_kernel::protocol::ExecutedPart {
+            id,
+            name: name.to_string(),
+            mesh: TessellatedMesh::default(),
+            ledger: ProvenanceLedger::new(),
+            sketch_lineage: Default::default(),
+            descriptors: GeometryDescriptors::default(),
+            summary: ModelSummary {
+                volume,
+                ..solid.summary.clone()
+            },
+            validity: solid.validity.clone(),
+            file: solid.file.clone(),
+        };
+        solid.parts = vec![part(0, "bracket", 1000.0), part(1, "lid", 200.0)];
+        solid.validity = vec![solid.validity[0], solid.validity[0]];
+
+        let text = describe_model(&model);
+
+        assert!(
+            text.contains(
+                "Parts: bracket: 6 faces, volume 1000 mm³, 10 × 10 × 10 mm; \
+                 lid: 6 faces, volume 200 mm³, 10 × 10 × 10 mm."
+            ),
+            "{text}"
+        );
+        assert!(text.contains("Part 2 is closed and valid."), "{text}");
+
+        // One part is the model; naming it again would only repeat.
+        let text = describe_model(&sample_model());
+        assert!(!text.contains("Parts:"), "{text}");
     }
 
     #[test]
