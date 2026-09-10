@@ -346,8 +346,17 @@ impl ChatPane {
     }
 }
 
+/// How much of the context window the next request occupies, with the
+/// breakdown on hover, and a warning when the request would be too large
+/// with no conversation at all — which no amount of condensing helps.
 fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
     ui.horizontal(|ui| {
+        let over = context.request_alone_is_over_budget();
+        let colour = if over {
+            theme::WARNING
+        } else {
+            theme::TEXT_MUTED
+        };
         ui.label(
             egui::RichText::new(format!(
                 "Context: {} / {} tokens ({}%)",
@@ -356,20 +365,41 @@ fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
                 context.percent()
             ))
             .small()
-            .color(theme::TEXT_MUTED),
-        );
-        if context.reference_image_tokens > 0 {
+            .color(colour),
+        )
+        .on_hover_text(context_breakdown(context));
+        if over {
             ui.label(
-                egui::RichText::new(format!(
-                    "Includes {} tokens reserved for reference images",
-                    context.reference_image_tokens
-                ))
+                egui::RichText::new(
+                    "The script, instructions and images alone nearly fill the window; \
+                     condensing the conversation cannot make room. Raise the context \
+                     window in Settings or shorten the script.",
+                )
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::WARNING),
             );
         }
     });
     ui.add_space(4.0);
+}
+
+/// The occupancy figure's parts, one per line, in estimated tokens.
+fn context_breakdown(context: ContextUsage) -> String {
+    let mut lines = vec![
+        format!("Conversation: {} tokens", context.conversation_tokens),
+        format!(
+            "Instructions, tools, script, examples and draft: {} tokens",
+            context.request_tokens
+        ),
+    ];
+    if context.reference_image_tokens > 0 {
+        lines.push(format!(
+            "Reserved for reference images: {} tokens",
+            context.reference_image_tokens
+        ));
+    }
+    lines.push("Estimates: four characters to a token, whatever the provider counts.".to_string());
+    lines.join("\n")
 }
 
 fn marker_colour(comment: &PendingComment) -> egui::Color32 {
@@ -724,6 +754,7 @@ mod tests {
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
+    use cadmark_core::message::ContextUsage;
     use cadmark_core::message::{Conversation, ToolActivity};
 
     use super::*;
@@ -899,6 +930,7 @@ mod tests {
                     cadmark_core::message::ContextUsage {
                         conversation_tokens: 0,
                         reference_image_tokens: 0,
+                        request_tokens: 0,
                         window_tokens: 128_000,
                     },
                     &mut pending,
@@ -932,5 +964,30 @@ mod tests {
             neighbours: Vec::new(),
             chosen_candidate: None,
         }
+    }
+
+    #[test]
+    fn the_context_breakdown_names_each_part_and_the_images_only_when_present() {
+        let usage = ContextUsage {
+            conversation_tokens: 120,
+            reference_image_tokens: 0,
+            request_tokens: 4_500,
+            window_tokens: 128_000,
+        };
+        let text = context_breakdown(usage);
+        assert!(text.contains("Conversation: 120 tokens"), "{text}");
+        assert!(
+            text.contains("script, examples and draft: 4500 tokens"),
+            "{text}"
+        );
+        assert!(!text.contains("reference images"), "{text}");
+        let with_images = context_breakdown(ContextUsage {
+            reference_image_tokens: 765,
+            ..usage
+        });
+        assert!(
+            with_images.contains("reference images: 765 tokens"),
+            "{with_images}"
+        );
     }
 }
