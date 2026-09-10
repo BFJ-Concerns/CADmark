@@ -223,20 +223,26 @@ impl Orchestrator {
 /// `ai` is the AI configuration outcome; when it is an error the worker
 /// still executes scripts and answers a turn with the reason. `render`
 /// answers the render tool from the UI thread's published scene.
+/// The channels to a running orchestrator thread and the thread itself,
+/// so the owner can wait for it to finish rather than let it race the
+/// process's teardown of the GPU and the runtime it holds.
+pub struct OrchestratorHandle {
+    pub commands: mpsc::Sender<OrchestratorCommand>,
+    pub results: mpsc::Receiver<OrchestratorResult>,
+    pub thread: std::thread::JoinHandle<()>,
+}
+
 pub fn spawn_orchestrator(
     project_dir: PathBuf,
     script_filename: String,
     ai: Result<AiServices, String>,
     limits: ExecutionLimits,
     render: Box<dyn RenderSource>,
-) -> (
-    mpsc::Sender<OrchestratorCommand>,
-    mpsc::Receiver<OrchestratorResult>,
-) {
+) -> OrchestratorHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<OrchestratorCommand>();
     let (result_tx, result_rx) = mpsc::channel();
 
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name("cadmark-orchestrator".into())
         .spawn(move || {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
@@ -314,5 +320,9 @@ pub fn spawn_orchestrator(
         })
         .expect("failed to spawn the orchestrator thread");
 
-    (cmd_tx, result_rx)
+    OrchestratorHandle {
+        commands: cmd_tx,
+        results: result_rx,
+        thread,
+    }
 }
