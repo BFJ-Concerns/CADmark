@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryDescriptors, MinimumDistance, ModelSummary, SolidValidity, TopologyElement,
+    GeometryDescriptors, MinimumDistance, ModelSummary, PartMeasurements, SolidValidity,
+    TopologyElement,
 };
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::mesh::TessellatedMesh;
@@ -79,6 +80,18 @@ pub struct ExecutedPart {
 impl ExecutedPart {
     pub fn is_printable(&self) -> bool {
         solids_are_printable(&self.validity)
+    }
+
+    /// The part's measurements under the name the script gave it.
+    pub fn measurements(&self) -> PartMeasurements {
+        PartMeasurements::new(self.name.clone(), self.summary.clone())
+    }
+}
+
+impl SolidResult {
+    /// Every part's measurements, in source binding order.
+    pub fn part_measurements(&self) -> Vec<PartMeasurements> {
+        self.parts.iter().map(ExecutedPart::measurements).collect()
     }
 }
 

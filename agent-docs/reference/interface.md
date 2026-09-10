@@ -105,7 +105,9 @@ Context occupancy shown in the chat, including reserved reference-image budget, 
 
 Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation, differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
 
-Source: `crates/cadmark-ui/src/chat.rs:1–9`, `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`).
+A completed turn's reply ends with a change report: face count, volume, and overall size before and after the turn. A single-part model reads as "Model change: …" or "Model unchanged." with both sets of values. A multi-part model reports one line per part under its script binding name, matched to the part of the same name before the turn; a binding no longer produced is "removed", one not produced before is "new". The `run_script` tool result the AI reads carries the same per-part measurements ("Parts: name: …; name: …") when the script completed more than one part.
+
+Source: `crates/cadmark-ui/src/chat.rs:1–9`, `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`, `describe_model`), `crates/cadmark-core/src/geometry.rs` (`describe_model_change`).
 
 The **Skills** menu inserts a built-in command into the draft. Start a message or
 spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
