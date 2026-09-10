@@ -41,7 +41,7 @@ use crate::project::{Busy, Project, SCRIPT_WATCH_INTERVAL};
 use crate::reference_images::ReferenceImagePicker;
 use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
 use crate::script_parameters::{self, Parameter};
-use crate::turn::{NoRender, RenderSource, TurnEvent, TurnInput, TurnOutcome, context_usage};
+use crate::turn::{NoRender, RenderSource, RequestAssembly, TurnEvent, TurnInput, TurnOutcome};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
 use crate::validity::{ExportDecision, describe_validity, export_decision, export_warning};
 use crate::viewport::{
@@ -467,6 +467,27 @@ impl CadmarkApp {
     }
 
     // ── Turns ─────────────────────────────────────────────────────
+
+    /// The turn the user would send now: the chat draft and every pending
+    /// comment, lost anchors and all, so the occupancy figure prices what
+    /// is on screen rather than what is sendable.
+    fn draft_input(&self) -> TurnInput {
+        let chat = self.chat.input_text.trim();
+        TurnInput {
+            chat: (!chat.is_empty()).then(|| chat.to_string()),
+            comments: self
+                .pending_comments
+                .comments()
+                .iter()
+                .map(|comment| GroundedComment {
+                    text: comment.text.clone(),
+                    anchors: comment.live_anchors().unwrap_or_default(),
+                })
+                .collect(),
+            images: Vec::new(),
+            context_window_tokens: self.settings.context_window_tokens,
+        }
+    }
 
     /// Send a chat message: one turn with this text and no anchors.
     fn send_chat_message(&mut self, text: String) {
@@ -1737,7 +1758,8 @@ impl CadmarkApp {
                     .inner_margin(egui::Margin::symmetric(10, 8)),
             )
             .show(ctx, |ui| {
-                let usage = context_usage(&waiting, 0, self.settings.context_window_tokens);
+                let usage = RequestAssembly::new(&waiting, None, &self.draft_input(), false)
+                    .usage(self.settings.context_window_tokens);
                 chat_action = self
                     .chat
                     .show(ui, &waiting, usage, &mut self.pending_comments);
@@ -1882,11 +1904,21 @@ impl CadmarkApp {
                     });
                 });
                 ui.separator();
-                let usage = context_usage(
+                // The figure is what the next request would weigh if sent
+                // now: the draft and pending comments as they stand, the
+                // last executed script standing in for the file on disk.
+                let usage = RequestAssembly::new(
                     &project.conversation,
-                    if project.ai_accepts_images { project.reference_images.images.len() } else { 0 },
-                    self.settings.context_window_tokens,
-                );
+                    project.script_source.as_deref(),
+                    &self.draft_input(),
+                    project.ai_accepts_images,
+                )
+                .reserving_images(if project.ai_accepts_images {
+                    project.reference_images.images.len()
+                } else {
+                    0
+                })
+                .usage(self.settings.context_window_tokens);
                 action =
                     self.chat
                         .show(ui, &project.conversation, usage, &mut self.pending_comments);
