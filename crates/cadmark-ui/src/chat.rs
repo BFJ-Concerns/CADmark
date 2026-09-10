@@ -500,19 +500,21 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.set_max_width(inner * 0.85);
                         ui.set_min_width(inner * 0.55);
-                        ui.horizontal_wrapped(|ui| {
-                            for anchor in anchors {
-                                theme::chip(ui, &spatial_chip(anchor), tint)
-                                    .on_hover_text(anchor.provenance.describe());
-                            }
-                            if *applied {
-                                ui.label(
-                                    egui::RichText::new("\u{2713} applied")
-                                        .small()
-                                        .color(theme::TEXT_MUTED),
-                                );
-                            }
-                        });
+                        let chips: Vec<theme::ChipEntry> = anchors
+                            .iter()
+                            .map(|anchor| theme::ChipEntry {
+                                label: spatial_chip(anchor),
+                                hover: Some(anchor.provenance.describe()),
+                            })
+                            .collect();
+                        theme::chip_grid(ui, &chips, tint);
+                        if *applied {
+                            ui.label(
+                                egui::RichText::new("\u{2713} applied")
+                                    .small()
+                                    .color(theme::TEXT_MUTED),
+                            );
+                        }
                         let text_colour = if *applied {
                             theme::TEXT_MUTED
                         } else {
@@ -553,35 +555,40 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
             });
         }
         MessageKind::ToolCalls(activities) => show_tool_calls(ui, message, activities, width),
-        MessageKind::Notice { is_error } => {
-            let (tint, text_colour) = if *is_error {
-                (theme::ERROR, theme::TEXT)
-            } else {
-                (theme::TEXT_MUTED, theme::TEXT_MUTED)
-            };
-            let frame = theme::tinted_card(tint);
-            let inner = card_inner(&frame);
-            frame.show(ui, |ui| {
-                ui.set_width(inner);
-                if *is_error {
-                    ui.label(
-                        egui::RichText::new("\u{26A0} Something went wrong")
-                            .small()
-                            .strong()
-                            .color(theme::ERROR),
-                    );
-                }
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&message.text)
-                            .color(text_colour)
-                            .size(theme::SMALL_SIZE + 1.0),
-                    )
-                    .wrap(),
-                );
-            });
-        }
+        MessageKind::Notice { is_error } => show_notice(ui, &message.text, *is_error, width),
+        MessageKind::DesignChange => show_notice(ui, &message.text, false, width),
     }
+}
+
+/// A note from CADmark itself: quiet, or red with a heading when something
+/// went wrong.
+fn show_notice(ui: &mut egui::Ui, text: &str, is_error: bool, width: f32) {
+    let (tint, text_colour) = if is_error {
+        (theme::ERROR, theme::TEXT)
+    } else {
+        (theme::TEXT_MUTED, theme::TEXT_MUTED)
+    };
+    let frame = theme::tinted_card(tint);
+    let inner = width - frame.total_margin().sum().x;
+    frame.show(ui, |ui| {
+        ui.set_width(inner);
+        if is_error {
+            ui.label(
+                egui::RichText::new("\u{26A0} Something went wrong")
+                    .small()
+                    .strong()
+                    .color(theme::ERROR),
+            );
+        }
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .color(text_colour)
+                    .size(theme::SMALL_SIZE + 1.0),
+            )
+            .wrap(),
+        );
+    });
 }
 
 /// A run of tool calls: one collapsed line naming what was done, opening

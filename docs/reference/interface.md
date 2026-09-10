@@ -63,7 +63,7 @@ The chat pane is where you talk to the AI. Messages are distinguished by positio
 - Tool calls appear as a collapsed group you can expand to see each call's input and result.
 - Notices from CADmark itself are quiet, or red when something failed.
 
-Every turn sends the AI the part's script as it stands on disk, whatever the conversation holds: a reopened project, a new conversation, or a condensed chat all start from the real file. When the file differs from the last script the AI ran, because a value was changed in the parameters panel or a design step was undone, the AI is told so and which parameter values changed, so it keeps them.
+Every turn sends the AI the part's script as it stands on disk, whatever the conversation holds: a reopened project, a new conversation, or a condensed chat all start from the real file. When the file differs from the last script the AI ran, because a value was changed in the parameters panel or a design step was undone, the AI is told so and which parameter values changed, so it keeps them. Each such change is also noted in the chat where it happened, in a quiet card the AI reads with the rest of the conversation, so it knows when you set a value or stepped back and can tell one edit from a later reversal.
 
 A completed turn's reply ends with what measurably changed: face count, volume, and overall size before and after, so an edit that did more than you asked is visible at once. When the script defines several parts, each part is reported on its own line under the name the script gives it, with a part the script no longer produces marked as removed and one it did not produce before as new.
 

@@ -65,6 +65,11 @@ pub enum MessageKind {
     /// A note from CADmark itself rather than the AI: an execution failure,
     /// a provider error, or AI being unavailable.
     Notice { is_error: bool },
+    /// A change the user made to the design outside the chat — a value set
+    /// in the parameters panel, a design step undone, redone, or restored —
+    /// recorded where it happened so the AI's next turn knows when and why
+    /// the script moved, not only that it differs from its last run.
+    DesignChange,
 }
 
 /// A single message in the conversation.
@@ -121,6 +126,12 @@ impl Message {
     /// A note about something that went wrong.
     pub fn error_notice(text: impl Into<String>) -> Self {
         Self::new(MessageKind::Notice { is_error: true }, text)
+    }
+
+    /// A change the user made outside the chat, for the AI to read as well
+    /// as the user.
+    pub fn design_change(text: impl Into<String>) -> Self {
+        Self::new(MessageKind::DesignChange, text)
     }
 
     /// Mark a spatial comment as applied (AI has acted on it).
