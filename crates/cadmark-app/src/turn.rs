@@ -653,6 +653,10 @@ fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
                     });
                 }
             }
+            MessageKind::DesignChange => items.push(ModelItem::User {
+                text: format!("Note from CADmark: {}", message.text),
+                images: Vec::new(),
+            }),
             MessageKind::Notice { .. } => {}
         }
     }
@@ -2199,10 +2203,19 @@ mod tests {
         }]));
         conversation.push(Message::ai_response("Made a box."));
         conversation.push(Message::error_notice("not for the model"));
+        conversation.push(Message::design_change(
+            "Set width to 90 in the parameters panel.",
+        ));
         let items = history_items(&conversation);
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 5);
         assert!(matches!(&items[1], ModelItem::ToolCall(call) if call.id == "c1"));
         assert!(matches!(&items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1"));
         assert!(matches!(&items[3], ModelItem::Assistant { text } if text == "Made a box."));
+        // What the user did outside the chat reaches the model in place,
+        // so it knows when and why the script moved; a notice does not.
+        assert!(matches!(
+            &items[4],
+            ModelItem::User { text, .. } if text == "Note from CADmark: Set width to 90 in the parameters panel."
+        ));
     }
 }
