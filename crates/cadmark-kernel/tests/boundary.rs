@@ -292,8 +292,13 @@ fn operation_in_pattern(
 
 /// Returns the operation variant when a line branches on it. Match arms only
 /// inspect the pattern before `=>`, so constructing an operation as a match
-/// arm's value remains allowed. `Self::` is permitted only inside the enum's
+/// arm's value remains allowed. `if let` and `while let` inspect the pattern
+/// between `let` and its `=`, so binding an operation as a value on the
+/// right stays allowed. `Self::` is permitted only inside the enum's
 /// inherent implementation, where it defines the vocabulary itself.
+///
+/// The inspection is line-shaped: a pattern that spans several lines, or a
+/// branch through a string literal, is outside what it sees.
 fn operation_branch_on_line(
     code: &str,
     imported: &BTreeMap<String, String>,
@@ -305,6 +310,9 @@ fn operation_branch_on_line(
     if code.contains("matches!") {
         return operation_in_pattern(code, imported, permit_self);
     }
+    if let Some(pattern) = let_pattern(code) {
+        return operation_in_pattern(pattern, imported, permit_self);
+    }
     let (_, condition) = code.split_once("if")?;
     let condition = condition.split('{').next().unwrap_or(condition);
     if condition.contains("==") || condition.contains("!=") {
@@ -312,6 +320,16 @@ fn operation_branch_on_line(
     } else {
         None
     }
+}
+
+/// The pattern of an `if let` or `while let` on this line: the text between
+/// `let` and the `=` that binds it. A plain `let` binding is not a branch.
+fn let_pattern(code: &str) -> Option<&str> {
+    let after_keyword = ["if let ", "while let ", "&& let "]
+        .iter()
+        .find_map(|keyword| code.split_once(keyword).map(|(_, rest)| rest))?;
+    let (pattern, _) = after_keyword.split_once('=')?;
+    Some(pattern)
 }
 
 fn semantic_operation_impl_lines(code: &[String]) -> BTreeSet<usize> {
@@ -503,6 +521,42 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
         operation_branch_on_line("0 => SemanticOperation::Fillet,", &no_imports, false),
         None,
         "constructing an operation as a match arm value is not an operation branch"
+    );
+    assert_eq!(
+        operation_branch_on_line(
+            "if let SemanticOperation::Fillet = operation {",
+            &no_imports,
+            false
+        ),
+        Some("Fillet".to_owned()),
+        "a single-line if-let on an operation is a branch"
+    );
+    assert_eq!(
+        operation_branch_on_line(
+            "while let Some(Fillet) = queue.pop() {",
+            &single_import,
+            false
+        ),
+        Some("Fillet".to_owned()),
+        "a single-line while-let on an imported operation is a branch"
+    );
+    assert_eq!(
+        operation_branch_on_line(
+            "if ready && let Round = operation {",
+            &alias_import,
+            false
+        ),
+        Some("Fillet".to_owned()),
+        "a let chain on an aliased operation is a branch"
+    );
+    assert_eq!(
+        operation_branch_on_line(
+            "if let Some(operation) = SemanticOperation::Fillet.into() {",
+            &no_imports,
+            false
+        ),
+        None,
+        "an operation on the right of a let is a value, not a branch"
     );
     assert_eq!(
         operation_branch_on_line(
