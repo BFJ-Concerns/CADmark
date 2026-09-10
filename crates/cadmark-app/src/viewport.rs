@@ -29,8 +29,8 @@ pub struct ViewportResources {
     /// Part whose local face and edge IDs topology picking reads.
     active_part: Option<usize>,
     /// The sketch profile on screen, when the design has reached only a
-    /// sketch. Nothing picks against it: sketch elements are not pick
-    /// targets.
+    /// sketch. Its regions, curves and corners are pick targets drawn
+    /// over the solid's in the picking pass.
     sketch: Option<GpuSketch>,
     /// Pick attempt submitted through the independent readback encoder. Its
     /// marker proves whether those commands completed before bytes are trusted.
@@ -445,12 +445,20 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
         );
 
         // ── Pick and hover readbacks ──
-        if !res.meshes.is_empty() {
+        if !res.meshes.is_empty() || res.sketch.is_some() {
+            // A ghosted solid behind a sketch belongs to an earlier
+            // script, which this model's ledger cannot explain, so it is
+            // not a pick target: only the sketch's own elements are.
+            let pickable_meshes: &[GpuMesh] = if res.sketch.is_some() {
+                &[]
+            } else {
+                &res.meshes
+            };
             let topology_meshes = res
                 .active_part
-                .and_then(|id| res.meshes.get(id))
+                .and_then(|id| pickable_meshes.get(id))
                 .map(std::slice::from_ref)
-                .unwrap_or(&res.meshes);
+                .unwrap_or(pickable_meshes);
             if self.pick_request.is_some() || self.part_pick_request.is_some() {
                 res.retry_pick = None;
             }
@@ -479,8 +487,9 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                         &mut pick_encoder,
                         &res.pipelines,
                         &res.picking,
-                        &res.meshes,
+                        pickable_meshes,
                         topology_meshes,
+                        res.sketch.as_ref(),
                         self.selection_filter,
                     );
                 }
@@ -525,8 +534,9 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     &mut hover_encoder,
                     &res.pipelines,
                     &res.picking,
-                    &res.meshes,
+                    pickable_meshes,
                     topology_meshes,
+                    res.sketch.as_ref(),
                     self.selection_filter,
                 );
                 copy_pick_pixel(&mut hover_encoder, &res.picking, &res.hover.staging, x, y);
