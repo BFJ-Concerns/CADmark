@@ -78,10 +78,6 @@ pub struct ExecutedPart {
 }
 
 impl ExecutedPart {
-    pub fn is_printable(&self) -> bool {
-        solids_are_printable(&self.validity)
-    }
-
     /// The part's measurements under the name the script gave it.
     pub fn measurements(&self) -> PartMeasurements {
         PartMeasurements::new(self.name.clone(), self.summary.clone())
@@ -140,17 +136,18 @@ impl ExecutedModel {
             ModelForm::Solid(_) => None,
         }
     }
-
-    /// Whether every solid is closed and valid — what "print-ready" means
-    /// for the export gate. A sketch is never printable.
-    pub fn is_printable(&self) -> bool {
-        self.solid()
-            .is_some_and(|solid| solids_are_printable(&solid.validity))
-    }
 }
 
-fn solids_are_printable(validity: &[SolidValidity]) -> bool {
-    !validity.is_empty() && validity.iter().all(|solid| solid.is_printable())
+/// Whether every solid is closed and valid — the question the export gate
+/// asks of a model, stated in one word for the kernel's own tests. The
+/// application decides export from the per-solid `validity` directly.
+#[cfg(test)]
+impl ExecutedModel {
+    pub(crate) fn is_printable(&self) -> bool {
+        self.solid().is_some_and(|solid| {
+            !solid.validity.is_empty() && solid.validity.iter().all(|solid| solid.is_printable())
+        })
+    }
 }
 
 /// Why the worker could not complete a request.
