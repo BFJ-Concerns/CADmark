@@ -49,7 +49,7 @@ The camera zooms from a fraction of a millimetre to kilometres away, and the mod
 
 Two tools let you inspect internal geometry without exporting:
 
-**Section plane** — the "Section" button in the toolbar cuts the model along X, Y, or Z. A slider positions the plane within the model's extent, and a flip button swaps which half is kept. Cut-away geometry is unclickable.
+**Section plane** — the "Section" button in the toolbar cuts the model along X, Y, or Z. A slider positions the plane within the model's extent, and a flip button swaps which half is kept. Cut-away geometry is unclickable, and a click there reaches the interior face the cut reveals.
 
 **Ghost mode** — the "Ghost" button makes the model see-through.
 

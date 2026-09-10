@@ -503,14 +503,14 @@ impl RenderPipelines {
             &picking_pipeline_layout,
             &picking_shader,
             "topology_depth_pipeline",
-            None,
+            "fs_depth",
         );
         let marker_depth_pipeline = self::topology_depth_pipeline(
             device,
             &picking_pipeline_layout,
             &picking_shader,
             "marker_depth_pipeline",
-            Some("fs_marker_depth"),
+            "fs_marker_depth",
         );
 
         let edge_picking_pipeline =
@@ -1043,12 +1043,16 @@ impl RenderPipelines {
     }
 }
 
+/// A depth-only pass over the mesh. `fragment_entry` names the stage
+/// that decides which fragments write depth: every prepass has one, so
+/// the section plane's cut is honoured and cut-away geometry does not
+/// occlude what the cut reveals.
 fn topology_depth_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     label: &str,
-    fragment_entry: Option<&str>,
+    fragment_entry: &str,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
@@ -1056,19 +1060,12 @@ fn topology_depth_pipeline(
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<GpuVertex>() as u64,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![
-                    0 => Float32x3, 1 => Float32x3, 2 => Float32, 3 => Float32,
-                    4 => Float32, 5 => Float32x3,
-                ],
-            }],
+            buffers: &[gpu_vertex_layout()],
             compilation_options: Default::default(),
         },
-        fragment: fragment_entry.map(|entry| wgpu::FragmentState {
+        fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some(entry),
+            entry_point: Some(fragment_entry),
             targets: &[],
             compilation_options: Default::default(),
         }),
@@ -2189,6 +2186,138 @@ mod tests {
         );
         picking.staging_buffer.unmap();
         element
+    }
+
+    /// Two faces at different depths, both across the whole viewport, with
+    /// the section cutting the near one away on one side: the click on
+    /// that side must reach the far face the cut reveals, and the click on
+    /// the kept side the near face. A depth prepass that ignored the
+    /// section would leave the near face's depth behind and block the far
+    /// face.
+    #[test]
+    fn a_face_revealed_by_the_section_is_pickable_behind_the_cut_away_one() {
+        let (device, queue) = verification_device();
+
+        const SIZE: u32 = 64;
+        let pipelines =
+            RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, SIZE, SIZE);
+        let picking = crate::picking::PickingPass::new(&device, SIZE, SIZE);
+
+        let part_id = crate::picking::encode_picking_id(
+            &cadmark_core::geometry::TopologyElement::Part(cadmark_core::geometry::PartId(0)),
+        ) as f32;
+        let quad = |face: u32, depth: f32| {
+            let face_id =
+                crate::picking::encode_picking_id(&cadmark_core::geometry::TopologyElement::Face(
+                    cadmark_core::geometry::FaceId(face),
+                )) as f32;
+            let corner = |x: f32, y: f32| crate::mesh::GpuVertex {
+                position: [x, y, depth],
+                normal: [0.0, 0.0, 1.0],
+                face_id,
+                _padding: 0.0,
+                part_id,
+                _part_padding: [0.0; 3],
+            };
+            [
+                corner(-0.9, -0.9),
+                corner(0.9, -0.9),
+                corner(0.9, 0.9),
+                corner(-0.9, 0.9),
+            ]
+        };
+        // Face 3 near (z = 0.2), face 5 far (z = 0.8): one mesh, two faces.
+        let vertices: Vec<_> = quad(3, 0.2).into_iter().chain(quad(5, 0.8)).collect();
+        let indices: [u32; 12] = [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
+        let mesh = crate::mesh::GpuMesh {
+            vertex_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&vertices),
+                wgpu::BufferUsages::VERTEX,
+            ),
+            index_buffer: buffer_of(
+                &device,
+                &queue,
+                bytemuck::cast_slice(&indices),
+                wgpu::BufferUsages::INDEX,
+            ),
+            index_count: indices.len() as u32,
+            edge_vertex_buffer: buffer_of(&device, &queue, &[0u8; 16], wgpu::BufferUsages::VERTEX),
+            edge_vertex_count: 0,
+            marker_vertex_buffer: buffer_of(
+                &device,
+                &queue,
+                &[0u8; 16],
+                wgpu::BufferUsages::VERTEX,
+            ),
+            marker_vertex_count: 0,
+        };
+
+        // Cut along Z at 0.5, keeping the far side: the near face is cut
+        // away entirely and the far face is what the cut reveals.
+        let section = crate::section::SectionPlane {
+            enabled: true,
+            axis: crate::section::Axis::Z,
+            offset: 0.5,
+            flipped: true,
+        };
+        assert!(section.keeps([0.0, 0.0, 0.8]) && !section.keeps([0.0, 0.0, 0.2]));
+        let uniforms = SimpleUniforms {
+            view_proj: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            section_plane: section.equation(),
+            marker_size: MarkerSizing::default().extent(SIZE, SIZE),
+        };
+        queue.write_buffer(
+            &pipelines.picking_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&uniforms),
+        );
+        assert_eq!(
+            read_pick(
+                &device,
+                &queue,
+                &pipelines,
+                &picking,
+                &mesh,
+                SIZE / 2,
+                SIZE / 2
+            ),
+            Some(cadmark_core::geometry::PickedElement::Solid(
+                cadmark_core::geometry::TopologyElement::Face(cadmark_core::geometry::FaceId(5))
+            )),
+            "the face the section reveals must answer the click"
+        );
+
+        // Without the section, the near face is what the click meets.
+        let uniforms = SimpleUniforms {
+            section_plane: [0.0; 4],
+            ..uniforms
+        };
+        queue.write_buffer(
+            &pipelines.picking_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&uniforms),
+        );
+        assert_eq!(
+            read_pick(
+                &device,
+                &queue,
+                &pipelines,
+                &picking,
+                &mesh,
+                SIZE / 2,
+                SIZE / 2
+            ),
+            Some(cadmark_core::geometry::PickedElement::Solid(
+                cadmark_core::geometry::TopologyElement::Face(cadmark_core::geometry::FaceId(3))
+            ))
+        );
     }
 
     #[test]
