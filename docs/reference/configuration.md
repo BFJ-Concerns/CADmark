@@ -38,7 +38,7 @@ A script that hits either ceiling is stopped, and the AI is told which one it cr
 
 ## Context window
 
-Set this to match your model's context window (default: 128 000 tokens). CADmark condenses the conversation before the next request reaches this limit, keeping decisions and outstanding requests. The chat's context figure counts the whole request against it, not only the conversation.
+When a project opens, CADmark asks the endpoint what context window the configured model has and uses that figure if the endpoint reports one; the status bar says so when it differs from the setting. This setting is the fallback for an endpoint that reports nothing (default: 128 000 tokens), and the Settings dialog says which is in force. CADmark condenses the conversation before the next request reaches the limit, keeping decisions and outstanding requests. The chat's context figure counts the whole request against it, not only the conversation.
 
 ## What happens when something goes wrong
 

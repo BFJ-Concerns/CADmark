@@ -468,6 +468,15 @@ impl CadmarkApp {
 
     // ── Turns ─────────────────────────────────────────────────────
 
+    /// The context window every request is measured against: what the
+    /// endpoint advertised for the model when the project opened, or the
+    /// manual setting when it advertised nothing.
+    fn context_window_tokens(&self) -> usize {
+        self.project()
+            .and_then(|project| project.detected_context_window)
+            .unwrap_or(self.settings.context_window_tokens)
+    }
+
     /// The turn the user would send now: the chat draft and every pending
     /// comment, lost anchors and all, so the occupancy figure prices what
     /// is on screen rather than what is sendable.
@@ -485,7 +494,7 @@ impl CadmarkApp {
                 })
                 .collect(),
             images: Vec::new(),
-            context_window_tokens: self.settings.context_window_tokens,
+            context_window_tokens: self.context_window_tokens(),
         }
     }
 
@@ -501,7 +510,7 @@ impl CadmarkApp {
                 chat: Some(text),
                 comments: Vec::new(),
                 images: Vec::new(),
-                context_window_tokens: self.settings.context_window_tokens,
+                context_window_tokens: self.context_window_tokens(),
             },
             history,
             Vec::new(),
@@ -554,7 +563,7 @@ impl CadmarkApp {
                 chat,
                 comments,
                 images: Vec::new(),
-                context_window_tokens: self.settings.context_window_tokens,
+                context_window_tokens: self.context_window_tokens(),
             },
             history,
             comment_ids,
@@ -831,6 +840,16 @@ impl CadmarkApp {
                     )));
                     self.clear_loaded_model();
                     self.status = Some(Status::error(format!("Execution error: {error}")));
+                }
+                OrchestratorResult::ContextWindowDetected { tokens } => {
+                    let differs = tokens != self.settings.context_window_tokens;
+                    project.detected_context_window = Some(tokens);
+                    if differs {
+                        self.status = Some(Status::info(format!(
+                            "Context window: {tokens} tokens, as the endpoint reports for {}",
+                            project.ai_model.as_deref().unwrap_or("the model")
+                        )));
+                    }
                 }
                 OrchestratorResult::TurnEvent(event) => self.apply_turn_event(event),
                 OrchestratorResult::TurnEnded(outcome) => self.finish_turn(outcome),
@@ -1354,6 +1373,9 @@ impl CadmarkApp {
             wall_clock_seconds: self.settings.limits.wall_clock.as_secs(),
             memory_megabytes: self.settings.limits.memory_bytes / (1024 * 1024),
             context_window_tokens: self.settings.context_window_tokens,
+            detected_context_window: self
+                .project()
+                .and_then(|project| project.detected_context_window),
         });
     }
 
@@ -1918,7 +1940,7 @@ impl CadmarkApp {
                 } else {
                     0
                 })
-                .usage(self.settings.context_window_tokens);
+                .usage(self.context_window_tokens());
                 action =
                     self.chat
                         .show(ui, &project.conversation, usage, &mut self.pending_comments);
@@ -2820,6 +2842,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved.messages().last().unwrap().text, last.text);
+    }
+
+    #[test]
+    fn a_detected_context_window_takes_precedence_over_the_manual_setting() {
+        let (_dir, mut app) = two_part_project();
+        app.settings.context_window_tokens = 128_000;
+        assert_eq!(app.context_window_tokens(), 128_000);
+        assert_eq!(app.draft_input().context_window_tokens, 128_000);
+
+        app.project_mut().unwrap().detected_context_window = Some(200_000);
+        assert_eq!(app.context_window_tokens(), 200_000);
+        assert_eq!(app.draft_input().context_window_tokens, 200_000);
+
+        // The figure shows in the settings dialog as what is in force.
+        app.open_settings();
+        let form = app.settings_dialog.form().expect("dialog open");
+        assert_eq!(form.detected_context_window, Some(200_000));
+        assert_eq!(form.context_window_tokens, 128_000);
     }
 
     #[test]

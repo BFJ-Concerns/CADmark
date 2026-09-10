@@ -76,6 +76,10 @@ pub enum OrchestratorResult {
         second: TopologyElement,
         result: Result<MinimumDistance, String>,
     },
+    /// The endpoint advertised the configured model's context window.
+    /// Sent once per project open when the probe finds one; never sent
+    /// when it does not, so the manual setting stands.
+    ContextWindowDetected { tokens: usize },
 }
 
 /// The production executor: the confined kernel worker.
@@ -256,6 +260,20 @@ pub fn spawn_orchestrator(
                     ai,
                     render,
                 };
+
+                // The context window the endpoint advertises, asked for
+                // off the command loop so the first build never waits on
+                // the network, and reported only when there is one.
+                if let Ok(services) = &orchestrator.ai {
+                    let model = services.model.clone();
+                    let probe_tx = result_tx.clone();
+                    tokio::spawn(async move {
+                        if let Some(tokens) = model.context_window(CancelFlag::new()).await {
+                            let _ =
+                                probe_tx.send(OrchestratorResult::ContextWindowDetected { tokens });
+                        }
+                    });
+                }
 
                 while let Ok(command) = cmd_rx.recv() {
                     let result = match command {
