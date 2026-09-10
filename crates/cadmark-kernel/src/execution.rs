@@ -102,16 +102,10 @@ pub fn discover_venv() -> Option<PathBuf> {
         }
     }
 
-    // Compile-time workspace root: CARGO_MANIFEST_DIR points at
-    // crates/cadmark-kernel/, so the workspace root is two levels up.
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
-        let candidate = workspace_root.join(".venv");
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
-    }
-
+    // The running copy's own neighbourhood comes before the checkout it
+    // was built from: an installed binary must not reach back into the
+    // source tree for its runtime. A target/debug or target/release
+    // binary finds the workspace .venv this way too, three levels up.
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
     {
@@ -120,6 +114,17 @@ pub fn discover_venv() -> Option<PathBuf> {
             if candidate.is_dir() {
                 return Some(candidate);
             }
+        }
+    }
+
+    // Compile-time workspace root: CARGO_MANIFEST_DIR points at
+    // crates/cadmark-kernel/, so the workspace root is two levels up. This
+    // is what a test binary deep in target/debug/deps falls back to.
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(|p| p.parent()) {
+        let candidate = workspace_root.join(".venv");
+        if candidate.is_dir() {
+            return Some(candidate);
         }
     }
 

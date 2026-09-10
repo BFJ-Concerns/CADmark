@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::export::ExportFormat;
-use cadmark_core::geometry::{EdgeId, FaceId, TopologyElement, VertexId};
+use cadmark_core::geometry::{EdgeId, FaceId, SolidValidity, TopologyElement, VertexId};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 use serde::Deserialize;
@@ -44,6 +44,11 @@ fn project_with_script(source: &str) -> (tempfile::TempDir, PathBuf, KernelWorke
 }
 
 /// Generous ceilings for scripts expected to finish.
+/// Every solid closed and valid: what the export gate asks of a result.
+fn printable(validity: &[SolidValidity]) -> bool {
+    !validity.is_empty() && validity.iter().all(|solid| solid.is_printable())
+}
+
 fn roomy() -> ExecutionLimits {
     ExecutionLimits {
         wall_clock: Duration::from_secs(120),
@@ -73,7 +78,10 @@ fn documented_modelling_recipes_build_one_closed_valid_part_each() {
             1,
             "intermediate geometry must not appear as spare parts"
         );
-        assert!(model.is_printable(), "closed, valid geometry");
+        assert!(
+            printable(&model.solid().expect("solid geometry").validity),
+            "closed, valid geometry"
+        );
         assert!((parts[0].summary.volume - expected_volume).abs() < 0.01);
     }
 }
@@ -230,8 +238,11 @@ fn assert_worker_export_round_trip(format: ExportFormat) {
     let source = worker
         .execute(&script, roomy(), &CancelFlag::new())
         .unwrap();
-    assert!(source.is_printable(), "source model must be a closed solid");
     let solid = source.solid().expect("a solid result");
+    assert!(
+        printable(&solid.validity),
+        "source model must be a closed solid"
+    );
 
     let path = project
         .path()
@@ -266,7 +277,7 @@ fn executes_a_script_and_exports_its_kept_model() {
         .unwrap();
     assert_eq!(model.ledger.face_count(), 6);
     assert_eq!(model.solid().expect("a solid result").summary.face_count, 6);
-    assert!(model.is_printable());
+    assert!(printable(&model.solid().expect("a solid result").validity));
     assert!(
         model.solid().expect("a solid result").file.0.is_file(),
         "model kept at {:?}",
@@ -403,8 +414,8 @@ fn execution_keeps_each_completed_part_with_its_own_measurements_and_brep() {
     assert_eq!(parts[0].name, "bracket");
     assert_eq!(parts[1].id, 1);
     assert_eq!(parts[1].name, "cap");
-    assert!(parts[0].is_printable());
-    assert!(parts[1].is_printable());
+    assert!(printable(&parts[0].validity));
+    assert!(printable(&parts[1].validity));
     assert!((parts[0].summary.volume - 200.0).abs() < 1e-6);
     assert!((parts[1].summary.volume - (45.0 * std::f64::consts::PI)).abs() < 1e-4);
     assert_ne!(parts[0].file, parts[1].file);

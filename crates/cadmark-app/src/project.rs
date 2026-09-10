@@ -586,28 +586,23 @@ impl Project {
         self.active_model_part_id = None;
     }
 
-    /// Persist the conversation beside the script.
-    pub fn save_conversation(&self) {
+    /// Persist the conversation beside the script. The file is replaced
+    /// whole, so a failure part-way leaves the last saved conversation in
+    /// place rather than a truncated one; the failure is returned for the
+    /// caller to show, since a chat that silently stops saving is lost only
+    /// when the project is next opened.
+    pub fn save_conversation(&self) -> Result<(), String> {
         let path = self.dir.join(CONVERSATION_FILENAME);
-        let write = || -> std::io::Result<()> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let contents =
-                serde_json::to_string(&self.conversation).expect("conversation serialises");
-            std::fs::write(&path, contents)
-        };
-        if let Err(error) = write() {
-            log::warn!("Could not save the conversation: {error}");
-        }
+        let contents = serde_json::to_string(&self.conversation).expect("conversation serialises");
+        write_replacing(&path, contents.as_bytes())
+            .map_err(|error| format!("Could not save the conversation: {error}"))
     }
 
     /// Archive the conversation before beginning a blank one. The script is
     /// intentionally untouched: it remains the project's source of truth.
     pub fn start_fresh_conversation(&mut self) -> Result<(), String> {
         fresh_conversation(&self.dir, &mut self.conversation)?;
-        self.save_conversation();
-        Ok(())
+        self.save_conversation()
     }
 
     /// Remember the script's modification time so later edits on disk can
@@ -632,6 +627,29 @@ impl Project {
             .ok();
         self.script_modified_on_disk = on_disk != self.script_mtime;
     }
+}
+
+/// Write `contents` to `path` through a sibling temporary file renamed into
+/// place, so the file at `path` is at every instant either its previous
+/// contents or the new ones.
+fn write_replacing(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let staged = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+    let written = (|| {
+        let mut file = std::fs::File::create(&staged)?;
+        std::io::Write::write_all(&mut file, contents)?;
+        file.sync_all()?;
+        std::fs::rename(&staged, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    written
 }
 
 fn load_conversation(dir: &Path) -> Conversation {
@@ -850,6 +868,54 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(load_conversation(dir.path()).is_empty());
         assert!(load_conversation(&dir.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn a_failed_save_keeps_the_last_saved_conversation_and_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut project = Project::open(
+            dir.path().to_path_buf(),
+            None,
+            Err("no provider".to_string()),
+            ExecutionLimits::default(),
+            Box::new(crate::turn::NoRender),
+        );
+        project.conversation.push(Message::user_chat("first"));
+        project.save_conversation().unwrap();
+        let saved = std::fs::read_to_string(dir.path().join(CONVERSATION_FILENAME)).unwrap();
+        assert!(
+            !dir.path()
+                .join(".cadmark")
+                .read_dir()
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".tmp")
+                })
+        );
+
+        // Make the destination unwritable: a directory in the file's place
+        // cannot be renamed over, so the replacement fails after staging.
+        let path = dir.path().join(CONVERSATION_FILENAME);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("keep"), "x").unwrap();
+        project.conversation.push(Message::user_chat("second"));
+        let error = project.save_conversation().unwrap_err();
+        assert!(
+            error.starts_with("Could not save the conversation"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(&path).unwrap();
+        std::fs::write(&path, &saved).unwrap();
+        assert_eq!(
+            load_conversation(dir.path()).messages().len(),
+            project.conversation.messages().len() - 1,
+            "the earlier save is what remains"
+        );
     }
 
     #[test]

@@ -56,6 +56,7 @@ When the provider refuses a request, the cause is identified and reported:
 | Cause | Message |
 |-------|---------|
 | Usage limit / rate limit / quota | "the provider is at its usage limit or cooling down" |
+| Overloaded (HTTP 503/529, `overloaded_error`, "server is busy", "no slots available") | "the provider is overloaded or busy; try again shortly" |
 | Authentication failure | "the provider rejected the credential" |
 | Unknown model | "the provider does not serve the configured model" |
 

@@ -164,7 +164,7 @@ impl OpenAiCompatibleClient {
                 .await?
                 .map_err(map_transport_error)?;
             let Some(chunk) = chunk else { break };
-            for event in parser.push(&chunk) {
+            for event in parser.push(&chunk)? {
                 assembled.apply(event, sink, self.credential.as_deref())?;
             }
         }
@@ -337,7 +337,10 @@ struct EventParser {
 }
 
 impl EventParser {
-    fn push(&mut self, chunk: &[u8]) -> Vec<serde_json::Value> {
+    /// Take the events completed by `chunk`. A frame whose data is not JSON
+    /// is a parse failure, not a gap: a stream with a hole in it must not
+    /// finish as a shorter response that looks complete.
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<serde_json::Value>, BackendError> {
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
         // Events are separated by a blank line; a partial event stays
@@ -355,11 +358,20 @@ impl EventParser {
             if data.is_empty() || data == "[DONE]" {
                 continue;
             }
-            if let Ok(value) = serde_json::from_str(&data) {
-                events.push(value);
+            match serde_json::from_str(&data) {
+                Ok(value) => events.push(value),
+                // The error names the position only; the frame's text is
+                // the provider's and may carry anything, so it stays out
+                // of what the user is shown.
+                Err(error) => {
+                    return Err(BackendError::ParseError(format!(
+                        "the provider sent a malformed stream event ({} bytes): {error}",
+                        data.len()
+                    )));
+                }
             }
         }
-        events
+        Ok(events)
     }
 }
 
@@ -570,6 +582,14 @@ fn refusal_cause(status: StatusCode, error: &ProviderError) -> Option<RefusalCau
         || mentions("insufficient_quota")
     {
         Some(RefusalCause::UsageLimit)
+    } else if status == StatusCode::SERVICE_UNAVAILABLE
+        || status.as_u16() == 529
+        || mentions("overloaded")
+        || mentions("server is busy")
+        || mentions("no slots available")
+        || mentions("server_busy")
+    {
+        Some(RefusalCause::Overloaded)
     } else if status == StatusCode::UNAUTHORIZED
         || status == StatusCode::FORBIDDEN
         || mentions("authentication")
@@ -821,13 +841,29 @@ mod tests {
             serde_json::json!({"type": "b"}),
         ]);
         let (first, second) = whole.split_at(whole.len() / 2);
-        let mut seen = parser.push(first.as_bytes());
-        seen.extend(parser.push(second.as_bytes()));
+        let mut seen = parser.push(first.as_bytes()).unwrap();
+        seen.extend(parser.push(second.as_bytes()).unwrap());
         let kinds: Vec<_> = seen
             .iter()
             .map(|event| event["type"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(kinds, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_malformed_event_between_valid_ones_fails_the_stream_without_echoing_it() {
+        let mut parser = EventParser::default();
+        let stream = format!(
+            "data: {}\n\ndata: {{\"type\": \"b\", secret-token\n\ndata: {}\n\n",
+            serde_json::json!({"type": "a"}),
+            serde_json::json!({"type": "c"})
+        );
+        let error = parser.push(stream.as_bytes()).unwrap_err();
+        let BackendError::ParseError(detail) = &error else {
+            panic!("expected a parse error, got {error:?}");
+        };
+        assert!(detail.contains("malformed stream event"), "{detail}");
+        assert!(!detail.contains("secret-token"), "{detail}");
     }
 
     #[test]
@@ -847,6 +883,24 @@ mod tests {
                 &error("model_cooldown", "usage limit reached")
             ),
             Some(RefusalCause::UsageLimit)
+        );
+        assert_eq!(
+            refusal_cause(StatusCode::SERVICE_UNAVAILABLE, &error("", "")),
+            Some(RefusalCause::Overloaded)
+        );
+        assert_eq!(
+            refusal_cause(
+                StatusCode::from_u16(529).unwrap(),
+                &error("overloaded_error", "Overloaded")
+            ),
+            Some(RefusalCause::Overloaded)
+        );
+        assert_eq!(
+            refusal_cause(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &error("", "server is busy, no slots available")
+            ),
+            Some(RefusalCause::Overloaded)
         );
         assert_eq!(
             refusal_cause(StatusCode::UNAUTHORIZED, &error("", "")),
