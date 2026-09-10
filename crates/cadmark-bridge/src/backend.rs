@@ -19,6 +19,9 @@ use thiserror::Error;
 pub enum RefusalCause {
     /// A usage limit, quota, or cooling-down period.
     UsageLimit,
+    /// The provider or model server has no capacity right now: an
+    /// overloaded hosted model, or a local server with every slot busy.
+    Overloaded,
     /// The credential was rejected or is missing.
     Authentication,
     /// The configured model is not served at this endpoint.
@@ -29,6 +32,7 @@ impl RefusalCause {
     pub fn describe(self) -> &'static str {
         match self {
             Self::UsageLimit => "the provider is at its usage limit or cooling down",
+            Self::Overloaded => "the provider is overloaded or busy; try again shortly",
             Self::Authentication => "the provider rejected the credential",
             Self::UnknownModel => "the provider does not serve the configured model",
         }
