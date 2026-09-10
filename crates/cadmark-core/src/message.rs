@@ -221,6 +221,14 @@ impl Conversation {
     }
 }
 
+/// A deliberately conservative, provider-neutral token estimate for a
+/// piece of text: four characters to the token. Providers do not expose one
+/// common tokenizer, so every occupancy figure in CADmark is this estimate,
+/// used to act early rather than to claim an exact count.
+pub fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(4)
+}
+
 impl Message {
     fn estimated_tokens(&self) -> usize {
         let mut characters = self.text.chars().count();
@@ -240,17 +248,23 @@ impl Message {
     }
 }
 
-/// The portion of a provider context window consumed before the next turn.
+/// The portion of a provider context window the next request will occupy,
+/// as it is assembled: the saved conversation, the reference images, and
+/// everything else a request carries — the instructions, the tool
+/// definitions, the current script, the examples, and the words being sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextUsage {
     pub conversation_tokens: usize,
     pub reference_image_tokens: usize,
+    /// What the request carries besides the conversation. Condensing the
+    /// conversation does not reduce this.
+    pub request_tokens: usize,
     pub window_tokens: usize,
 }
 
 impl ContextUsage {
     pub fn used_tokens(self) -> usize {
-        self.conversation_tokens + self.reference_image_tokens
+        self.conversation_tokens + self.reference_image_tokens + self.request_tokens
     }
 
     pub fn percent(self) -> usize {
@@ -260,10 +274,29 @@ impl ContextUsage {
         self.used_tokens().saturating_mul(100) / self.window_tokens
     }
 
+    fn over_three_quarters(tokens: usize, window: usize) -> bool {
+        tokens.saturating_mul(4) >= window.saturating_mul(3)
+    }
+
     /// Start condensing well before a request can overflow. This is a context
-    /// threshold, never a count of messages or turns.
+    /// threshold, never a count of messages or turns. Condensing is only
+    /// asked for when the conversation is a large enough share of the
+    /// window that shortening it can matter: when the fixed request alone
+    /// is what fills the window, condensing every turn would cost a model
+    /// call and change nothing.
     pub fn needs_condensing(self) -> bool {
-        self.used_tokens().saturating_mul(4) >= self.window_tokens.saturating_mul(3)
+        Self::over_three_quarters(self.used_tokens(), self.window_tokens)
+            && self.conversation_tokens.saturating_mul(10) >= self.window_tokens
+    }
+
+    /// The request would not fit even with no conversation at all: the
+    /// script, instructions and images alone are at the threshold. The user
+    /// needs to know, because no amount of condensing helps.
+    pub fn request_alone_is_over_budget(self) -> bool {
+        Self::over_three_quarters(
+            self.request_tokens + self.reference_image_tokens,
+            self.window_tokens,
+        )
     }
 }
 
@@ -389,6 +422,27 @@ mod tests {
         ));
         assert!(conversation.messages()[0].text.contains("5 mm wall"));
         assert_eq!(conversation.messages()[1].text, "Add an open top.");
+    }
+
+    #[test]
+    fn condensing_is_asked_for_only_when_shortening_the_conversation_can_help() {
+        let usage = |conversation_tokens, request_tokens| ContextUsage {
+            conversation_tokens,
+            reference_image_tokens: 0,
+            request_tokens,
+            window_tokens: 1_000,
+        };
+        // A long conversation past the threshold condenses.
+        assert!(usage(800, 0).needs_condensing());
+        // The request's own weight counts towards the threshold.
+        assert!(usage(400, 400).needs_condensing());
+        assert!(!usage(400, 300).needs_condensing());
+        // A request that fills the window by itself is not a condensing
+        // problem; the conversation is too small for condensing to matter.
+        assert!(!usage(50, 900).needs_condensing());
+        assert!(usage(50, 900).request_alone_is_over_budget());
+        assert!(!usage(400, 400).request_alone_is_over_budget());
+        assert_eq!(usage(400, 400).percent(), 80);
     }
 
     #[test]

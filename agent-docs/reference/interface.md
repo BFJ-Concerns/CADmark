@@ -102,7 +102,7 @@ While a turn runs: a phase line showing the current step, elapsed time, time sin
 
 Input: multi-line text field. Enter sends, Shift+Enter breaks the line.
 
-Context occupancy shown in the chat, including reserved reference-image budget, against the configured context-window setting.
+Context occupancy shown in the chat against the configured context-window setting. The figure is the estimated weight of the next request as it would be assembled now (`RequestAssembly` in `crates/cadmark-app/src/turn.rs`): the conversation, the reserved reference-image budget, and the request's own overhead — system instructions with any active skill, tool definitions, the `<current_script>` block, the selected examples, and the draft chat text and pending comments. Hovering shows the breakdown. Condensation triggers at three quarters of the window when the conversation is at least a tenth of it; when the request alone is at three quarters the figure turns amber with a warning, since condensing cannot help.
 
 Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation, differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
 

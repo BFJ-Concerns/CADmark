@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use cadmark_bridge::SYSTEM_PROMPT;
 use cadmark_bridge::backend::{
-    BackendError, ImageData, ModelItem, ModelRequest, StreamDelta, ToolCall, TurnModel,
+    BackendError, ImageData, ModelItem, ModelRequest, StreamDelta, ToolCall, ToolSpec, TurnModel,
 };
 use cadmark_bridge::examples;
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
@@ -28,7 +28,7 @@ use cadmark_bridge::tools::{
 };
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::geometry::describe_parts;
-use cadmark_core::message::{ContextUsage, Conversation, MessageKind};
+use cadmark_core::message::{ContextUsage, Conversation, MessageKind, estimate_tokens};
 use cadmark_core::skills;
 use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
 use cadmark_kernel::worker::WorkerError;
@@ -180,13 +180,14 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         mut emit: impl FnMut(TurnEvent) + Send,
     ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
-        let last_run = last_successful_run(conversation).map(str::to_owned);
-        let mut items = history_items(conversation);
-        let usage = context_usage(
+        let assembled = RequestAssembly::new(
             conversation,
-            input.images.len(),
-            input.context_window_tokens,
+            original.as_deref(),
+            input,
+            self.model.accepts_images(),
         );
+        let usage = assembled.usage(input.context_window_tokens);
+        let mut items = history_items(conversation);
         if usage.needs_condensing() && !conversation.is_empty() {
             let summary = match self.condense(conversation).await {
                 Ok(summary) => summary,
@@ -199,42 +200,9 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                 text: format!("Conversation summary:\n{summary}"),
             }];
         }
-        let selected_skills = skills::for_turn(
-            input
-                .chat
-                .iter()
-                .map(String::as_str)
-                .chain(input.comments.iter().map(|comment| comment.text.as_str())),
-        );
-        // The script on disk is the design. It is attached to every request
-        // because the history cannot be trusted to carry it: a fresh or
-        // condensed conversation holds no run of it, and a parameter edit,
-        // an undo, or a cancelled turn leaves the file different from the
-        // last run the history does hold.
-        items.push(ModelItem::User {
-            text: current_script_block(original.as_deref(), last_run.as_deref()),
-            images: Vec::new(),
-        });
-        let request = render_input(input);
-        // The curated example library for the operations this request
-        // names, carried before the user's words so the request itself
-        // stays last.
-        items.push(ModelItem::User {
-            text: examples::context_block(&request),
-            images: Vec::new(),
-        });
-        items.push(ModelItem::User {
-            text: request,
-            images: input.images.clone(),
-        });
-        let tools = tools_for(self.model.accepts_images());
-        let mut instructions = instructions_for(self.model.accepts_images());
-        for skill in selected_skills {
-            instructions.push_str(&format!(
-                "\n\n# Active skill: {}\n\nThe user explicitly invoked this built-in skill for this turn.\n{}",
-                skill.name, skill.instructions,
-            ));
-        }
+        items.extend(assembled.items);
+        let tools = assembled.tools;
+        let instructions = assembled.instructions;
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
         let mut last_failure: Option<String> = None;
         let mut attempt = 0u32;
@@ -663,20 +631,119 @@ fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
     items
 }
 
-/// The accounting shown to the user and used to start condensation. Text is
-/// estimated provider-neutrally; images reserve a conservative fixed budget
-/// until the image attachment work can supply model-specific measurements.
+/// Images reserve a conservative fixed budget each, since providers do not
+/// share one way of pricing an image into the context window.
 pub const REFERENCE_IMAGE_TOKENS: usize = 765;
 
-pub fn context_usage(
-    conversation: &Conversation,
-    reference_image_count: usize,
-    window_tokens: usize,
-) -> ContextUsage {
-    ContextUsage {
-        conversation_tokens: conversation.estimated_tokens(),
-        reference_image_tokens: reference_image_count * REFERENCE_IMAGE_TOKENS,
-        window_tokens,
+/// Everything one request carries besides the conversation history: the
+/// instructions (with any active skill), the tool definitions, the current
+/// script, the example library the request selects, and the request text
+/// itself. Built once per turn for the model, and again from the draft for
+/// the occupancy figure the chat shows, so the two never disagree about
+/// what a request weighs.
+pub struct RequestAssembly {
+    pub instructions: String,
+    pub tools: Vec<ToolSpec>,
+    /// The items that follow the history: the script block, the examples,
+    /// and the request, in that order.
+    pub items: Vec<ModelItem>,
+    conversation_tokens: usize,
+    image_count: usize,
+}
+
+impl RequestAssembly {
+    pub fn new(
+        conversation: &Conversation,
+        script_on_disk: Option<&str>,
+        input: &TurnInput,
+        accepts_images: bool,
+    ) -> Self {
+        let last_run = last_successful_run(conversation);
+        let selected_skills = skills::for_turn(
+            input
+                .chat
+                .iter()
+                .map(String::as_str)
+                .chain(input.comments.iter().map(|comment| comment.text.as_str())),
+        );
+        let request = render_input(input);
+        // The script on disk is the design. It is attached to every request
+        // because the history cannot be trusted to carry it: a fresh or
+        // condensed conversation holds no run of it, and a parameter edit,
+        // an undo, or a cancelled turn leaves the file different from the
+        // last run the history does hold. The curated example library for
+        // the operations the request names comes next, so the request
+        // itself stays last.
+        let items = vec![
+            ModelItem::User {
+                text: current_script_block(script_on_disk, last_run),
+                images: Vec::new(),
+            },
+            ModelItem::User {
+                text: examples::context_block(&request),
+                images: Vec::new(),
+            },
+            ModelItem::User {
+                text: request,
+                images: input.images.clone(),
+            },
+        ];
+        let mut instructions = instructions_for(accepts_images);
+        for skill in selected_skills {
+            instructions.push_str(&format!(
+                "\n\n# Active skill: {}\n\nThe user explicitly invoked this built-in skill for this turn.\n{}",
+                skill.name, skill.instructions,
+            ));
+        }
+        Self {
+            instructions,
+            tools: tools_for(accepts_images),
+            items,
+            conversation_tokens: conversation.estimated_tokens(),
+            image_count: input.images.len(),
+        }
+    }
+
+    /// Count `count` images as attached without carrying their bytes: the
+    /// occupancy figure the chat shows every frame needs the weight of the
+    /// project's reference images, not copies of them.
+    pub fn reserving_images(mut self, count: usize) -> Self {
+        self.image_count = count;
+        self
+    }
+
+    /// What the request weighs against a context window: the history, the
+    /// images, and everything else assembled here. Text is estimated
+    /// provider-neutrally, and the tool definitions as their JSON.
+    pub fn usage(&self, window_tokens: usize) -> ContextUsage {
+        let items: usize = self
+            .items
+            .iter()
+            .map(|item| match item {
+                ModelItem::User { text, .. } | ModelItem::Assistant { text } => {
+                    estimate_tokens(text)
+                }
+                ModelItem::ToolCall(call) => {
+                    estimate_tokens(&call.name) + estimate_tokens(&call.arguments.to_string())
+                }
+                ModelItem::ToolResult { output, .. } => estimate_tokens(output),
+            })
+            .sum();
+        let tools: usize = self
+            .tools
+            .iter()
+            .map(|tool| {
+                estimate_tokens(&tool.name)
+                    + estimate_tokens(&tool.description)
+                    + estimate_tokens(&tool.parameters.to_string())
+            })
+            .sum();
+        ContextUsage {
+            conversation_tokens: self.conversation_tokens,
+            reference_image_tokens: self.image_count * REFERENCE_IMAGE_TOKENS,
+            request_tokens: estimate_tokens(&self.instructions) + tools + items,
+            window_tokens,
+        }
     }
 }
 
@@ -1390,20 +1457,63 @@ mod tests {
     }
 
     #[test]
-    fn context_usage_includes_reference_images() {
+    fn context_usage_counts_everything_the_request_carries() {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("x".repeat(300)));
-
-        let without_images = context_usage(&conversation, 0, 1_000);
-        let with_images = context_usage(&conversation, 1, 1_000);
+        let image = ImageData {
+            media_type: "image/png".into(),
+            bytes: vec![0; 16],
+        };
+        let without_images =
+            RequestAssembly::new(&conversation, None, &chat("hi"), false).usage(1_000_000);
+        let with_images = RequestAssembly::new(
+            &conversation,
+            None,
+            &TurnInput {
+                chat: Some("hi".into()),
+                images: vec![image],
+                ..Default::default()
+            },
+            true,
+        )
+        .usage(1_000_000);
 
         assert_eq!(with_images.conversation_tokens, 75);
         assert_eq!(with_images.reference_image_tokens, REFERENCE_IMAGE_TOKENS);
+        // The instructions and tool definitions alone are thousands of
+        // tokens; the image-reading model is offered one more tool.
+        assert!(without_images.request_tokens > 1_000, "{without_images:?}");
+        assert!(with_images.request_tokens > without_images.request_tokens);
         assert_eq!(
             with_images.used_tokens(),
-            without_images.used_tokens() + REFERENCE_IMAGE_TOKENS
+            with_images.conversation_tokens
+                + with_images.reference_image_tokens
+                + with_images.request_tokens
         );
-        assert!(with_images.needs_condensing());
+    }
+
+    #[test]
+    fn a_long_script_and_an_active_skill_weigh_on_the_request() {
+        let conversation = Conversation::new();
+        let short =
+            RequestAssembly::new(&conversation, Some("x = 1"), &chat("hi"), false).usage(100_000);
+        let long_script = "y = 2\n".repeat(2_000);
+        let long = RequestAssembly::new(&conversation, Some(&long_script), &chat("hi"), false)
+            .usage(100_000);
+        // The script sits inside a larger block, so the whole rounds once
+        // where the script alone rounds once more.
+        assert!(
+            long.request_tokens + 1 >= short.request_tokens + estimate_tokens(&long_script),
+            "{long:?} vs {short:?}"
+        );
+        let with_skill = RequestAssembly::new(
+            &conversation,
+            Some("x = 1"),
+            &chat("/3d-printing hi"),
+            false,
+        )
+        .usage(100_000);
+        assert!(with_skill.request_tokens > short.request_tokens);
     }
 
     #[tokio::test]
