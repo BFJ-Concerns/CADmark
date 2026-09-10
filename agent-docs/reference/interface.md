@@ -77,9 +77,9 @@ Cuts the model along X, Y, or Z. Toggled with the "Section" button in the toolba
 - A slider to position the plane along the chosen axis, bounded by the model's extent
 - A flip button to keep the other half
 
-Cut-away geometry is also unclickable.
+Cut-away geometry is also unclickable: every picking pass, including the exact depth prepass (`fs_depth` in `picking.wgsl`), discards fragments the plane cuts away, so a click on the cut reaches the interior face it reveals rather than being blocked by the removed geometry's depth.
 
-Source: `crates/cadmark-ui/src/toolbar.rs`.
+Source: `crates/cadmark-ui/src/toolbar.rs`, `crates/cadmark-renderer/src/shaders/picking.wgsl`.
 
 ## Ghost mode
 
