@@ -541,11 +541,7 @@ fn operation_branch_detection_allows_data_and_rejects_branches() {
         "a single-line while-let on an imported operation is a branch"
     );
     assert_eq!(
-        operation_branch_on_line(
-            "if ready && let Round = operation {",
-            &alias_import,
-            false
-        ),
+        operation_branch_on_line("if ready && let Round = operation {", &alias_import, false),
         Some("Fillet".to_owned()),
         "a let chain on an aliased operation is a branch"
     );
