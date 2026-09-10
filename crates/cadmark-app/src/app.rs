@@ -159,6 +159,25 @@ fn parameter_step_summary(name: &str, value: f64) -> String {
     format!("Set {name} to {value}")
 }
 
+/// How the user moved through the design history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryMove {
+    Undo,
+    Redo,
+    Jump,
+}
+
+/// The note recorded in the conversation when the user restores a design
+/// step, naming the step by its summary so the AI can place it.
+fn history_move_note(how: HistoryMove, restored_summary: &str) -> String {
+    let verb = match how {
+        HistoryMove::Undo => "Undid the last design step; the design is back at",
+        HistoryMove::Redo => "Redid a design step; the design is now at",
+        HistoryMove::Jump => "Jumped in the history; the design is now at",
+    };
+    format!("{verb} \u{201C}{restored_summary}\u{201D}. The script on disk is that step's.")
+}
+
 /// The running turn's chat bookkeeping: which message its text streams
 /// into, and the tool calls made so far.
 struct TurnRecord {
@@ -387,9 +406,7 @@ impl CadmarkApp {
             self.save_settings();
             return;
         }
-        if let Some(project) = self.project() {
-            project.save_conversation();
-        }
+        self.save_conversation();
         let project = Project::open(
             project_dir,
             None,
@@ -715,9 +732,7 @@ impl CadmarkApp {
         if rebuild {
             self.restore_after_failed_turn();
         }
-        if let Some(project) = self.project() {
-            project.save_conversation();
-        }
+        self.save_conversation();
         self.chat.focus_input();
     }
 
@@ -1001,10 +1016,23 @@ impl CadmarkApp {
         }
     }
 
+    /// Persist the open project's conversation, and say so in the status
+    /// bar when that fails: a chat that silently stops saving is lost only
+    /// when the project is next opened, which is too late to act on.
+    fn save_conversation(&mut self) {
+        let Some(project) = self.project() else {
+            return;
+        };
+        if let Err(error) = project.save_conversation() {
+            log::warn!("{error}");
+            self.status = Some(Status::error(error));
+        }
+    }
+
     /// Check out a design step and rebuild the model from it. A step that
     /// changed another part of the folder reopens that part, so what the
     /// user sees is what the step changed.
-    fn restore_version(&mut self, commit_hash: String) {
+    fn restore_version(&mut self, commit_hash: String, how: HistoryMove) {
         let Some(dir) = self.project().map(|project| project.dir.clone()) else {
             return;
         };
@@ -1021,6 +1049,20 @@ impl CadmarkApp {
                 let Some(project) = self.project_mut() else {
                     return;
                 };
+                let restored_summary = project
+                    .history
+                    .current()
+                    .map(|version| version.summary.clone())
+                    .unwrap_or_else(|| commit_hash.clone());
+                // Where the design went is recorded for the AI as well as
+                // the user: its next turn starts from a script it may
+                // have written turns ago, and should know why.
+                project
+                    .conversation
+                    .push(Message::design_change(history_move_note(
+                        how,
+                        &restored_summary,
+                    )));
                 match part {
                     Some(file_name) if file_name != project.part_file_name() => {
                         let part = if file_name == crate::parts::UNTITLED_PART {
@@ -1472,19 +1514,19 @@ impl CadmarkApp {
             ToolbarAction::Undo => {
                 if let Some(version) = self.project_mut().and_then(|p| p.history.undo()) {
                     let hash = version.commit_hash.clone();
-                    self.restore_version(hash);
+                    self.restore_version(hash, HistoryMove::Undo);
                 }
             }
             ToolbarAction::Redo => {
                 if let Some(version) = self.project_mut().and_then(|p| p.history.redo()) {
                     let hash = version.commit_hash.clone();
-                    self.restore_version(hash);
+                    self.restore_version(hash, HistoryMove::Redo);
                 }
             }
             ToolbarAction::JumpToVersion(idx) => {
                 if let Some(version) = self.project_mut().and_then(|p| p.history.jump_to(idx)) {
                     let hash = version.commit_hash.clone();
-                    self.restore_version(hash);
+                    self.restore_version(hash, HistoryMove::Jump);
                 }
             }
             // The same key names the part the first time and a version
@@ -1960,6 +2002,12 @@ impl CadmarkApp {
         let recorded = self.record_design_step(&summary, &summary);
         if let Some(project) = self.project_mut() {
             project.record_script_state();
+            // The edit is recorded where it happened, so the AI's next
+            // turn knows the user set this value and when, rather than
+            // only that the script differs from its last run.
+            project.conversation.push(Message::design_change(format!(
+                "{summary} in the parameters panel of {part}."
+            )));
         }
         match recorded {
             Ok(()) => self.status = Some(Status::info(summary)),
@@ -1972,10 +2020,10 @@ impl CadmarkApp {
                     project.conversation.push(Message::error_notice(format!(
                         "{reason}\n\n{summary} in {part}, so the model will rebuild, but the history has no step for it — undo goes back past this change rather than to it."
                     )));
-                    project.save_conversation();
                 }
             }
         }
+        self.save_conversation();
         if let Some(project) = self.project_mut() {
             project.request_reload();
         }
@@ -2411,9 +2459,7 @@ impl eframe::App for CadmarkApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some(project) = self.project() {
-            project.save_conversation();
-        }
+        self.save_conversation();
     }
 }
 
@@ -2436,11 +2482,12 @@ mod tests {
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        Bounds3, CadmarkApp, ChatPane, CodePanel, NoRender, OverlayState, ParametersPanel,
-        PartNameDialog, Project, ReferenceImagePicker, ReferenceImagesPanel, Renderer, SceneHandle,
-        SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, camera_change, candidate_highlight_ids, measurement_pair,
-        measurement_readout, record_tool_start, turn_chat_message,
+        Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, NoRender, OverlayState,
+        ParametersPanel, PartNameDialog, Project, ReferenceImagePicker, ReferenceImagesPanel,
+        Renderer, SceneHandle, SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome,
+        TurnRecord, UserSettings, VersionDialog, ai_services, camera_change,
+        candidate_highlight_ids, history_move_note, measurement_pair, measurement_readout,
+        record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2720,6 +2767,37 @@ mod tests {
 
         // And no AI turn was involved.
         assert!(app.turn.is_none());
+
+        // The edit is in the conversation, where the AI's next turn reads
+        // it, and on disk with it.
+        let last = app
+            .project()
+            .unwrap()
+            .conversation
+            .messages()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last.kind, MessageKind::DesignChange);
+        assert_eq!(
+            last.text,
+            "Set width to 90 in the parameters panel of bracket.py."
+        );
+        let saved: Conversation = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join(".cadmark/conversation.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved.messages().last().unwrap().text, last.text);
+    }
+
+    #[test]
+    fn history_moves_are_noted_by_the_step_they_restore() {
+        assert_eq!(
+            history_move_note(HistoryMove::Undo, "Add a hole"),
+            "Undid the last design step; the design is back at \u{201C}Add a hole\u{201D}. The script on disk is that step's."
+        );
+        assert!(history_move_note(HistoryMove::Redo, "Add a hole").starts_with("Redid"));
+        assert!(history_move_note(HistoryMove::Jump, "Add a hole").starts_with("Jumped"));
     }
 
     #[test]

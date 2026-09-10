@@ -95,7 +95,8 @@ Conversation with the AI. Message types, distinguished by position and colour:
 - Spatial comments (accent-tinted, with chips naming each anchor's element and source line)
 - AI replies (plain card, streamed as the turn progresses)
 - Tool-call groups (collapsed by default, expandable to each call's input and result)
-- Notices from CADmark (quiet, or red on failure)
+- Notices from CADmark (quiet, or red on failure; not shown to the AI)
+- Design changes made outside the chat (quiet; sent to the AI as a "Note from CADmark" user item in history order): a parameter set in the panel, a design step undone, redone, or jumped to
 
 While a turn runs: a phase line showing the current step, elapsed time, time since last event, and a Cancel button.
 
