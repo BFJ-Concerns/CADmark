@@ -142,7 +142,9 @@ fn render_topology_depth(
 /// Render every pickable element into the colour-ID texture: faces
 /// first, then edges drawn over them, then vertex markers over those, so
 /// a cursor on an edge picks the edge and one on a vertex picks the
-/// vertex.
+/// vertex. A sketch profile's regions, curves and corners come last and
+/// ignore depth, as the visible profile does, so a click on the drawing
+/// reaches the drawing rather than the ghosted solid behind it.
 ///
 /// `filter` decides which kinds are drawn at all. A kind the filter
 /// refuses leaves the ID texture holding whatever is behind it, so a
@@ -155,6 +157,7 @@ pub fn render_picking(
     picking: &PickingPass,
     all_meshes: &[GpuMesh],
     meshes: &[GpuMesh],
+    sketch: Option<&GpuSketch>,
     filter: SelectionFilter,
 ) {
     // First establish scene depth with every part. The selected part's local
@@ -275,6 +278,72 @@ pub fn render_picking(
         pass.set_vertex_buffer(0, mesh.marker_vertex_buffer.slice(..));
         pass.draw(0..mesh.marker_vertex_count, 0..1);
     }
+
+    if let Some(sketch) = sketch {
+        render_sketch_picking(encoder, pipelines, picking, sketch, filter);
+    }
+}
+
+/// The sketch profile's pick targets over whatever the solid passes left:
+/// regions, then curves over them, then corners over those, the same
+/// precedence as faces, edges and vertices. The filter's three toggles
+/// apply to the three kinds of sketch element in turn.
+fn render_sketch_picking(
+    encoder: &mut wgpu::CommandEncoder,
+    pipelines: &RenderPipelines,
+    picking: &PickingPass,
+    sketch: &GpuSketch,
+    filter: SelectionFilter,
+) {
+    let draws: [(&wgpu::RenderPipeline, &wgpu::Buffer, u32, bool); 3] = [
+        (
+            &pipelines.sketch_region_picking_pipeline,
+            &sketch.pick_region_vertex_buffer,
+            sketch.pick_region_vertex_count,
+            filter.faces,
+        ),
+        (
+            &pipelines.sketch_curve_picking_pipeline,
+            &sketch.pick_curve_vertex_buffer,
+            sketch.pick_curve_vertex_count,
+            filter.edges,
+        ),
+        (
+            &pipelines.sketch_corner_picking_pipeline,
+            &sketch.pick_corner_vertex_buffer,
+            sketch.pick_corner_vertex_count,
+            filter.vertices,
+        ),
+    ];
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("sketch_picking_pass"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &picking.texture_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &pipelines.depth_texture,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    for (pipeline, buffer, count, enabled) in draws {
+        if !enabled || count == 0 {
+            continue;
+        }
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..count, 0..1);
+    }
 }
 
 /// Render only whole-part IDs. This is intentionally a separate pass from
@@ -367,10 +436,7 @@ pub fn decode_pick_result(
     }
     let pixel = [data[0], data[1], data[2], data[3]];
     let picked = picking::decode_pick(picking::colour_to_id(pixel))?;
-    match &picked {
-        cadmark_core::geometry::PickedElement::Solid(element) if !filter.allows(element) => None,
-        _ => Some(picked),
-    }
+    filter.allows_pick(&picked).then_some(picked)
 }
 
 #[cfg(test)]
@@ -507,6 +573,7 @@ mod tests {
             &picking,
             &meshes,
             &meshes[1..],
+            None,
             SelectionFilter::default(),
         );
         copy_pick_pixel(&mut encoder, &picking, &picking.staging_buffer, 32, 32);
@@ -525,6 +592,7 @@ mod tests {
             &picking,
             &meshes[..1],
             &meshes[..1],
+            None,
             SelectionFilter::default(),
         );
         copy_pick_pixel(&mut encoder, &picking, &picking.staging_buffer, 32, 32);

@@ -3,6 +3,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use cadmark_core::geometry::{PickedElement, SketchElement, SketchElementKind};
 use cadmark_core::sketch::SketchProfile;
 
 use crate::camera::Camera;
@@ -141,6 +142,13 @@ pub struct RenderPipelines {
     /// of any solid behind it.
     pub sketch_curve_pipeline: wgpu::RenderPipeline,
     pub sketch_fill_pipeline: wgpu::RenderPipeline,
+    /// Sketch elements in the picking pass: regions through the face
+    /// vertex stage, curves through the edge stage, corners through the
+    /// marker stage. All three ignore depth and the section plane, as the
+    /// visible sketch does.
+    pub sketch_region_picking_pipeline: wgpu::RenderPipeline,
+    pub sketch_curve_picking_pipeline: wgpu::RenderPipeline,
+    pub sketch_corner_picking_pipeline: wgpu::RenderPipeline,
 
     /// Bind group layout for the picking passes (single uniform buffer at
     /// binding 0, vertex-stage visibility).
@@ -196,6 +204,25 @@ const EDGE_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_arr
     4 => Float32,   // cap
     5 => Float32,   // end sign
 ];
+
+/// Vertex layout of the shaded mesh, shared by every pass that reads a
+/// `GpuVertex`: the face picking pass and the sketch region picking pass.
+const GPU_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+    0 => Float32x3, // position
+    1 => Float32x3, // normal
+    2 => Float32,   // face_id
+    3 => Float32,   // _padding
+    4 => Float32,   // part_id
+    5 => Float32x3, // _part_padding
+];
+
+fn gpu_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<GpuVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &GPU_VERTEX_ATTRIBUTES,
+    }
+}
 
 fn edge_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
@@ -441,18 +468,7 @@ impl RenderPipelines {
             vertex: wgpu::VertexState {
                 module: &picking_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<GpuVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![
-                        0 => Float32x3,
-                        1 => Float32x3,
-                        2 => Float32,
-                        3 => Float32,
-                        4 => Float32,
-                        5 => Float32x3,
-                    ],
-                }],
+                buffers: &[gpu_vertex_layout()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -617,6 +633,71 @@ impl RenderPipelines {
                 cache: None,
             });
 
+        // -- Sketch picking pipelines --
+        // The profile is drawn in front of everything and outside the
+        // section plane, so its pick targets ignore depth the same way.
+        let sketch_pick_depth = wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: Default::default(),
+            bias: Default::default(),
+        };
+        let sketch_pick_target = [Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba8Uint,
+            blend: None,
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let sketch_picking_pipeline =
+            |label: &str,
+             vertex_entry: &str,
+             fragment_entry: &str,
+             layout: wgpu::VertexBufferLayout<'_>| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&picking_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &picking_shader,
+                        entry_point: Some(vertex_entry),
+                        buffers: &[layout],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &picking_shader,
+                        entry_point: Some(fragment_entry),
+                        targets: &sketch_pick_target,
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        cull_mode: None,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(sketch_pick_depth.clone()),
+                    multisample: Default::default(),
+                    multiview: None,
+                    cache: None,
+                })
+            };
+        let sketch_region_picking_pipeline = sketch_picking_pipeline(
+            "sketch_region_picking_pipeline",
+            "vs_main",
+            "fs_sketch_region",
+            gpu_vertex_layout(),
+        );
+        let sketch_curve_picking_pipeline = sketch_picking_pipeline(
+            "sketch_curve_picking_pipeline",
+            "vs_edge",
+            "fs_sketch_curve",
+            edge_vertex_layout(),
+        );
+        let sketch_corner_picking_pipeline = sketch_picking_pipeline(
+            "sketch_corner_picking_pipeline",
+            "vs_marker",
+            "fs_sketch_corner",
+            marker_vertex_layout(),
+        );
+
         // -- Wireframe pipeline --
         let wireframe_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("wireframe_shader"),
@@ -736,6 +817,7 @@ impl RenderPipelines {
             attributes: &wgpu::vertex_attr_array![
                 0 => Float32x3, // position
                 1 => Float32,   // tint
+                2 => Float32,   // id
             ],
         };
 
@@ -924,6 +1006,9 @@ impl RenderPipelines {
             vertex_marker_pipeline,
             sketch_curve_pipeline,
             sketch_fill_pipeline,
+            sketch_region_picking_pipeline,
+            sketch_curve_picking_pipeline,
+            sketch_corner_picking_pipeline,
             simple_bind_group_layout,
             depth_texture,
             viewport_colour_view,
@@ -1446,18 +1531,94 @@ impl RenderPipelines {
 /// corners read as dots at any size of sketch.
 const CORNER_MARKER_SCALE: f32 = 0.006;
 
+fn sketch_pick_id(kind: SketchElementKind, index: u32) -> f32 {
+    crate::picking::encode_pick(&PickedElement::Sketch(SketchElement { kind, index })) as f32
+}
+
 /// The profile's curves as a line list: each polyline becomes its
 /// segments, so a curve of any shape draws with one pipeline.
 pub fn sketch_curve_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
     let mut vertices = Vec::new();
     for curve in &profile.curves {
+        let id = sketch_pick_id(SketchElementKind::Curve, curve.curve_id);
         for window in curve.points.windows(2) {
             for &position in window {
                 vertices.push(SketchVertex {
                     position,
                     tint: REGION_TINT,
+                    id,
                 });
             }
+        }
+    }
+    vertices
+}
+
+/// The profile's curves as screen-space quads for the picking pass, in
+/// the edge layout, each carrying its curve's pick ID: a curve is hit at
+/// the same generous width a solid's edge is.
+pub fn sketch_curve_pick_vertices(profile: &SketchProfile) -> Vec<EdgeVertex> {
+    let mut vertices = Vec::new();
+    for curve in &profile.curves {
+        let edge_id = sketch_pick_id(SketchElementKind::Curve, curve.curve_id);
+        for window in curve.points.windows(2) {
+            let (start, end) = (window[0], window[1]);
+            for (side, which_end) in QUAD_CORNERS {
+                let (position, other) = if which_end < 0.0 {
+                    (start, end)
+                } else {
+                    (end, start)
+                };
+                vertices.push(EdgeVertex {
+                    position,
+                    edge_id,
+                    other,
+                    side,
+                    cap: -1.0,
+                    end_sign: -which_end,
+                });
+            }
+        }
+    }
+    vertices
+}
+
+/// The profile's corners as marker quads for the picking pass, each
+/// carrying its corner's pick ID, hit at the same disc a solid's vertex is.
+pub fn sketch_corner_pick_vertices(profile: &SketchProfile) -> Vec<MarkerVertex> {
+    let mut markers = Vec::with_capacity(profile.corners.len() * QUAD_CORNERS.len());
+    for corner in &profile.corners {
+        let vertex_id = sketch_pick_id(SketchElementKind::Corner, corner.corner_id);
+        for (x, y) in QUAD_CORNERS {
+            markers.push(MarkerVertex {
+                position: corner.position,
+                vertex_id,
+                corner: [x, y],
+                _padding: [0.0, 0.0],
+            });
+        }
+    }
+    markers
+}
+
+/// The profile's regions as triangles in the mesh layout for the picking
+/// pass, each carrying its region's pick ID in the face slot.
+pub fn sketch_region_pick_vertices(profile: &SketchProfile) -> Vec<GpuVertex> {
+    let mut vertices = Vec::new();
+    for region in &profile.regions {
+        let id = sketch_pick_id(SketchElementKind::Region, region.region_id);
+        for &index in &region.indices {
+            let Some(&position) = region.vertices.get(index as usize) else {
+                continue;
+            };
+            vertices.push(GpuVertex {
+                position,
+                normal: profile.plane.normal,
+                face_id: id,
+                _padding: 0.0,
+                part_id: 0.0,
+                _part_padding: [0.0; 3],
+            });
         }
     }
     vertices
@@ -1470,6 +1631,7 @@ pub fn sketch_curve_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
 pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
     let mut vertices = Vec::new();
     for region in &profile.regions {
+        let id = sketch_pick_id(SketchElementKind::Region, region.region_id);
         for &index in &region.indices {
             let Some(&position) = region.vertices.get(index as usize) else {
                 continue;
@@ -1477,6 +1639,7 @@ pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
             vertices.push(SketchVertex {
                 position,
                 tint: REGION_TINT,
+                id,
             });
         }
     }
@@ -1485,6 +1648,7 @@ pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
     let across = normalise(profile.plane.x_axis);
     let up = normalise(cross(profile.plane.normal, across));
     for corner in &profile.corners {
+        let id = sketch_pick_id(SketchElementKind::Corner, corner.corner_id);
         let offset = |along: f32, sideways: f32| SketchVertex {
             position: std::array::from_fn(|axis| {
                 corner.position[axis]
@@ -1492,6 +1656,7 @@ pub fn sketch_fill_vertices(profile: &SketchProfile) -> Vec<SketchVertex> {
                     + up[axis] * sideways * half_width
             }),
             tint: CORNER_TINT,
+            id,
         };
         let quad = [
             offset(-1.0, -1.0),
@@ -1512,20 +1677,43 @@ pub fn upload_sketch(device: &wgpu::Device, profile: &SketchProfile) -> GpuSketc
 
     let curve_vertices = sketch_curve_vertices(profile);
     let fill_vertices = sketch_fill_vertices(profile);
+    let pick_regions = sketch_region_pick_vertices(profile);
+    let pick_curves = sketch_curve_pick_vertices(profile);
+    let pick_corners = sketch_corner_pick_vertices(profile);
+    let vertex_buffer = |label: &'static str, contents: &[u8]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents,
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    };
 
     GpuSketch {
-        curve_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sketch_curve_vertex_buffer"),
-            contents: bytemuck::cast_slice(&curve_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        }),
+        curve_vertex_buffer: vertex_buffer(
+            "sketch_curve_vertex_buffer",
+            bytemuck::cast_slice(&curve_vertices),
+        ),
         curve_vertex_count: curve_vertices.len() as u32,
-        fill_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("sketch_fill_vertex_buffer"),
-            contents: bytemuck::cast_slice(&fill_vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        }),
+        fill_vertex_buffer: vertex_buffer(
+            "sketch_fill_vertex_buffer",
+            bytemuck::cast_slice(&fill_vertices),
+        ),
         fill_vertex_count: fill_vertices.len() as u32,
+        pick_region_vertex_buffer: vertex_buffer(
+            "sketch_pick_region_vertex_buffer",
+            bytemuck::cast_slice(&pick_regions),
+        ),
+        pick_region_vertex_count: pick_regions.len() as u32,
+        pick_curve_vertex_buffer: vertex_buffer(
+            "sketch_pick_curve_vertex_buffer",
+            bytemuck::cast_slice(&pick_curves),
+        ),
+        pick_curve_vertex_count: pick_curves.len() as u32,
+        pick_corner_vertex_buffer: vertex_buffer(
+            "sketch_pick_corner_vertex_buffer",
+            bytemuck::cast_slice(&pick_corners),
+        ),
+        pick_corner_vertex_count: pick_corners.len() as u32,
     }
 }
 
@@ -1986,6 +2174,7 @@ mod tests {
             picking,
             std::slice::from_ref(mesh),
             std::slice::from_ref(mesh),
+            None,
             crate::picking::SelectionFilter::default(),
         );
         crate::viewport::copy_pick_pixel(&mut encoder, picking, &picking.staging_buffer, x, y);
