@@ -109,6 +109,68 @@ impl OpenAiCompatibleClient {
         Ok(response.text)
     }
 
+    /// The model's context window as the endpoint advertises it, or `None`
+    /// when it advertises nothing CADmark recognises. Compatible endpoints
+    /// share no one field for this, so the well-known spellings are all
+    /// read: the model's own record at `models/{model}` first, then the
+    /// model list. Any failure reads as "not advertised" rather than an
+    /// error: the manual setting stands in, and a probe must never stop a
+    /// project opening.
+    pub async fn context_window(&self, cancel: CancelFlag) -> Option<usize> {
+        let models_url = self.models_url()?;
+        let direct = {
+            let mut url = models_url.clone();
+            let path = url.path().trim_end_matches('/').to_string();
+            url.set_path(&format!("{path}/{}", self.model));
+            url
+        };
+        if let Some(window) = self
+            .fetch_json(direct, &cancel)
+            .await
+            .and_then(|record| advertised_context_window(&record))
+        {
+            return Some(window);
+        }
+        let list = self.fetch_json(models_url, &cancel).await?;
+        list["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|record| record["id"].as_str() == Some(self.model.as_str()))
+            .and_then(advertised_context_window)
+    }
+
+    /// The `models` endpoint beside `responses`.
+    fn models_url(&self) -> Option<Url> {
+        let mut url = self.responses_url.clone();
+        let path = url.path().trim_end_matches('/');
+        let parent = path.strip_suffix("/responses")?.to_string();
+        url.set_path(&format!("{parent}/models"));
+        Some(url)
+    }
+
+    /// One authenticated GET, its body read as JSON when the status is a
+    /// success and the body is of a sane size; anything else is `None`.
+    async fn fetch_json(&self, url: Url, cancel: &CancelFlag) -> Option<serde_json::Value> {
+        const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+        let mut http = self.client.get(url);
+        if let Some(credential) = &self.credential {
+            http = http.bearer_auth(credential.value());
+        }
+        let response = await_cancellable(http.send(), cancel).await.ok()?.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = await_cancellable(response.bytes(), cancel)
+            .await
+            .ok()?
+            .ok()?;
+        if body.len() > MAX_BODY_BYTES {
+            return None;
+        }
+        serde_json::from_slice(&body).ok()
+    }
+
     pub(crate) async fn smoke_test_exact_sentinel(
         &self,
         sentinel: &str,
@@ -203,6 +265,44 @@ impl fmt::Debug for OpenAiCompatibleClient {
             .field("accepts_images", &self.accepts_images)
             .finish_non_exhaustive()
     }
+}
+
+/// The context window a model record advertises, under whichever of the
+/// spellings compatible endpoints use: OpenAI-style `context_window`,
+/// OpenRouter's `context_length` (top-level or under `top_provider`),
+/// LiteLLM's `max_input_tokens`, llama.cpp's `meta.n_ctx_train`, and
+/// Ollama-style `model_info` entries ending in `.context_length`. A value
+/// below what any usable model has is ignored as a mistake.
+fn advertised_context_window(record: &serde_json::Value) -> Option<usize> {
+    const MIN_PLAUSIBLE: u64 = 1_024;
+    let direct = [
+        "context_window",
+        "context_length",
+        "max_context_length",
+        "context_window_tokens",
+        "max_input_tokens",
+        "n_ctx",
+    ]
+    .into_iter()
+    .filter_map(|key| record[key].as_u64());
+    let nested = [
+        &record["top_provider"]["context_length"],
+        &record["meta"]["n_ctx_train"],
+        &record["metadata"]["context_length"],
+    ]
+    .into_iter()
+    .filter_map(serde_json::Value::as_u64);
+    let model_info = record["model_info"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(key, _)| key.ends_with(".context_length"))
+        .filter_map(|(_, value)| value.as_u64());
+    direct
+        .chain(nested)
+        .chain(model_info)
+        .find(|value| *value >= MIN_PLAUSIBLE)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 /// Wait on a provider future while polling the cancel flag. There is no
@@ -777,6 +877,7 @@ pub(crate) mod recording {
             }
         };
         let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+        // A GET carries no body and no length.
         let content_length = headers
             .lines()
             .find_map(|line| {
@@ -785,7 +886,7 @@ pub(crate) mod recording {
                         .then(|| value.trim().parse::<usize>().unwrap())
                 })
             })
-            .unwrap();
+            .unwrap_or(0);
         while bytes.len() < header_end + content_length {
             let mut chunk = [0_u8; 4096];
             let read = stream.read(&mut chunk).await.unwrap();
@@ -809,7 +910,11 @@ pub(crate) mod recording {
                         .is_some_and(|token| !token.is_empty())
             })
         });
-        let body = serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap();
+        let body = if content_length == 0 {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap()
+        };
         RecordedRequest {
             path,
             authenticated,
@@ -848,6 +953,110 @@ mod tests {
             .map(|event| event["type"].as_str().unwrap().to_string())
             .collect();
         assert_eq!(kinds, ["a", "b"]);
+    }
+
+    #[test]
+    fn a_context_window_is_read_under_any_of_the_spellings_endpoints_use() {
+        let read = |record: serde_json::Value| advertised_context_window(&record);
+        assert_eq!(
+            read(serde_json::json!({"context_window": 200000})),
+            Some(200_000)
+        );
+        assert_eq!(
+            read(serde_json::json!({"context_length": 131072})),
+            Some(131_072)
+        );
+        assert_eq!(
+            read(serde_json::json!({"top_provider": {"context_length": 1048576}})),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            read(serde_json::json!({"meta": {"n_ctx_train": 32768}})),
+            Some(32_768)
+        );
+        assert_eq!(
+            read(serde_json::json!({"model_info": {"llama.context_length": 8192}})),
+            Some(8_192)
+        );
+        assert_eq!(
+            read(serde_json::json!({"max_input_tokens": 128000})),
+            Some(128_000)
+        );
+        assert_eq!(
+            read(serde_json::json!({"id": "m", "object": "model"})),
+            None
+        );
+        assert_eq!(
+            read(serde_json::json!({"context_window": 12})),
+            None,
+            "an implausibly small figure is a mistake, not a window"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_context_window_is_asked_of_the_model_record_then_the_list() {
+        // The model's own record answers.
+        let (base_url, records, server) = recording_server(vec![ScriptedResponse {
+            status: 200,
+            body: serde_json::json!({"id": "configured-model", "context_window": 200000})
+                .to_string(),
+            streamed: false,
+            delay: None,
+        }])
+        .await;
+        let probe = client(&base_url, Some("fake-token"));
+        assert_eq!(probe.context_window(CancelFlag::new()).await, Some(200_000));
+        server.await.unwrap();
+        {
+            let records = records.lock().unwrap();
+            assert_eq!(records[0].path, "/v1/models/configured-model");
+            assert!(records[0].authenticated);
+        }
+
+        // The record says nothing; the list carries it.
+        let (base_url, records, server) = recording_server(vec![
+            ScriptedResponse {
+                status: 404,
+                body: "{}".to_string(),
+                streamed: false,
+                delay: None,
+            },
+            ScriptedResponse {
+                status: 200,
+                body: serde_json::json!({"data": [
+                    {"id": "other", "context_length": 4096},
+                    {"id": "configured-model", "context_length": 131072},
+                ]})
+                .to_string(),
+                streamed: false,
+                delay: None,
+            },
+        ])
+        .await;
+        let probe = client(&base_url, None);
+        assert_eq!(probe.context_window(CancelFlag::new()).await, Some(131_072));
+        server.await.unwrap();
+        assert_eq!(records.lock().unwrap()[1].path, "/v1/models");
+
+        // Nothing advertised anywhere: not an error.
+        let (base_url, _records, server) = recording_server(vec![
+            ScriptedResponse {
+                status: 200,
+                body: serde_json::json!({"id": "configured-model"}).to_string(),
+                streamed: false,
+                delay: None,
+            },
+            ScriptedResponse {
+                status: 200,
+                body: serde_json::json!({"data": [{"id": "configured-model"}]}).to_string(),
+                streamed: false,
+                delay: None,
+            },
+        ])
+        .await;
+        let probe = client(&base_url, None);
+        assert_eq!(probe.context_window(CancelFlag::new()).await, None);
+        server.await.unwrap();
     }
 
     #[test]
