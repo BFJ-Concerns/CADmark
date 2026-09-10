@@ -12,12 +12,16 @@
 //! the loader has to be pointed at a software rasteriser before any driver
 //! opens, and `main` is the only place that ordering is guaranteed.
 
-use cadmark_core::geometry::{EdgeId, FaceId, PartId, PickedElement, TopologyElement, VertexId};
+use cadmark_core::geometry::{
+    EdgeId, FaceId, PartId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
+    VertexId,
+};
 use cadmark_core::mesh::{MeshEdge, MeshVertex, TessellatedMesh};
+use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchProfile, SketchRegion};
 use cadmark_renderer::camera::StandardView;
 use cadmark_renderer::mesh::GpuMesh;
 use cadmark_renderer::picking::{PickingPass, SelectionFilter};
-use cadmark_renderer::pipeline::{RenderPipelines, Renderer, upload_mesh};
+use cadmark_renderer::pipeline::{RenderPipelines, Renderer, upload_mesh, upload_sketch};
 use cadmark_renderer::section::{Axis, SectionPlane};
 use cadmark_renderer::viewport::{copy_pick_pixel, decode_pick_result, render_picking};
 
@@ -200,7 +204,15 @@ fn pick_at_in(
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    render_picking(&mut encoder, &pipelines, &picking, &meshes, &meshes, filter);
+    render_picking(
+        &mut encoder,
+        &pipelines,
+        &picking,
+        &meshes,
+        &meshes,
+        None,
+        filter,
+    );
     copy_pick_pixel(
         &mut encoder,
         &picking,
@@ -224,6 +236,182 @@ fn pick_at_in(
         PickedElement::Solid(element) => element,
         PickedElement::Sketch(element) => panic!("a solid-only scene picked {element:?}"),
     })
+}
+
+/// A rectangle drawn on the XZ plane, face-on to the front camera: four
+/// curves, four corners, one region. The solid behind it is the scene's
+/// backdrop face, ghosted in the viewport and excluded from picking.
+fn rectangle_sketch() -> SketchProfile {
+    let corners = [
+        [-2.0f32, 0.0, -1.0],
+        [2.0, 0.0, -1.0],
+        [2.0, 0.0, 1.0],
+        [-2.0, 0.0, 1.0],
+    ];
+    SketchProfile {
+        plane: cadmark_core::sketch::SketchPlane {
+            origin: [0.0; 3],
+            normal: [0.0, -1.0, 0.0],
+            x_axis: [1.0, 0.0, 0.0],
+        },
+        curves: (0..4)
+            .map(|index| SketchCurve {
+                curve_id: index as u32,
+                points: vec![corners[index], corners[(index + 1) % 4]],
+            })
+            .collect(),
+        corners: corners
+            .iter()
+            .enumerate()
+            .map(|(index, &position)| SketchCorner {
+                corner_id: index as u32,
+                position,
+            })
+            .collect(),
+        regions: vec![SketchRegion {
+            region_id: 0,
+            vertices: corners.to_vec(),
+            indices: vec![0, 1, 2, 0, 2, 3],
+        }],
+    }
+}
+
+/// The picking pass over the rectangle sketch alone — no pickable solid,
+/// as the viewport runs it for a sketch-only design — decoded at one
+/// pixel.
+fn pick_sketch_at(
+    gpu: &Gpu,
+    renderer: &Renderer,
+    filter: SelectionFilter,
+    pixel: (u32, u32),
+) -> Option<PickedElement> {
+    let mut pipelines =
+        RenderPipelines::new(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, WIDTH, HEIGHT);
+    pipelines.resize(&gpu.device, WIDTH, HEIGHT);
+    let picking = PickingPass::new(&gpu.device, WIDTH, HEIGHT);
+    let uniforms = renderer.simple_uniforms((WIDTH, HEIGHT));
+    gpu.queue.write_buffer(
+        &pipelines.picking_uniform_buffer,
+        0,
+        bytemuck::bytes_of(&uniforms),
+    );
+    let sketch = upload_sketch(&gpu.device, &rectangle_sketch());
+
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    render_picking(
+        &mut encoder,
+        &pipelines,
+        &picking,
+        &[],
+        &[],
+        Some(&sketch),
+        filter,
+    );
+    copy_pick_pixel(
+        &mut encoder,
+        &picking,
+        &picking.staging_buffer,
+        pixel.0,
+        pixel.1,
+    );
+    gpu.queue.submit(Some(encoder.finish()));
+
+    let slice = picking.staging_buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    gpu.device.poll(wgpu::Maintain::Wait);
+    let element = {
+        let data = slice.get_mapped_range();
+        decode_pick_result(&data[..4], filter)
+    };
+    picking.staging_buffer.unmap();
+    element
+}
+
+fn sketch(kind: SketchElementKind, index: u32) -> Option<PickedElement> {
+    Some(PickedElement::Sketch(SketchElement { kind, index }))
+}
+
+/// A sketch's region, curves and corners each answer a click, with the
+/// same precedence as faces, edges and vertices: a corner over the curves
+/// meeting at it, a curve over the region it bounds. The filter's three
+/// toggles govern the three kinds.
+fn a_sketch_region_curve_and_corner_each_answer_a_click(gpu: &Gpu) {
+    let renderer = front_facing_renderer(0);
+    let view_proj = renderer.simple_uniforms((WIDTH, HEIGHT)).view_proj;
+    let all = SelectionFilter::default();
+
+    // The middle of the rectangle is the region and nothing else.
+    let centre = pixels_below(view_proj, [0.0, 0.0, 0.0], 0.0);
+    assert_eq!(
+        pick_sketch_at(gpu, &renderer, all, centre),
+        sketch(SketchElementKind::Region, 0)
+    );
+
+    // Two pixels inside the bottom curve's midpoint is within its hit
+    // quad: the curve, not the region it bounds — and the region once the
+    // curve is filtered out.
+    let bottom_curve = pixels_below(view_proj, [0.0, 0.0, -1.0], -2.0);
+    assert_eq!(
+        pick_sketch_at(gpu, &renderer, all, bottom_curve),
+        sketch(SketchElementKind::Curve, 0)
+    );
+
+    // The corner where two curves meet is the corner.
+    let corner = pixels_below(view_proj, [2.0, 0.0, 1.0], 0.0);
+    assert_eq!(
+        pick_sketch_at(gpu, &renderer, all, corner),
+        sketch(SketchElementKind::Corner, 2)
+    );
+
+    // With vertices off the corner click reaches the curve under it;
+    // with edges off too, the region; with everything off, nothing.
+    assert_eq!(
+        pick_sketch_at(
+            gpu,
+            &renderer,
+            SelectionFilter {
+                vertices: false,
+                ..all
+            },
+            corner
+        )
+        .map(|element| matches!(
+            element,
+            PickedElement::Sketch(SketchElement {
+                kind: SketchElementKind::Curve,
+                ..
+            })
+        )),
+        Some(true)
+    );
+    assert_eq!(
+        pick_sketch_at(
+            gpu,
+            &renderer,
+            SelectionFilter {
+                vertices: false,
+                edges: false,
+                ..all
+            },
+            bottom_curve
+        ),
+        sketch(SketchElementKind::Region, 0)
+    );
+    assert_eq!(
+        pick_sketch_at(
+            gpu,
+            &renderer,
+            SelectionFilter {
+                faces: false,
+                edges: false,
+                vertices: false,
+            },
+            centre
+        ),
+        None
+    );
 }
 
 /// The pixel a given number of screen pixels below a world point. The
@@ -751,11 +939,15 @@ fn main() {
 
     let gpu = software_adapter();
     println!(
-        "\nrunning 12 tests on software adapter: {}",
+        "\nrunning 13 tests on software adapter: {}",
         gpu.adapter_name
     );
 
-    let checks: [Check; 12] = [
+    let checks: [Check; 13] = [
+        (
+            "a_sketch_region_curve_and_corner_each_answer_a_click",
+            a_sketch_region_curve_and_corner_each_answer_a_click,
+        ),
         (
             "a_grazing_surface_does_not_reveal_hidden_markers",
             a_grazing_surface_does_not_reveal_hidden_markers,

@@ -61,6 +61,20 @@ impl SelectionFilter {
             TopologyElement::Part(_) => true,
         }
     }
+
+    /// Whether a readback may resolve to this pick, of either kind. A
+    /// sketch's regions, curves and corners follow the face, edge and
+    /// vertex toggles: they are the same three shapes of target.
+    pub fn allows_pick(&self, picked: &PickedElement) -> bool {
+        match picked {
+            PickedElement::Solid(element) => self.allows(element),
+            PickedElement::Sketch(SketchElement { kind, .. }) => match kind {
+                SketchElementKind::Region => self.faces,
+                SketchElementKind::Curve => self.edges,
+                SketchElementKind::Corner => self.vertices,
+            },
+        }
+    }
 }
 
 /// Encode a topology element as a picking ID for the colour buffer.

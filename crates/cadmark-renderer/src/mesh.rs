@@ -75,6 +75,9 @@ pub struct SketchVertex {
     /// Which part of the profile this vertex belongs to: `REGION_TINT` for
     /// an enclosed region's fill, `CORNER_TINT` for a corner marker.
     pub tint: f32,
+    /// The picking ID of the sketch element this vertex draws, so the
+    /// visible pass can tint the selected or hovered element.
+    pub id: f32,
 }
 
 /// Tint selecting an enclosed region's translucent fill.
@@ -84,9 +87,18 @@ pub const CORNER_TINT: f32 = 1.0;
 
 /// GPU buffers for one sketch profile. Curves are a line list; regions
 /// and corner markers share one triangle list, told apart by their tint.
+/// The pick buffers carry the same elements for the colour-ID pass in
+/// the layouts the face, edge and marker picking pipelines read: regions
+/// as triangles, curves as screen-space quads, corners as marker quads.
 pub struct GpuSketch {
     pub fill_vertex_buffer: wgpu::Buffer,
     pub fill_vertex_count: u32,
     pub curve_vertex_buffer: wgpu::Buffer,
     pub curve_vertex_count: u32,
+    pub pick_region_vertex_buffer: wgpu::Buffer,
+    pub pick_region_vertex_count: u32,
+    pub pick_curve_vertex_buffer: wgpu::Buffer,
+    pub pick_curve_vertex_count: u32,
+    pub pick_corner_vertex_buffer: wgpu::Buffer,
+    pub pick_corner_vertex_count: u32,
 }
