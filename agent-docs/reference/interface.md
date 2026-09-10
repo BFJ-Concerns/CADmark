@@ -20,7 +20,9 @@ A new part is "Untitled" until its first save (`Ctrl+S`), which asks for a name 
 
 Window title carries the project folder name. The project menu shows the folder path, offers "Open project folder" (`Ctrl+O`), "Open recent", opening the script in an external editor, and showing the folder in the file manager.
 
-Source: `crates/cadmark-ui/src/toolbar.rs`.
+Each open project owns one orchestrator thread (`OrchestratorHandle`: command sender, result receiver, join handle). Opening another project and closing the window both call `Project::shut_down`, which cancels any running turn, closes the command channel so the thread's loop ends, drains results, and joins the thread before the window's GPU device is torn down. After shutdown the project sends nothing and polls nothing.
+
+Source: `crates/cadmark-ui/src/toolbar.rs`, `crates/cadmark-app/src/project.rs` (`shut_down`), `crates/cadmark-app/src/app.rs` (`on_exit`, `open_project`).
 
 ## Viewport
 
