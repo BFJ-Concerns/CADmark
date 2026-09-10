@@ -43,9 +43,11 @@ cannot execute scripts.
 ## Key Decisions
 
 - **Configured provider boundary**: Both AI consumers share one
-  OpenAI Responses-compatible client behind `AiBackend`. `cadmark.json`
-  selects the endpoint and model; credentials remain machine-local in the
-  named environment variable.
+  OpenAI Responses-compatible client behind `TurnModel`. The user settings
+  store (`~/.config/cadmark/settings.json`, `SettingsStore::default_location`)
+  selects the endpoint and model; the credential is read from
+  `CADMARK_AI_API_KEY` when set, otherwise from the owner-only credential
+  file beside the settings. No project folder carries AI configuration.
 - **Provenance via OCP instrumentation** (ADR-0002): Wraps OCP builder
   classes to capture which source lines generated which geometry.
 - **Geometry context as experimental layer** (ADR-0003): Three-layer

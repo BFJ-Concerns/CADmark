@@ -71,8 +71,11 @@ checkout under `$CADMARK_PREFIX` (default `~/.local`):
 | `share/icons/hicolor/scalable/apps/cadmark.svg` | application icon |
 
 The wrapper's `VIRTUAL_ENV` is what makes the installed copy use its own
-runtime: `discover_venv` checks that variable before the workspace root baked
-in at compile time. `WorkerLaunch::beside_current_exe` resolves the
+runtime: `discover_venv` checks that variable first, then a `.venv` beside
+the executable or up to three directories above it, then the workspace root
+baked in at compile time, then the working directory — so an installed copy
+started without the wrapper still finds `lib/cadmark/.venv` before the
+checkout it was built from. `WorkerLaunch::beside_current_exe` resolves the
 environment in the parent and passes it to the worker as `--venv`, because the
 worker's own environment is cleared before it starts.
 
