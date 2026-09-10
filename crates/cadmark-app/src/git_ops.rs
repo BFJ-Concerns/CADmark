@@ -57,15 +57,7 @@ pub fn create_microversion(
     trigger_message: &str,
     script_filename: &str,
 ) -> Result<Microversion, GitError> {
-    // If HEAD is detached (e.g. after undo navigation), create a branch
-    // so the new commit isn't orphaned. The branch name encodes the short
-    // hash we diverged from and an attempt number, so revisiting the same
-    // design step creates a distinct alternative rather than colliding.
-    if is_head_detached(project_dir)? {
-        let base = run_git(project_dir, &["rev-parse", "--short", "HEAD"])?;
-        let branch_name = next_edit_branch_name(project_dir, base.trim())?;
-        run_git(project_dir, &["checkout", "-b", &branch_name])?;
-    }
+    attach_detached_head(project_dir)?;
 
     // Stage the script file.
     run_git(project_dir, &["add", script_filename])?;
@@ -98,6 +90,7 @@ pub fn create_snapshot(
     name: &str,
     script_filename: &str,
 ) -> Result<Microversion, GitError> {
+    attach_detached_head(project_dir)?;
     run_git(project_dir, &["add", script_filename])?;
 
     let message = format!(
@@ -290,6 +283,21 @@ pub fn switch_branch(project_dir: &Path, name: &str) -> Result<(), GitError> {
 }
 
 /// Check whether HEAD is detached (not on any branch).
+/// Put a detached HEAD (the state undo navigation leaves) on a fresh
+/// branch before anything is committed, so the commit is reachable from the
+/// history's branch enumeration rather than only from the reflog. The
+/// branch name encodes the short hash diverged from and an attempt number,
+/// so revisiting the same design step creates a distinct alternative rather
+/// than colliding.
+fn attach_detached_head(project_dir: &Path) -> Result<(), GitError> {
+    if is_head_detached(project_dir)? {
+        let base = run_git(project_dir, &["rev-parse", "--short", "HEAD"])?;
+        let branch_name = next_edit_branch_name(project_dir, base.trim())?;
+        run_git(project_dir, &["checkout", "-b", &branch_name])?;
+    }
+    Ok(())
+}
+
 fn is_head_detached(project_dir: &Path) -> Result<bool, GitError> {
     let output = run_git(project_dir, &["symbolic-ref", "-q", "HEAD"]);
     match output {
@@ -570,6 +578,39 @@ mod tests {
         assert!(
             branch.starts_with("cadmark-edit-"),
             "branch name should encode the base commit"
+        );
+    }
+
+    #[test]
+    fn a_version_named_after_undo_stays_in_the_history_after_navigating_away() {
+        let dir = test_repo();
+        let script = "part.py";
+        fs::write(dir.path().join(script), "box = Box(10, 10, 10)").unwrap();
+        let first = create_microversion(dir.path(), "First version", "make a box", script).unwrap();
+        fs::write(dir.path().join(script), "box = Box(20, 20, 20)").unwrap();
+        create_microversion(dir.path(), "Second version", "make it bigger", script).unwrap();
+
+        // Undo to the first step, then name what is on screen.
+        checkout_commit(dir.path(), &first.commit_hash).unwrap();
+        let named = super::create_snapshot(dir.path(), "Small box", script).unwrap();
+        assert_ne!(
+            current_branch(dir.path()).unwrap(),
+            "HEAD",
+            "naming a version must not leave HEAD detached"
+        );
+
+        // Navigate elsewhere: the named version must still be listed.
+        checkout_commit(dir.path(), &first.commit_hash).unwrap();
+        let versions = list_microversions(dir.path(), 10).unwrap();
+        assert!(
+            versions
+                .iter()
+                .any(|version| version.commit_hash == named.commit_hash
+                    && version
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|snapshot| snapshot.name == "Small box")),
+            "the named version is reachable only through the reflog"
         );
     }
 
