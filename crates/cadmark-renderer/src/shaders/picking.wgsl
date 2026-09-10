@@ -157,3 +157,28 @@ fn fs_marker_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
     }
     return depth;
 }
+
+// ── Sketch profile ───────────────────────────────────────────────────
+//
+// A sketch is a drawing, not material: the visible pass draws it in front
+// of everything and outside the section plane, so its pick targets are
+// drawn the same way. The three entries reuse the face, edge and marker
+// vertex stages; only the section test and the ID's source differ.
+
+@fragment
+fn fs_sketch_region(in: VertexOutput) -> @location(0) vec4<u32> {
+    return encode_id(u32(in.face_id + 0.5));
+}
+
+@fragment
+fn fs_sketch_curve(in: EdgeVertexOutput) -> @location(0) vec4<u32> {
+    return encode_id(u32(in.edge_id + 0.5));
+}
+
+@fragment
+fn fs_sketch_corner(in: MarkerVertexOutput) -> @location(0) vec4<u32> {
+    if !marker_covers(in.corner) {
+        discard;
+    }
+    return encode_id(u32(in.vertex_id + 0.5));
+}

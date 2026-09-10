@@ -252,11 +252,9 @@ pub struct CadmarkApp {
     /// frame that changes neither issues no new pick, so an idle cursor
     /// costs nothing.
     last_hover_probe: Option<((u32, u32), Camera)>,
-    /// Whether a mesh has been uploaded to the GPU.
-    has_mesh: bool,
     /// Whether anything at all is drawn — a solid, a sketch, or both.
-    /// The placeholder and the view gizmo follow this; picking follows
-    /// `has_mesh`, which a sketch does not set.
+    /// The placeholder, the view gizmo and picking follow this: a sketch
+    /// profile's regions, curves and corners are pick targets too.
     has_geometry: bool,
     wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
     /// What the worker thread renders for the AI: the mesh, camera and
@@ -322,7 +320,6 @@ impl CadmarkApp {
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
-            has_mesh: false,
             has_geometry: false,
             wgpu_render_state,
             scene,
@@ -983,9 +980,6 @@ impl CadmarkApp {
                 res.clear_picks();
             }
         }
-        // Only a solid is pickable: the ghosted mesh belongs to an
-        // earlier script, and this model's ledger cannot explain it.
-        self.has_mesh = sketch.is_none();
         self.has_geometry = true;
         self.renderer.ghost_solid = sketch.is_some();
         // A new mesh under a resting cursor must be picked afresh.
@@ -1040,7 +1034,6 @@ impl CadmarkApp {
         }
         self.scene.set_mesh(None);
         self.scene.set_sketch(None);
-        self.has_mesh = false;
         self.has_geometry = false;
         self.renderer.ghost_solid = false;
         self.pending_pick = None;
@@ -2173,7 +2166,7 @@ impl CadmarkApp {
 
             // Hover: pick under the cursor while it rests over the model,
             // but not mid-drag, when the view is moving under it.
-            let hover_local = if self.has_mesh && response.hovered() && !response.dragged() {
+            let hover_local = if self.has_geometry && response.hovered() && !response.dragged() {
                 response.hover_pos().map(|pos| pos - rect.min)
             } else {
                 None
@@ -2709,7 +2702,6 @@ mod tests {
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
-            has_mesh: false,
             has_geometry: false,
             wgpu_render_state: None,
             scene: SceneHandle::new(),
@@ -2766,7 +2758,6 @@ mod tests {
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
-            has_mesh: false,
             has_geometry: false,
             wgpu_render_state: None,
             scene: SceneHandle::new(),

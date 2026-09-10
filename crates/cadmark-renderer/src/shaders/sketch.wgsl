@@ -33,11 +33,13 @@ struct Uniforms {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) tint: f32,
+    @location(2) id: f32,
 }
 
 struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) tint: f32,
+    @location(1) id: f32,
 }
 
 @vertex
@@ -45,6 +47,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_pos = uniforms.view_proj * vec4<f32>(in.position, 1.0);
     out.tint = in.tint;
+    out.id = in.id;
     return out;
 }
 
@@ -54,17 +57,41 @@ const CURVE_COLOUR: vec3<f32> = vec3<f32>(0.11, 0.36, 0.85);
 const REGION_COLOUR: vec3<f32> = vec3<f32>(0.34, 0.58, 0.95);
 const CORNER_COLOUR: vec3<f32> = vec3<f32>(0.05, 0.18, 0.55);
 
+// The selected element takes the selection colour, the hovered one the
+// hover colour, so a sketch answers a click the way a solid does. The
+// colours are the same ones the mesh pass uses, so the two agree on
+// what "selected" looks like.
+fn tint_selection(colour: vec4<f32>, id: f32) -> vec4<f32> {
+    let element = u32(id + 0.5);
+    if element == 0u {
+        return colour;
+    }
+    if element == uniforms.selected_id {
+        return vec4<f32>(
+            mix(colour.rgb, uniforms.selected_colour.rgb, uniforms.selected_colour.a),
+            max(colour.a, uniforms.selected_colour.a),
+        );
+    }
+    if element == uniforms.hover_id {
+        return vec4<f32>(
+            mix(colour.rgb, uniforms.hover_colour.rgb, uniforms.hover_colour.a),
+            max(colour.a, uniforms.hover_colour.a),
+        );
+    }
+    return colour;
+}
+
 @fragment
 fn fs_curve(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(CURVE_COLOUR, 1.0);
+    return tint_selection(vec4<f32>(CURVE_COLOUR, 1.0), in.id);
 }
 
 @fragment
 fn fs_fill(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.tint > 0.5 {
-        return vec4<f32>(CORNER_COLOUR, 1.0);
+        return tint_selection(vec4<f32>(CORNER_COLOUR, 1.0), in.id);
     }
     // Regions wash their area rather than covering it, so a ghosted solid
     // still reads behind the profile.
-    return vec4<f32>(REGION_COLOUR, 0.28);
+    return tint_selection(vec4<f32>(REGION_COLOUR, 0.28), in.id);
 }

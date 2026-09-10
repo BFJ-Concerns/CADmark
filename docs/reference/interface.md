@@ -35,7 +35,7 @@ Click a face, edge, or vertex to select it — the element glows, and its identi
 
 The **Select** menu in the toolbar turns each kind of click target on or off. Three checkboxes — "Faces", "Edges", "Vertices" — start all on. Disabling a kind makes clicks pass through it to whatever is behind. The filter does not affect whole-part picks.
 
-When a design contains only a sketch, the view switches to face its plane in orthographic projection, and any existing solid is ghosted behind it. Sketch curves, corners and filled regions are displayed, but cannot yet be selected in the viewport.
+When a design contains only a sketch, the view switches to face its plane in orthographic projection, and any existing solid is ghosted behind it. Its curves, corners and filled regions can be clicked and commented on like a solid's edges, vertices and faces: a corner wins over the curves meeting at it, a curve over the region it bounds, and the Select menu's three checkboxes govern the three kinds. The ghosted solid is not a click target, since it belongs to an earlier version of the script.
 
 ## View cube
 
