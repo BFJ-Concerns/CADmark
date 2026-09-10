@@ -184,6 +184,57 @@ pub fn chip(ui: &mut egui::Ui, text: &str, tint: Color32) -> egui::Response {
         .response
 }
 
+/// One entry of a [`chip_grid`]: the chip's text and, optionally, what
+/// hovering it shows.
+pub struct ChipEntry {
+    pub label: String,
+    pub hover: Option<String>,
+}
+
+/// Chips tessellated into rows at one shared width, wrapping whole chips
+/// onto the next row rather than letting a chip's text fold inside its
+/// frame as the row runs out. The width is the widest label's, capped so a
+/// long label truncates and shows in full on hover.
+pub fn chip_grid(ui: &mut egui::Ui, entries: &[ChipEntry], tint: Color32) {
+    const MAX_CHIP_WIDTH: f32 = 170.0;
+    let font = TextStyle::Small.resolve(ui.style());
+    let horizontal_margin = 12.0;
+    let widest = entries
+        .iter()
+        .map(|entry| {
+            ui.painter()
+                .layout_no_wrap(entry.label.clone(), font.clone(), tint)
+                .size()
+                .x
+        })
+        .fold(0.0_f32, f32::max);
+    let width = (widest + horizontal_margin).min(MAX_CHIP_WIDTH);
+    ui.horizontal_wrapped(|ui| {
+        for entry in entries {
+            if ui.available_size_before_wrap().x < width {
+                ui.end_row();
+            }
+            let response = egui::Frame::new()
+                .fill(tint.gamma_multiply(0.18))
+                .stroke(Stroke::new(1.0_f32, tint.gamma_multiply(0.5)))
+                .corner_radius(CornerRadius::same(3))
+                .inner_margin(Margin::symmetric(6, 2))
+                .show(ui, |ui| {
+                    ui.set_min_width(width - horizontal_margin);
+                    ui.set_max_width(width - horizontal_margin);
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(&entry.label).small().color(tint))
+                            .truncate(),
+                    );
+                })
+                .response;
+            if let Some(hover) = &entry.hover {
+                response.on_hover_text(hover);
+            }
+        }
+    });
+}
+
 /// A short keyboard hint such as "Enter" rendered as a key cap.
 pub fn key_hint(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()

@@ -253,15 +253,10 @@ impl OverlayState {
                             .shadow(ui.style().visuals.popup_shadow)
                             .show(ui, |ui| {
                                 ui.set_width(OVERLAY_WIDTH);
-                                ui.horizontal_wrapped(|ui| {
-                                    for context in anchors.iter() {
-                                        theme::chip(
-                                            ui,
-                                            &context.element.display_label(),
-                                            theme::SPATIAL,
-                                        )
-                                        .on_hover_text(context_summary(context));
-                                    }
+                                // The caption and close button take a row
+                                // of their own; the anchors tessellate
+                                // beneath them, however many there are.
+                                ui.horizontal(|ui| {
                                     ui.label(
                                         egui::RichText::new(if anchors.len() == 1 {
                                             "Comment on this"
@@ -290,6 +285,14 @@ impl OverlayState {
                                         },
                                     );
                                 });
+                                let chips: Vec<theme::ChipEntry> = anchors
+                                    .iter()
+                                    .map(|context| theme::ChipEntry {
+                                        label: context.element.display_label(),
+                                        hover: Some(context_summary(context)),
+                                    })
+                                    .collect();
+                                theme::chip_grid(ui, &chips, theme::SPATIAL);
                                 ui.add(
                                     egui::Label::new(
                                         egui::RichText::new(match anchors.as_slice() {
