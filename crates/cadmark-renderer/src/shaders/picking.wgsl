@@ -149,6 +149,16 @@ fn fs_marker(in: MarkerVertexOutput) -> @location(0) vec4<u32> {
     return encode_id(u32(in.vertex_id + 0.5));
 }
 
+// The exact depth prepass for face picking. It writes no colour, only
+// depth, and honours the section plane: geometry the section has cut
+// away must not occlude the interior face the cut reveals.
+@fragment
+fn fs_depth(in: VertexOutput) {
+    if !section_keeps(uniforms.section_plane, in.world_pos) {
+        discard;
+    }
+}
+
 @fragment
 fn fs_marker_depth(in: VertexOutput) -> @builtin(frag_depth) f32 {
     let depth = marker_surface_depth(in.clip_pos.z, PICKING_MARKER_REACH, uniforms.marker_size, uniforms.view_proj);
