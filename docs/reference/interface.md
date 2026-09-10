@@ -67,7 +67,7 @@ Every turn sends the AI the part's script as it stands on disk, whatever the con
 
 A completed turn's reply ends with what measurably changed: face count, volume, and overall size before and after, so an edit that did more than you asked is visible at once. When the script defines several parts, each part is reported on its own line under the name the script gives it, with a part the script no longer produces marked as removed and one it did not produce before as new.
 
-While a turn is running, the pane shows which step the AI is on, how long it has been at it, and a Cancel button. The context-occupancy bar shows how much of the configured context window is in use, including any reference images.
+While a turn is running, the pane shows which step the AI is on, how long it has been at it, and a Cancel button. The context figure above the messages shows how much of the configured context window the next request would occupy: the conversation, the reference images, and everything else a request carries (the AI's instructions, its tools, the current script, the examples chosen for the request, and what you have typed). Hover it for the breakdown. It turns amber with a warning when the script, instructions and images alone nearly fill the window, because condensing the conversation cannot help then; raise the context window in Settings or shorten the script.
 
 Type with Enter to send, Shift+Enter for a line break.
 
