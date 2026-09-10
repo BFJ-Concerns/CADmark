@@ -194,11 +194,14 @@ pub struct ChipEntry {
 /// Chips tessellated into rows at one shared width, wrapping whole chips
 /// onto the next row rather than letting a chip's text fold inside its
 /// frame as the row runs out. The width is the widest label's, capped so a
-/// long label truncates and shows in full on hover.
-pub fn chip_grid(ui: &mut egui::Ui, entries: &[ChipEntry], tint: Color32) {
+/// long label truncates and shows in full on hover. Returns one response
+/// per chip, in order.
+pub fn chip_grid(ui: &mut egui::Ui, entries: &[ChipEntry], tint: Color32) -> Vec<egui::Response> {
     const MAX_CHIP_WIDTH: f32 = 170.0;
     let font = TextStyle::Small.resolve(ui.style());
-    let horizontal_margin = 12.0;
+    // Inner margin (6 each side) plus the hairline stroke (1 each side):
+    // what a chip adds to its label, so `width` is the chip's outer width.
+    let horizontal_margin = 14.0;
     let widest = entries
         .iter()
         .map(|entry| {
@@ -210,29 +213,34 @@ pub fn chip_grid(ui: &mut egui::Ui, entries: &[ChipEntry], tint: Color32) {
         .fold(0.0_f32, f32::max);
     let width = (widest + horizontal_margin).min(MAX_CHIP_WIDTH);
     ui.horizontal_wrapped(|ui| {
-        for entry in entries {
-            if ui.available_size_before_wrap().x < width {
-                ui.end_row();
-            }
-            let response = egui::Frame::new()
-                .fill(tint.gamma_multiply(0.18))
-                .stroke(Stroke::new(1.0_f32, tint.gamma_multiply(0.5)))
-                .corner_radius(CornerRadius::same(3))
-                .inner_margin(Margin::symmetric(6, 2))
-                .show(ui, |ui| {
-                    ui.set_min_width(width - horizontal_margin);
-                    ui.set_max_width(width - horizontal_margin);
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&entry.label).small().color(tint))
-                            .truncate(),
-                    );
-                })
-                .response;
-            if let Some(hover) = &entry.hover {
-                response.on_hover_text(hover);
-            }
-        }
-    });
+        entries
+            .iter()
+            .map(|entry| {
+                if ui.available_size_before_wrap().x < width {
+                    ui.end_row();
+                }
+                let response = egui::Frame::new()
+                    .fill(tint.gamma_multiply(0.18))
+                    .stroke(Stroke::new(1.0_f32, tint.gamma_multiply(0.5)))
+                    .corner_radius(CornerRadius::same(3))
+                    .inner_margin(Margin::symmetric(6, 2))
+                    .show(ui, |ui| {
+                        ui.set_min_width(width - horizontal_margin);
+                        ui.set_max_width(width - horizontal_margin);
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(&entry.label).small().color(tint))
+                                .truncate(),
+                        );
+                    })
+                    .response;
+                match &entry.hover {
+                    Some(hover) => response.on_hover_text(hover),
+                    None => response,
+                }
+            })
+            .collect()
+    })
+    .inner
 }
 
 /// A short keyboard hint such as "Enter" rendered as a key cap.
@@ -292,5 +300,92 @@ mod tests {
         assert_eq!(style.visuals.panel_fill, PANEL);
         assert_eq!(style.text_styles[&TextStyle::Body].size, BODY_SIZE);
         assert_eq!(style.text_styles[&TextStyle::Monospace].size, CODE_SIZE);
+    }
+
+    /// Lay the grid out once in a panel of the given width and return each
+    /// chip's rectangle.
+    fn chip_rects(panel_width: f32, labels: &[&str]) -> Vec<egui::Rect> {
+        let context = egui::Context::default();
+        apply(&context);
+        let entries: Vec<ChipEntry> = labels
+            .iter()
+            .map(|label| ChipEntry {
+                label: (*label).to_string(),
+                hover: None,
+            })
+            .collect();
+        let mut rects = Vec::new();
+        // Two passes: the first frame lays fonts out; the second is stable.
+        for _ in 0..2 {
+            rects.clear();
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(panel_width, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ctx, |ui| {
+                            ui.set_width(panel_width);
+                            rects = chip_grid(ui, &entries, SPATIAL)
+                                .into_iter()
+                                .map(|response| response.rect)
+                                .collect();
+                        });
+                },
+            );
+        }
+        rects
+    }
+
+    #[test]
+    fn chips_share_one_width_and_wrap_whole_onto_new_rows() {
+        let labels = [
+            "face 1", "edge 12", "vertex 3", "face 104", "edge 7", "face 9",
+        ];
+        let rects = chip_rects(180.0, &labels);
+        assert_eq!(rects.len(), labels.len());
+
+        let widths: Vec<i32> = rects
+            .iter()
+            .map(|rect| rect.width().round() as i32)
+            .collect();
+        assert!(
+            widths.iter().all(|width| *width == widths[0]),
+            "every chip shares the widest label's width: {widths:?}"
+        );
+        // Chips never overlap the panel's right edge: a chip that would
+        // not fit moved whole to the next row.
+        assert!(
+            rects.iter().all(|rect| rect.right() <= 180.0 + 0.5),
+            "{rects:?}"
+        );
+        let rows: std::collections::BTreeSet<i32> =
+            rects.iter().map(|rect| rect.top().round() as i32).collect();
+        assert!(
+            rows.len() >= 2,
+            "six chips in 180 px need more than one row"
+        );
+        // Within a row the chips sit side by side in order.
+        for pair in rects.windows(2) {
+            if (pair[0].top() - pair[1].top()).abs() < 0.5 {
+                assert!(pair[1].left() > pair[0].right(), "{pair:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_label_is_capped_rather_than_widening_every_chip() {
+        let long = "a".repeat(80);
+        let rects = chip_rects(600.0, &[long.as_str(), "face 1"]);
+        assert!(rects[0].width() <= 170.0 + 0.5, "{:?}", rects[0]);
+        assert_eq!(
+            rects[0].width().round() as i32,
+            rects[1].width().round() as i32
+        );
     }
 }
