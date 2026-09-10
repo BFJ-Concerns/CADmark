@@ -45,6 +45,7 @@ Set this to match your model's context window (default: 128 000 tokens). CADmark
 If the provider rejects a request, the chat tells you why:
 
 - **Usage limit** — "the provider is at its usage limit or cooling down" (HTTP 429 or quota messages)
+- **Overloaded** — "the provider is overloaded or busy; try again shortly" (HTTP 503 or 529, an overloaded hosted model, or a local model server with no free slots)
 - **Authentication** — "the provider rejected the credential"
 - **Unknown model** — "the provider does not serve the configured model"
 
