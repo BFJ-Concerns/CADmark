@@ -24,7 +24,9 @@ use cadmark_core::version::VersionHistory;
 use cadmark_kernel::protocol::{ExecutedModel, ModelFile, ModelForm, SolidResult};
 use cadmark_renderer::camera::Bounds3;
 
-use crate::orchestrator::{OrchestratorCommand, OrchestratorResult, spawn_orchestrator};
+use crate::orchestrator::{
+    OrchestratorCommand, OrchestratorHandle, OrchestratorResult, spawn_orchestrator,
+};
 use crate::parts::{self, OpenPart};
 use crate::reference_images::ReferenceImages;
 use crate::turn::{RenderSource, TurnInput};
@@ -142,8 +144,9 @@ pub struct Project {
     part: OpenPart,
     /// Every part script in the folder, for the switcher.
     parts: Vec<String>,
-    cmd_tx: mpsc::Sender<OrchestratorCommand>,
-    result_rx: mpsc::Receiver<OrchestratorResult>,
+    /// The worker thread and its channels. Taken by `shut_down`, after
+    /// which the project sends nothing further.
+    orchestrator: Option<OrchestratorHandle>,
     pub history: VersionHistory,
     pub conversation: Conversation,
     /// The AI model in use, for the toolbar badge; absent when AI is
@@ -230,7 +233,7 @@ impl Project {
                 None
             }
         };
-        let (cmd_tx, result_rx) = spawn_orchestrator(
+        let orchestrator = spawn_orchestrator(
             dir.clone(),
             part.file_name().to_string(),
             ai,
@@ -246,8 +249,7 @@ impl Project {
             parts: parts::list_parts(&dir),
             part,
             dir,
-            cmd_tx,
-            result_rx,
+            orchestrator: Some(orchestrator),
             history,
             conversation,
             ai_model,
@@ -355,9 +357,42 @@ impl Project {
 
     /// Hand a command to the worker.
     pub fn send(&mut self, command: OrchestratorCommand) -> Result<(), String> {
-        self.cmd_tx
-            .send(command)
-            .map_err(|_| "The modelling worker has stopped; restart CADmark".to_string())
+        self.orchestrator
+            .as_ref()
+            .ok_or(())
+            .and_then(|orchestrator| orchestrator.commands.send(command).map_err(|_| ()))
+            .map_err(|()| "The modelling worker has stopped; restart CADmark".to_string())
+    }
+
+    /// Stop the worker thread and wait for it: any running turn is
+    /// cancelled, the command channel is closed so the thread's loop ends,
+    /// and the thread is joined. Ordering the teardown this way keeps the
+    /// thread from outliving the GPU device and runtime it renders and
+    /// executes with, which the process would otherwise tear down under
+    /// it. Safe to call more than once.
+    pub fn shut_down(&mut self) {
+        self.cancel_turn();
+        self.busy = None;
+        let Some(orchestrator) = self.orchestrator.take() else {
+            return;
+        };
+        let OrchestratorHandle {
+            commands,
+            results,
+            thread,
+        } = orchestrator;
+        drop(commands);
+        // A worker blocked sending a result must not deadlock the join:
+        // keep draining until the thread is gone.
+        while !thread.is_finished() {
+            match results.recv_timeout(Duration::from_millis(50)) {
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if thread.join().is_err() {
+            log::warn!("The modelling worker thread ended with a panic");
+        }
     }
 
     /// Ask the worker to re-read and execute the script on disk.
@@ -519,8 +554,10 @@ impl Project {
     /// Non-blocking: the results the worker has produced since last asked.
     pub fn poll(&mut self) -> Vec<OrchestratorResult> {
         let mut results = Vec::new();
-        while let Ok(result) = self.result_rx.try_recv() {
-            results.push(result);
+        if let Some(orchestrator) = &self.orchestrator {
+            while let Ok(result) = orchestrator.results.try_recv() {
+                results.push(result);
+            }
         }
         results
     }
@@ -758,8 +795,11 @@ mod tests {
             parts: Vec::new(),
             part: OpenPart::Named("bracket.py".to_string()),
             dir,
-            cmd_tx,
-            result_rx,
+            orchestrator: Some(OrchestratorHandle {
+                commands: cmd_tx,
+                results: result_rx,
+                thread: std::thread::spawn(|| {}),
+            }),
             history: VersionHistory::new(),
             conversation: Conversation::new(),
             ai_model: None,
@@ -874,6 +914,29 @@ mod tests {
         std::fs::write(&path, "not json").unwrap();
         assert!(load_conversation(dir.path()).is_empty());
         assert!(load_conversation(&dir.path().join("missing")).is_empty());
+    }
+
+    #[test]
+    fn shutting_down_joins_the_worker_thread_and_ends_further_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bracket.py"), "width = 10\n").unwrap();
+        let mut project = Project::open(
+            dir.path().to_path_buf(),
+            Some("bracket.py"),
+            Err("no provider".to_string()),
+            ExecutionLimits::default(),
+            Box::new(crate::turn::NoRender),
+        );
+        assert!(project.orchestrator.is_some());
+
+        project.shut_down();
+
+        assert!(project.orchestrator.is_none());
+        assert!(project.busy.is_none());
+        assert!(project.send(OrchestratorCommand::Reload).is_err());
+        assert!(project.poll().is_empty());
+        // Shutting down again is a no-op rather than a panic.
+        project.shut_down();
     }
 
     #[test]

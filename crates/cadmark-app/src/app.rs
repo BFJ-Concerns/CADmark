@@ -404,6 +404,9 @@ impl CadmarkApp {
             return;
         }
         self.save_conversation();
+        if let Some(previous) = self.project.as_mut() {
+            previous.shut_down();
+        }
         let project = Project::open(
             project_dir,
             None,
@@ -2507,6 +2510,11 @@ impl eframe::App for CadmarkApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_conversation();
+        // The worker thread renders on the same GPU device the window is
+        // about to tear down; it stops first, and the window waits for it.
+        if let Some(project) = self.project.as_mut() {
+            project.shut_down();
+        }
     }
 }
 
