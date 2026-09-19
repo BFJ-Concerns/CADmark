@@ -30,6 +30,31 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
+// Picking IDs of the candidate-footprint highlight, shared with the mesh
+// pass so a sketch element lights up when its line is hovered.
+@group(0) @binding(1) var<storage, read> highlight_ids: array<u32>;
+
+struct Marker {
+    element_id: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    colour: vec4<f32>,
+}
+
+// Pending-comment markers: a sketch element anchored to a card takes the
+// card's colour, as a solid element does.
+@group(0) @binding(2) var<storage, read> markers: array<Marker>;
+
+fn in_highlight(id: u32) -> bool {
+    for (var i = 0u; i < uniforms.highlight_count; i = i + 1u) {
+        if highlight_ids[i] == id {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) tint: f32,
@@ -66,13 +91,21 @@ fn tint_selection(colour: vec4<f32>, id: f32) -> vec4<f32> {
     if element == 0u {
         return colour;
     }
+    for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
+        if markers[index].element_id == element {
+            return vec4<f32>(
+                mix(colour.rgb, markers[index].colour.rgb, markers[index].colour.a),
+                max(colour.a, markers[index].colour.a),
+            );
+        }
+    }
     if element == uniforms.selected_id {
         return vec4<f32>(
             mix(colour.rgb, uniforms.selected_colour.rgb, uniforms.selected_colour.a),
             max(colour.a, uniforms.selected_colour.a),
         );
     }
-    if element == uniforms.hover_id {
+    if element == uniforms.hover_id || in_highlight(element) {
         return vec4<f32>(
             mix(colour.rgb, uniforms.hover_colour.rgb, uniforms.hover_colour.a),
             max(colour.a, uniforms.hover_colour.a),

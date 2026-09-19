@@ -10,7 +10,7 @@
 
 use std::time::Instant;
 
-use cadmark_core::geometry::GeometryContext;
+use cadmark_core::geometry::{GeometryContext, PickedElement};
 use cadmark_core::ledger::LedgerValue;
 use cadmark_core::message::{ContextUsage, Conversation, Message, MessageKind, ToolActivity};
 use cadmark_core::pending_comment::{
@@ -24,6 +24,12 @@ use cadmark_core::skills;
 /// which line it came from when that is known.
 fn spatial_chip(context: &GeometryContext) -> String {
     let element = context.element.display_label();
+    if let PickedElement::Sketch(_) = &context.element {
+        return match context.sketch.resolved() {
+            Some(source) => format!("{element} · line {}", source.source.line),
+            None => format!("{element} · untraced"),
+        };
+    }
     match &context.provenance {
         LedgerValue::Resolved(entry) => format!("{element} · line {}", entry.source.line),
         LedgerValue::Ambiguous(candidates) => format!(
@@ -835,6 +841,27 @@ mod tests {
             chosen_candidate: None,
         };
         assert_eq!(spatial_chip(&ambiguous), "edge 2 · lines 3/9");
+        let drawn = GeometryContext {
+            sketch: cadmark_core::sketch_lineage::SketchLineage::Resolved(
+                cadmark_core::sketch_lineage::SketchSource {
+                    source: cadmark_core::ledger::SourceRef {
+                        line: 4,
+                        code: "Rectangle(20, 10)".into(),
+                    },
+                    object: "Rectangle".into(),
+                },
+            ),
+            element: PickedElement::Sketch(cadmark_core::geometry::SketchElement {
+                kind: cadmark_core::geometry::SketchElementKind::Region,
+                index: 0,
+            }),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
+            chosen_candidate: None,
+        };
+        assert_eq!(spatial_chip(&drawn), "sketch region 0 · line 4");
         let untraced = GeometryContext {
             sketch: Default::default(),
             element: PickedElement::Solid(TopologyElement::Edge(EdgeId(2))),

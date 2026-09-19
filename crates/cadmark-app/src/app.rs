@@ -136,21 +136,27 @@ fn measurement_pair(anchors: &[GeometryContext]) -> Option<(TopologyElement, Top
 }
 
 /// The readout tracks the element currently highlighted by the application;
-/// comment anchors only provide the special two-element distance pair.
+/// comment anchors only provide the special two-element distance pair. A
+/// solid element is measured from the descriptors, a sketch element from
+/// the profile it was drawn in.
 fn measurement_readout(
     selection: &SelectionState,
     minimum_distance: Option<MinimumDistance>,
     descriptors: Option<&GeometryDescriptors>,
+    sketch: Option<&cadmark_core::sketch::SketchProfile>,
 ) -> Option<String> {
     minimum_distance.map(MinimumDistance::describe).or_else(|| {
         let SelectionState::Selected(element) = selection else {
             return None;
         };
-        element.solid().and_then(|element| {
-            descriptors.and_then(|descriptors| {
+        match element {
+            PickedElement::Solid(element) => descriptors.and_then(|descriptors| {
                 cadmark_ui::status::selection_measurement(element, descriptors)
-            })
-        })
+            }),
+            PickedElement::Sketch(element) => {
+                sketch.and_then(|profile| profile.measurement(element))
+            }
+        }
     })
 }
 
@@ -723,7 +729,7 @@ impl CadmarkApp {
                             after: &parts_after,
                         },
                         cadmark_kernel::protocol::ModelForm::Sketch(sketch) => {
-                            TurnGeometry::Sketch(sketch)
+                            TurnGeometry::Sketch(&sketch.profile)
                         }
                     },
                 );
@@ -956,17 +962,14 @@ impl CadmarkApp {
                     describe_validity(&solid.validity),
                 // A sketch is not an invalid solid; it is not a solid
                 // yet, and the status line says which.
-                cadmark_kernel::protocol::ModelForm::Sketch(sketch) => sketch.describe(),
+                cadmark_kernel::protocol::ModelForm::Sketch(sketch) => sketch.profile.describe(),
             }
         ));
         self.status = Some(Status::info(status));
 
         // Picking IDs belong to the model they were assigned for.
         self.clear_selection();
-        let sketch = match &model.form {
-            cadmark_kernel::protocol::ModelForm::Solid(_) => None,
-            cadmark_kernel::protocol::ModelForm::Sketch(sketch) => Some(sketch.clone()),
-        };
+        let sketch = model.sketch().cloned();
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
@@ -1199,7 +1202,10 @@ impl CadmarkApp {
                 Some(candidate.source.line),
                 candidate_highlight_ids(&project.ledger, candidate.operation_id),
             ),
-            _ => (None, Vec::new()),
+            // A hovered sketch-route row names a drawing line the ledger
+            // does not claim geometry for, so it moves the code panel and
+            // nothing in the viewport.
+            _ => (self.overlay.hovered_sketch_line(), Vec::new()),
         };
         if self.candidate_line != line || self.renderer.highlight_ids != footprint {
             self.candidate_line = line;
@@ -1276,10 +1282,23 @@ impl CadmarkApp {
                     return;
                 }
             },
-            PickedElement::Sketch(sketch) => cadmark_core::context::with_source_context(
-                cadmark_core::context::resolve_sketch_context(*sketch, &project.sketch_lineage),
-                project.script_source.as_deref(),
-            ),
+            PickedElement::Sketch(sketch) => {
+                let Some(profile) = project.model.as_ref().and_then(|model| model.sketch()) else {
+                    self.clear_selection();
+                    self.status = Some(Status::error(
+                        "Selection failed: no sketch is on screen for that element",
+                    ));
+                    return;
+                };
+                cadmark_core::context::with_source_context(
+                    cadmark_core::context::resolve_sketch_context(
+                        *sketch,
+                        &project.sketch_lineage,
+                        profile,
+                    ),
+                    project.script_source.as_deref(),
+                )
+            }
         };
         log::info!(
             "Selected {}: {}",
@@ -1682,10 +1701,28 @@ impl CadmarkApp {
                     return;
                 };
                 let recent = self.settings.other_recent_projects(&project.dir);
+                // A sketch has no validity to warn about; a solid's
+                // warning names the parts that are not closed.
                 let export_warning = project
                     .model
                     .as_ref()
+                    .filter(|model| model.solid().is_some())
                     .and_then(|model| export_warning(&export_decision(model.validity())));
+                let export_formats = project
+                    .model
+                    .as_ref()
+                    .map_or(&[][..], |model| model.export_formats());
+                let export_target = (project.model_parts.len() > 1)
+                    .then(|| {
+                        project.active_model_part_id.and_then(|id| {
+                            project
+                                .model_parts
+                                .iter()
+                                .find(|part| part.id == id)
+                                .map(|part| part.name.as_str())
+                        })
+                    })
+                    .flatten();
                 let part_options: Vec<PartOption> = project
                     .parts()
                     .iter()
@@ -1717,6 +1754,8 @@ impl CadmarkApp {
                     recent_projects: &recent,
                     controls_enabled: project.busy.is_none(),
                     has_model: project.model.is_some(),
+                    export_formats,
+                    export_target,
                     model_parts: &model_parts,
                     code_visible: self.code_visible,
                     export_warning: export_warning.as_deref(),
@@ -1829,12 +1868,12 @@ impl CadmarkApp {
                     .project()
                     .and_then(|project| project.busy.as_ref())
                     .map(Busy::label);
+                let model = self.project().and_then(|project| project.model.as_ref());
                 let measurement = measurement_readout(
                     &self.selection,
                     self.minimum_distance,
-                    self.project()
-                        .and_then(|project| project.model.as_ref())
-                        .map(|model| &model.descriptors),
+                    model.map(|model| &model.descriptors),
+                    model.and_then(|model| model.sketch()),
                 );
                 cadmark_ui::status::show_status_bar(
                     ui,
@@ -2350,8 +2389,8 @@ fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
         .iter()
         .flat_map(|comment| {
             comment.anchors.iter().filter_map(|anchor| match anchor {
-                PendingAnchor::Live(context) => context.solid().map(|element| ViewportMarker {
-                    element_id: cadmark_renderer::picking::encode_picking_id(element),
+                PendingAnchor::Live(context) => Some(ViewportMarker {
+                    element_id: cadmark_renderer::picking::encode_pick(&context.element),
                     colour: comment.marker_colour(),
                 }),
                 PendingAnchor::Lost { .. } => None,
@@ -2542,7 +2581,7 @@ mod tests {
         Renderer, SceneHandle, SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome,
         TurnRecord, UserSettings, VersionDialog, ai_services, camera_change,
         candidate_highlight_ids, history_move_note, measurement_pair, measurement_readout,
-        record_tool_start, turn_chat_message,
+        pending_markers, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -3140,6 +3179,38 @@ mod tests {
         }
     }
 
+    /// A pending comment anchored to a sketch element marks that element
+    /// in the viewport in the card's colour, as one anchored to a face
+    /// does, so the marker-to-card pairing holds for sketches too.
+    #[test]
+    fn a_pending_comment_on_a_sketch_element_marks_it_in_the_viewport() {
+        use cadmark_core::geometry::{SketchElement, SketchElementKind};
+        let curve = SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 2,
+        };
+        let anchor = GeometryContext {
+            element: PickedElement::Sketch(curve),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: vec![],
+            chosen_candidate: None,
+            sketch: Default::default(),
+        };
+        let mut pending = PendingComments::default();
+        pending.add("make this longer".into(), vec![anchor]);
+
+        let markers = pending_markers(&pending);
+
+        assert_eq!(markers.len(), 1);
+        assert_eq!(
+            markers[0].element_id,
+            cadmark_renderer::picking::encode_pick(&PickedElement::Sketch(curve))
+        );
+        assert_eq!(markers[0].colour, pending.comments()[0].marker_colour());
+    }
+
     #[test]
     fn exactly_two_comment_anchors_become_the_measurement_pair() {
         let anchor = |id| GeometryContext {
@@ -3182,12 +3253,38 @@ mod tests {
                 &SelectionState::Selected(PickedElement::Solid(TopologyElement::Edge(EdgeId(0)))),
                 None,
                 Some(&descriptors),
+                None,
             ),
             Some("Length 12 mm".into())
         );
         assert_eq!(
-            measurement_readout(&SelectionState::None, None, Some(&descriptors)),
+            measurement_readout(&SelectionState::None, None, Some(&descriptors), None),
             None
+        );
+
+        // A sketch element is measured from the profile it was drawn in.
+        let profile = cadmark_core::sketch::SketchProfile {
+            curves: vec![cadmark_core::sketch::SketchCurve {
+                curve_id: 3,
+                points: vec![[0.0; 3], [8.0, 0.0, 0.0]],
+                curve_type: "line".into(),
+                length: 8.0,
+                radius: None,
+            }],
+            ..Default::default()
+        };
+        let curve = PickedElement::Sketch(cadmark_core::geometry::SketchElement {
+            kind: cadmark_core::geometry::SketchElementKind::Curve,
+            index: 3,
+        });
+        assert_eq!(
+            measurement_readout(
+                &SelectionState::Selected(curve),
+                None,
+                Some(&descriptors),
+                Some(&profile),
+            ),
+            Some("Length 8 mm".into())
         );
     }
 
@@ -3244,14 +3341,35 @@ mod tests {
         };
         project.sketch_lineage.record_element(
             element,
-            SketchSource {
+            cadmark_core::sketch_lineage::SketchLineage::Resolved(SketchSource {
                 source: SourceRef {
                     line: 2,
                     code: "Rectangle(10, 5)".to_string(),
                 },
                 object: "Rectangle".to_string(),
-            },
+            }),
         );
+        project.model = Some(crate::project::LoadedModel {
+            descriptors: GeometryDescriptors::default(),
+            bounds: None,
+            form: cadmark_kernel::protocol::ModelForm::Sketch(
+                cadmark_kernel::protocol::SketchResult {
+                    profile: cadmark_core::sketch::SketchProfile {
+                        curves: vec![cadmark_core::sketch::SketchCurve {
+                            curve_id: 0,
+                            points: vec![[0.0; 3], [10.0, 0.0, 0.0]],
+                            curve_type: "line".to_string(),
+                            length: 10.0,
+                            radius: None,
+                        }],
+                        ..Default::default()
+                    },
+                    file: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(
+                        "/scratch/sketch-1.brep",
+                    )),
+                },
+            ),
+        });
         let mut app = app_around(project);
 
         app.handle_pick_result(PickedElement::Sketch(element), (12.0, 34.0));
@@ -3273,6 +3391,15 @@ mod tests {
         assert_eq!(
             anchors[0].sketch.resolved().map(|s| s.object.as_str()),
             Some("Rectangle")
+        );
+        // The curve's measurement rides with the anchor, as a solid
+        // edge's would.
+        assert_eq!(
+            anchors[0]
+                .identification
+                .get("length_mm")
+                .map(String::as_str),
+            Some("10.00")
         );
     }
 

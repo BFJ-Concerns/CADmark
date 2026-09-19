@@ -468,6 +468,7 @@ mod tests {
                 .map(|index| SketchCurve {
                     curve_id: index as u32,
                     points: vec![corners[index], corners[(index + 1) % 4]],
+                    ..SketchCurve::default()
                 })
                 .collect(),
             corners: corners
@@ -482,6 +483,7 @@ mod tests {
                 region_id: 0,
                 vertices: corners.to_vec(),
                 indices: vec![0, 1, 2, 0, 2, 3],
+                ..SketchRegion::default()
             }],
         }
     }

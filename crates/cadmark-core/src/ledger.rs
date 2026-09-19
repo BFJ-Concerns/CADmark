@@ -57,6 +57,10 @@ pub enum SemanticOperation {
     Mirror,
     Rotate,
     Scale,
+    /// A 2D offset of a sketch profile's outline.
+    Offset,
+    /// A sketch face built from drawn edges: `make_face` or `make_hull`.
+    MakeFace,
 }
 
 impl SemanticOperation {
@@ -86,6 +90,8 @@ impl SemanticOperation {
             Self::Mirror => "mirror",
             Self::Rotate => "rotate",
             Self::Scale => "scale",
+            Self::Offset => "offset",
+            Self::MakeFace => "face from edges",
         }
     }
 }
