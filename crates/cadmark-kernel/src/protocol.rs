@@ -12,7 +12,7 @@ use cadmark_core::geometry::{
 };
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::mesh::TessellatedMesh;
-use cadmark_core::sketch::SketchProfile;
+use cadmark_core::sketch::{SketchPlane, SketchProfile};
 use cadmark_core::sketch_lineage::SketchLineageLedger;
 use serde::{Deserialize, Serialize};
 
@@ -23,11 +23,14 @@ pub enum WorkerRequest {
     /// Execute the script at `script_path` (inside the project folder) and
     /// keep its model as a file in the worker's scratch directory.
     Execute { script_path: PathBuf },
-    /// Write a retained model to `path` in `format`.
+    /// Write a retained model to `path` in `format`. A drawing format
+    /// flattens the model onto `plane`, the plane a sketch was drawn on;
+    /// solid formats ignore it.
     Export {
         model: ModelFile,
         format: ExportFormat,
         path: PathBuf,
+        plane: Option<SketchPlane>,
     },
     /// Measure the closest separation between two elements of a retained model.
     MinimumDistance {
@@ -91,15 +94,24 @@ impl SolidResult {
     }
 }
 
-/// What kind of result a script reached. A script that has drawn a profile
-/// and not yet made a solid of it has no volume to summarise, no solid to
-/// check, and nothing to export, so it carries none of those rather than
+/// A sketch result: the profile drawn, kept on disk so it can be exported
+/// as a drawing without re-running the script. It has no volume to
+/// summarise and no solid to check, so it carries neither rather than
 /// zeroed stand-ins that would read as a degenerate solid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SketchResult {
+    pub profile: SketchProfile,
+    /// The placed sketch shape, retained for export.
+    pub file: ModelFile,
+}
+
+/// What kind of result a script reached: a solid, or a profile it has
+/// drawn and not yet made a solid of.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "form", rename_all = "snake_case")]
 pub enum ModelForm {
     Solid(SolidResult),
-    Sketch(SketchProfile),
+    Sketch(SketchResult),
 }
 
 /// Everything the application keeps from a successful execution.
@@ -111,7 +123,9 @@ pub struct ExecutedModel {
     /// Construction-time provenance for every element of the mesh.
     pub ledger: ProvenanceLedger,
     /// Which sketch curve drew each element, or the stated reason none
-    /// can be named. Rebuilt with the ledger on every execution.
+    /// can be named: keyed by face, edge and vertex for a solid, and by
+    /// region, curve and corner for a drawn profile. Rebuilt with the
+    /// ledger on every execution.
     pub sketch_lineage: SketchLineageLedger,
     /// Measured geometry of every element, in ledger order.
     pub descriptors: GeometryDescriptors,
@@ -131,6 +145,11 @@ impl ExecutedModel {
 
     /// The profile this execution drew, when no solid came of it yet.
     pub fn sketch(&self) -> Option<&SketchProfile> {
+        self.sketch_result().map(|sketch| &sketch.profile)
+    }
+
+    /// The sketch this execution drew and kept, when no solid came of it.
+    pub fn sketch_result(&self) -> Option<&SketchResult> {
         match &self.form {
             ModelForm::Sketch(sketch) => Some(sketch),
             ModelForm::Solid(_) => None,
@@ -228,6 +247,18 @@ mod tests {
         assert!(!line.contains('\n'));
         assert_eq!(serde_json::from_str::<WorkerReply>(&line).unwrap(), reply);
 
+        let request = WorkerRequest::Export {
+            model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
+            format: ExportFormat::Svg,
+            path: PathBuf::from("/project/part.svg"),
+            plane: Some(SketchPlane::default()),
+        };
+        let line = serde_json::to_string(&request).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WorkerRequest>(&line).unwrap(),
+            request
+        );
+
         let request = WorkerRequest::MinimumDistance {
             model: ModelFile(PathBuf::from("/scratch/model-1.brep")),
             first: TopologyElement::Face(FaceId(0)),
@@ -279,32 +310,43 @@ mod tests {
 
     #[test]
     fn a_sketch_result_crosses_the_boundary_carrying_no_solid() {
-        use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchPlane, SketchProfile};
+        use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchProfile};
 
         let executed = ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
             descriptors: GeometryDescriptors::default(),
-            form: ModelForm::Sketch(SketchProfile {
-                plane: SketchPlane::default(),
-                curves: vec![SketchCurve {
-                    curve_id: 0,
-                    points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
-                }],
-                corners: vec![SketchCorner {
-                    corner_id: 0,
-                    position: [0.0; 3],
-                }],
-                regions: Vec::new(),
+            form: ModelForm::Sketch(SketchResult {
+                profile: SketchProfile {
+                    plane: SketchPlane::default(),
+                    curves: vec![SketchCurve {
+                        curve_id: 0,
+                        points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+                        curve_type: "line".to_string(),
+                        length: 1.0,
+                        radius: None,
+                    }],
+                    corners: vec![SketchCorner {
+                        corner_id: 0,
+                        position: [0.0; 3],
+                    }],
+                    regions: Vec::new(),
+                },
+                file: ModelFile(PathBuf::from("/scratch/model-2.brep")),
             }),
         };
 
-        // Nothing about a sketch may read as a solid: no export gate opens,
-        // and the solid accessor states its absence rather than a zero.
+        // Nothing about a sketch may read as a solid: no solid export gate
+        // opens, and the solid accessor states its absence rather than a
+        // zero; the sketch itself is kept for a drawing export.
         assert!(!executed.is_printable());
         assert!(executed.solid().is_none());
         assert_eq!(executed.sketch().map(|s| s.curves.len()), Some(1));
+        assert_eq!(
+            executed.sketch_result().map(|s| s.file.0.as_path()),
+            Some(std::path::Path::new("/scratch/model-2.brep"))
+        );
 
         let reply = WorkerReply::Executed(Box::new(executed));
         let line = serde_json::to_string(&reply).unwrap();

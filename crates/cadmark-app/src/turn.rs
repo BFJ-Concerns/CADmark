@@ -770,9 +770,10 @@ fn describe_model(model: &ExecutedModel) -> String {
         // A sketch has no volume, no faces and no validity to report: it
         // is drawn on screen, and extruding it is the next step.
         ModelForm::Sketch(sketch) => format!(
-            "Executed successfully. {}. It is drawn in the viewport; \
-             nothing can be exported or measured until it becomes a solid.",
-            sketch.describe()
+            "Executed successfully. {}. It is drawn in the viewport and can be \
+             exported as an SVG or DXF drawing or as STEP; it has no volume to \
+             measure until it becomes a solid.",
+            sketch.profile.describe()
         ),
     };
     let untraced = model.ledger.untraced_count();
@@ -1012,21 +1013,27 @@ mod tests {
             ledger: ProvenanceLedger::new(),
             sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
-            form: ModelForm::Sketch(cadmark_core::sketch::SketchProfile {
-                plane: cadmark_core::sketch::SketchPlane {
-                    origin: [0.0; 3],
-                    normal: [0.0, 0.0, 1.0],
-                    x_axis: [1.0, 0.0, 0.0],
+            form: ModelForm::Sketch(cadmark_kernel::protocol::SketchResult {
+                profile: cadmark_core::sketch::SketchProfile {
+                    plane: cadmark_core::sketch::SketchPlane {
+                        origin: [0.0; 3],
+                        normal: [0.0, 0.0, 1.0],
+                        x_axis: [1.0, 0.0, 0.0],
+                    },
+                    curves: vec![cadmark_core::sketch::SketchCurve {
+                        curve_id: 0,
+                        points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+                        curve_type: "line".to_string(),
+                        length: 1.0,
+                        radius: None,
+                    }],
+                    corners: vec![cadmark_core::sketch::SketchCorner {
+                        corner_id: 0,
+                        position: [0.0; 3],
+                    }],
+                    regions: Vec::new(),
                 },
-                curves: vec![cadmark_core::sketch::SketchCurve {
-                    curve_id: 0,
-                    points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
-                }],
-                corners: vec![cadmark_core::sketch::SketchCorner {
-                    corner_id: 0,
-                    position: [0.0; 3],
-                }],
-                regions: Vec::new(),
+                file: ModelFile(PathBuf::from("/scratch/model-2.brep")),
             }),
         }
     }
@@ -1078,10 +1085,8 @@ mod tests {
         assert!(text.contains("not yet a solid"), "{text}");
         assert!(text.contains("1 curve"), "{text}");
         assert!(text.contains("drawn in the viewport"), "{text}");
-        assert!(
-            text.contains("nothing can be exported or measured"),
-            "{text}"
-        );
+        assert!(text.contains("exported as an SVG or DXF drawing"), "{text}");
+        assert!(text.contains("no volume to measure"), "{text}");
         // The solid vocabulary must not leak into a sketch's report.
         assert!(!text.contains("Volume"), "{text}");
         assert!(!text.contains("watertight"), "{text}");

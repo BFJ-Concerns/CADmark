@@ -20,10 +20,12 @@ from OCP.BRepFeat import BRepFeat_MakeDPrism as _cadmark_expected_dprism
 from OCP.BRepFilletAPI import (
     BRepFilletAPI_MakeChamfer as _cadmark_expected_chamfer,
     BRepFilletAPI_MakeFillet as _cadmark_expected_fillet,
+    BRepFilletAPI_MakeFillet2d as _cadmark_expected_fillet2d,
 )
 from OCP.BRepOffset import BRepOffset_MakeOffset as _cadmark_expected_offset
 from OCP.BRepOffsetAPI import (
     BRepOffsetAPI_DraftAngle as _cadmark_expected_draft,
+    BRepOffsetAPI_MakeOffset as _cadmark_expected_offset2d,
     BRepOffsetAPI_MakePipeShell as _cadmark_expected_pipe,
     BRepOffsetAPI_MakeThickSolid as _cadmark_expected_thick,
     BRepOffsetAPI_ThruSections as _cadmark_expected_loft,
@@ -50,6 +52,7 @@ from OCP.TopAbs import (
 from OCP.TopExp import TopExp as _cadmark_top_exp
 from OCP.TopTools import TopTools_IndexedMapOfShape as _cadmark_indexed_map
 from OCP.TopoDS import TopoDS_Shape as _cadmark_shape_type
+from OCP.Standard import Standard_TypeMismatch as _cadmark_ocp_type_mismatch
 
 
 class UnsupportedRuntimeVersion(RuntimeError):
@@ -96,6 +99,12 @@ _cadmark_manifest = (
     ("build123d.topology.three_d", "BRepAlgoAPI_Common", _cadmark_expected_common, "BooleanCommon", "history"),
     ("build123d.topology.three_d", "BRepFilletAPI_MakeFillet", _cadmark_expected_fillet, "Fillet", "history"),
     ("build123d.topology.three_d", "BRepFilletAPI_MakeChamfer", _cadmark_expected_chamfer, "Chamfer", "history"),
+    # The 2D chamfer of a sketch face or wire, and the 2D offset of a wire:
+    # both report per-edge history, so a chamfered or offset profile keeps
+    # the line that drew each surviving curve.
+    ("build123d.topology.two_d", "BRepFilletAPI_MakeFillet2d", _cadmark_expected_fillet2d, "Chamfer", "history"),
+    ("build123d.topology.one_d", "BRepFilletAPI_MakeFillet2d", _cadmark_expected_fillet2d, "Chamfer", "history"),
+    ("build123d.topology.one_d", "BRepOffsetAPI_MakeOffset", _cadmark_expected_offset2d, "Offset", "history"),
     ("build123d.topology.shape_core", "BRepBuilderAPI_Copy", _cadmark_expected_copy, None, "copy"),
     ("build123d.topology.shape_core", "BRepBuilderAPI_Transform", _cadmark_expected_transform, None, "copy"),
     ("build123d.topology.shape_core", "BRepBuilderAPI_GTransform", _cadmark_expected_gtransform, None, "copy"),
@@ -133,12 +142,6 @@ _cadmark_kind_enum = {
     "face": _cadmark_face,
     "edge": _cadmark_edge,
     "vertex": _cadmark_vertex,
-}
-# What a sketch object's own topology is called where the user points at it.
-_cadmark_sketch_element_kinds = {
-    "face": "region",
-    "edge": "curve",
-    "vertex": "corner",
 }
 _cadmark_relation_priority = (
     "Generated",
@@ -203,7 +206,6 @@ class _CadmarkSession:
         # stock sketch object, and the shapes it drew keyed by identity.
         self.sketches = []
         self.sketch_registry = _CadmarkShapeTable()
-        self.sketch_elements = []
         # Why an element has no sketch route, where an operation was asked
         # and answered nothing. Ancestry always wins over a barrier.
         self.sketch_barriers = _CadmarkShapeTable()
@@ -348,15 +350,9 @@ class _CadmarkSession:
                 "object": type(instance).__name__,
             }
         )
-        for kind, shapes in topology:
+        for _kind, shapes in topology:
             for member in shapes:
                 self.sketch_registry.slot(member, set).add(sketch_id)
-                self.sketch_elements.append(
-                    {
-                        "kind": _cadmark_sketch_element_kinds[kind],
-                        "sketch_id": sketch_id,
-                    }
-                )
 
     def sketch_lookup(self, shape):
         """Sketch labels on this shape, by identity.
@@ -426,6 +422,7 @@ class _CadmarkSession:
                 sketch_ids = set()
                 for source in self.direct_sources(tables[kind].get(output) or ()):
                     sketch_ids |= labelled_inputs.get(source, set())
+                same = None
                 if identity_tables is not None:
                     same = identity_tables[kind].get(output)
                     if same is not None:
@@ -433,6 +430,13 @@ class _CadmarkSession:
                 if sketch_ids:
                     self.register_sketch_ancestry(output, sketch_ids)
                 elif barrier is not None:
+                    # A shape carried through unchanged keeps the barrier
+                    # it already had: the step that first lost the route
+                    # is the honest answer, not the last step to pass it on.
+                    if same is not None and self.sketch_barriers.get(
+                        inputs_by_kind[kind][same]
+                    ):
+                        continue
                     self.note_sketch_barrier(output, barrier)
 
     def sketch_state(self, shape):
@@ -470,15 +474,18 @@ class _CadmarkSession:
 
     @staticmethod
     def history_results(builder, method, shape):
+        # A maker that answers only for one kind of input (the 2D fillet
+        # builder speaks of edges alone) raises an OCCT type mismatch for
+        # the others; that is "no history for this input", not a fault.
         try:
             result = getattr(builder, method)(shape)
             return list(result)
-        except (AttributeError, TypeError, RuntimeError):
+        except (AttributeError, TypeError, RuntimeError, _cadmark_ocp_type_mismatch):
             try:
                 history = builder.History()
                 result = getattr(history, method)(shape)
                 return list(result)
-            except (AttributeError, TypeError, RuntimeError):
+            except (AttributeError, TypeError, RuntimeError, _cadmark_ocp_type_mismatch):
                 return []
 
     def history_table(self, builder, inputs_by_kind):
@@ -859,6 +866,74 @@ class _CadmarkSession:
         shape.moved = moved
         self.originals.append((shape, "moved", original))
 
+    def install_generic_operation_hook(self, module_name, method_name, operation):
+        """Record a build123d operation with no history-reporting maker.
+
+        The operation's result is credited to the user line as Modified,
+        and sketch labels move onto it only where an input's exact shape
+        survived; every other output states the operation as the barrier
+        the label could not cross.
+        """
+        module = _cadmark_importlib.import_module(module_name)
+        build123d = _cadmark_importlib.import_module("build123d")
+        original = getattr(module, method_name)
+        exported = getattr(build123d, method_name, None)
+        session = self
+
+        def hooked(*args, **kwargs):
+            source_line = session.user_line()
+            inputs = session.collect_shapes((args, kwargs))
+            session.push_semantic(source_line, operation, method_name)
+            try:
+                result = original(*args, **kwargs)
+            finally:
+                session.pop_semantic()
+            session.capture_generic_operation(
+                result, inputs, source_line, operation, method_name
+            )
+            return result
+
+        setattr(module, method_name, hooked)
+        self.originals.append((module, method_name, original))
+        if exported is original:
+            setattr(build123d, method_name, hooked)
+            self.originals.append((build123d, method_name, exported))
+
+    def capture_generic_operation(self, result, inputs, source_line, operation, api_class):
+        shape = self.unwrap(result)
+        if shape is None or not isinstance(shape, _cadmark_shape_type) or shape.IsNull():
+            return
+        # An instrumented maker inside the operation has usually claimed
+        # everything it built under this semantic already (a 3D fillet's
+        # own builder, say); the operation is recorded here only when
+        # something it produced has no maker's word for it.
+        unclaimed = [
+            output
+            for _kind, outputs in self.topology(shape)
+            for output in outputs
+            if not self.lookup(output)
+        ]
+        if not unclaimed:
+            return
+        operation_id = self.new_operation(source_line, operation, api_class)
+        candidate = {"operation_id": operation_id, "relation": "Modified"}
+        inputs_by_kind = self.inputs_by_kind(inputs)
+        input_tables = {kind: _CadmarkShapeTable() for kind in _cadmark_kinds}
+        for kind, members in inputs_by_kind.items():
+            for ordinal, member in enumerate(members):
+                input_tables[kind].slot(member, lambda ordinal=ordinal: ordinal)
+        empty_tables = {kind: _CadmarkShapeTable() for kind in _cadmark_kinds}
+        for output in unclaimed:
+            self.register(output, [candidate])
+        self.carry_sketch_lineage(
+            shape,
+            inputs_by_kind,
+            empty_tables,
+            {"reason": "history_empty", "operation_id": operation_id},
+            identity_tables=input_tables,
+            strict=True,
+        )
+
     def install_generic_mirror_hook(self):
         module = _cadmark_importlib.import_module("build123d.operations_generic")
         build123d = _cadmark_importlib.import_module("build123d")
@@ -943,6 +1018,12 @@ class _CadmarkSession:
             self.install_transform_hook("scale", "Scale")
             self.install_location_transport_hook()
             self.install_generic_mirror_hook()
+            # Sketch operations whose makers keep no history: the result is
+            # credited to the operation, and a drawn curve that did not
+            # survive by identity states the operation as its barrier.
+            self.install_generic_operation_hook("build123d.operations_generic", "fillet", "Fillet")
+            self.install_generic_operation_hook("build123d.operations_sketch", "make_face", "MakeFace")
+            self.install_generic_operation_hook("build123d.operations_sketch", "make_hull", "MakeFace")
         except Exception:
             originals = self.originals or installed
             for module, attribute, original in reversed(originals):
@@ -979,7 +1060,6 @@ class _CadmarkSession:
             "vertices": [],
             "tombstones": list(self.tombstones),
             "sketches": list(self.sketches),
-            "sketch_elements": list(self.sketch_elements),
         }
         for kind, output_name in (
             ("face", "faces"),
@@ -995,6 +1075,31 @@ class _CadmarkSession:
                         "sketch": self.sketch_state(final_shape),
                     }
                 )
+        return result
+
+    def finalise_sketch(self, shape):
+        """The sketch route of every element of a drawn profile.
+
+        Elements are listed in the order of the profile's own indexed
+        topology maps — the numbering the profile view draws and picks
+        them under — so a clicked curve, corner or region resolves to the
+        line that drew it, or to the stated reason none did.
+        """
+        shape = self.unwrap(shape)
+        result = {
+            "schema_version": 1,
+            "operations": list(self.operations),
+            "sketches": list(self.sketches),
+        }
+        for kind, output_name in (
+            ("face", "regions"),
+            ("edge", "curves"),
+            ("vertex", "corners"),
+        ):
+            members = self.map_values(self.make_map(shape, _cadmark_kind_enum[kind]))
+            result[output_name] = [
+                {"sketch": self.sketch_state(member)} for member in members
+            ]
         return result
 
     def topology_index(self, shape, kind):

@@ -6,17 +6,22 @@
 // anchors, so one comment can point at several elements.
 
 use cadmark_core::candidates::order_candidates;
-use cadmark_core::geometry::{GeometryContext, ScreenPosition};
+use cadmark_core::geometry::{GeometryContext, PickedElement, ScreenPosition};
 use cadmark_core::ledger::{LedgerValue, ProvenanceEntry};
+use cadmark_core::sketch_lineage::NoSketchRoute;
 
 use crate::theme;
 
+/// One line about an anchor: its element, where it came from, and its
+/// surface or curve type. A sketch element's origin is the line that drew
+/// it — it has no ledger provenance because nothing the kernel built claims
+/// a drawn curve — so its sketch route stands in for the provenance.
 fn context_summary(context: &GeometryContext) -> String {
-    let mut summary = format!(
-        "{}: {}",
-        context.element.display_label(),
-        context.provenance.describe()
-    );
+    let origin = match &context.element {
+        PickedElement::Sketch(_) => context.sketch.describe(),
+        PickedElement::Solid(_) => context.provenance.describe(),
+    };
+    let mut summary = format!("{}: {origin}", context.element.display_label());
     if let Some(surface) = context
         .identification
         .get("surface")
@@ -25,6 +30,74 @@ fn context_summary(context: &GeometryContext) -> String {
         summary.push_str(&format!(" ({surface})"));
     }
     summary
+}
+
+/// The sketch route of a solid element, offered beneath its own origin so
+/// a comment on an extruded boss's side face can reach the profile line
+/// that drew it. Each drawn curve is a row; resting the pointer on one
+/// shows its line in the code panel. A sketch element's route is its
+/// origin and is already in the summary; an element with no route says
+/// why, in the ledger's own words.
+fn show_sketch_routes(
+    ui: &mut egui::Ui,
+    anchors: &[GeometryContext],
+    hovered_sketch_line: &mut Option<u32>,
+) {
+    *hovered_sketch_line = None;
+    for context in anchors {
+        let PickedElement::Solid(_) = &context.element else {
+            continue;
+        };
+        let sources = context.sketch.candidates();
+        if sources.is_empty() {
+            if let Some(reason) = context.sketch.no_route()
+                && !matches!(reason, NoSketchRoute::NoSketchAncestor)
+            {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "{}: {}",
+                            context.element.display_label(),
+                            reason.describe()
+                        ))
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                    )
+                    .wrap(),
+                );
+            }
+            continue;
+        }
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "{} comes from the sketch{}:",
+                    context.element.display_label(),
+                    if sources.len() > 1 {
+                        " (several curves reach it)"
+                    } else {
+                        ""
+                    }
+                ))
+                .small()
+                .color(theme::TEXT_MUTED),
+            )
+            .wrap(),
+        );
+        for source in sources {
+            let row = ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!("{}: `{}`", source.describe(), source.source.code))
+                        .small(),
+                )
+                .sense(egui::Sense::hover()),
+            );
+            if row.hovered() {
+                *hovered_sketch_line = Some(source.source.line);
+            }
+        }
+    }
 }
 
 /// What the candidate list says about its own order.
@@ -139,6 +212,9 @@ pub enum OverlayState {
         /// The candidate row the pointer is over, recomputed each frame so
         /// the viewport and code panel can show what that line accounts for.
         hovered_candidate: Option<ProvenanceEntry>,
+        /// The sketch-route row the pointer is over, recomputed each frame
+        /// so the code panel can show the drawing line it names.
+        hovered_sketch_line: Option<u32>,
     },
 }
 
@@ -166,6 +242,7 @@ impl OverlayState {
             anchors: vec![context],
             focused: false,
             hovered_candidate: None,
+            hovered_sketch_line: None,
         };
     }
 
@@ -208,6 +285,18 @@ impl OverlayState {
         }
     }
 
+    /// The sketch-route line the pointer is resting on, if any, for the
+    /// code panel to bring into view.
+    pub fn hovered_sketch_line(&self) -> Option<u32> {
+        match self {
+            Self::Active {
+                hovered_sketch_line,
+                ..
+            } => *hovered_sketch_line,
+            Self::Hidden => None,
+        }
+    }
+
     /// Close the overlay.
     pub fn close(&mut self) {
         *self = Self::Hidden;
@@ -228,6 +317,7 @@ impl OverlayState {
                 anchors,
                 focused,
                 hovered_candidate,
+                hovered_sketch_line,
             } => {
                 let mut action = OverlayAction::None;
                 let anchor_pos = egui::pos2(anchor.x, anchor.y);
@@ -308,6 +398,7 @@ impl OverlayState {
                                 );
 
                                 show_candidate_choices(ui, anchors, hovered_candidate);
+                                show_sketch_routes(ui, anchors, hovered_sketch_line);
 
                                 let response = egui::Frame::new()
                                     .fill(theme::SUNKEN)
@@ -469,6 +560,94 @@ mod tests {
         // The last anchor cannot be removed: a comment needs one.
         overlay.toggle_anchor(anchor(TopologyElement::Face(FaceId(1))));
         assert_eq!(overlay.anchors().len(), 1);
+    }
+
+    /// A sketch element's origin is the line that drew it, which the
+    /// summary states in place of the ledger provenance it cannot have.
+    #[test]
+    fn overlay_summary_names_the_drawing_line_of_a_sketch_element() {
+        use cadmark_core::geometry::{SketchElement, SketchElementKind};
+        use cadmark_core::sketch_lineage::{SketchLineage, SketchSource};
+        let mut identification = std::collections::HashMap::new();
+        identification.insert("curve".to_string(), "circle".to_string());
+        let context = GeometryContext {
+            element: PickedElement::Sketch(SketchElement {
+                kind: SketchElementKind::Curve,
+                index: 3,
+            }),
+            provenance: LedgerValue::Untraced,
+            identification,
+            source_context: String::new(),
+            neighbours: Vec::new(),
+            chosen_candidate: None,
+            sketch: SketchLineage::Resolved(SketchSource {
+                source: SourceRef {
+                    line: 6,
+                    code: "Circle(5)".into(),
+                },
+                object: "Circle".to_string(),
+            }),
+        };
+        assert_eq!(
+            context_summary(&context),
+            "sketch curve 3: drawn by Circle at line 6 (circle)"
+        );
+    }
+
+    /// A solid element with a sketch ancestor offers the drawing line as a
+    /// row; resting the pointer on it publishes that line. An element with
+    /// no sketch anywhere in its construction offers nothing.
+    #[test]
+    fn a_solid_elements_sketch_route_is_offered_and_hoverable() {
+        use cadmark_core::sketch_lineage::{SketchLineage, SketchSource};
+        let anchor = |sketch: SketchLineage| GeometryContext {
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(5))),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
+            chosen_candidate: None,
+            sketch,
+        };
+        let routed = anchor(SketchLineage::Resolved(SketchSource {
+            source: SourceRef {
+                line: 9,
+                code: "Rectangle(40, 20)".into(),
+            },
+            object: "Rectangle".to_string(),
+        }));
+        let ctx = egui::Context::default();
+        let hover = |anchors: &[GeometryContext], pointer: egui::Pos2| {
+            let mut hovered = None;
+            for _ in 0..2 {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 600.0),
+                    )),
+                    ..Default::default()
+                };
+                input.events.push(egui::Event::PointerMoved(pointer));
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        super::show_sketch_routes(ui, anchors, &mut hovered);
+                    });
+                });
+            }
+            hovered
+        };
+        let found = (0..600)
+            .map(|y| egui::pos2(20.0, y as f32))
+            .find_map(|pointer| hover(std::slice::from_ref(&routed), pointer));
+        assert_eq!(found, Some(9), "the drawing line's row is hoverable");
+
+        let unrouted = anchor(SketchLineage::default());
+        assert!(
+            (0..600)
+                .map(|y| egui::pos2(20.0, y as f32))
+                .all(|pointer| hover(std::slice::from_ref(&unrouted), pointer).is_none()),
+            "an element with no sketch ancestor offers no route"
+        );
     }
 
     #[test]

@@ -108,6 +108,8 @@ fn semantic_operation_name(operation: SemanticOperation) -> &'static str {
         SemanticOperation::LocationPattern => "LocationPattern",
         SemanticOperation::Mirror => "Mirror",
         SemanticOperation::Rotate => "Rotate",
+        SemanticOperation::Offset => "Offset",
+        SemanticOperation::MakeFace => "MakeFace",
         SemanticOperation::Scale => "Scale",
     }
 }

@@ -47,7 +47,7 @@ Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/s
 
 Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
 
-Sketch-only designs display curves, corners and filled regions face-on to the sketch plane in orthographic view, with any existing solid ghosted behind them. The three kinds are pick targets in the colour-ID pass, drawn after the solid passes with depth ignored (as the visible profile is): regions through the face vertex stage, curves as edge-width quads, corners as vertex-marker discs (`render_sketch_picking` in `crates/cadmark-renderer/src/viewport.rs`, `sketch_*_pick_vertices` in `pipeline.rs`). Their IDs occupy the sketch ranges of `picking.rs` and decode to `PickedElement::Sketch`. The filter maps Faces/Edges/Vertices to regions/curves/corners (`SelectionFilter::allows_pick`). The ghosted solid behind a sketch is excluded from the picking pass, since its ledger belongs to an earlier script. The visible sketch shader tints the selected and hovered element with the same colours the mesh pass uses.
+Sketch-only designs display curves, corners and filled regions face-on to the sketch plane in orthographic view, with any existing solid ghosted behind them. Each element carries the kernel's exact measurement (`SketchCurve::{curve_type, length, radius}`, `SketchRegion::area`), which the status bar reads through `SketchProfile::measurement` and the AI receives through `SketchProfile::identification`. The sketch lineage ledger of a sketch result is keyed by the same region, curve and corner IDs the profile draws under (`SketchLineageLedger::lookup_element`), built by `finalise_sketch` from the placed shape the profile was extracted from; build123d's 2D `chamfer` and `offset` report per-edge maker history and keep each curve's drawing line, while `fillet`, `make_face` and `make_hull` rebuild the outline and are recorded as the barrier the route could not cross. The three kinds are pick targets in the colour-ID pass, drawn after the solid passes with depth ignored (as the visible profile is): regions through the face vertex stage, curves as edge-width quads, corners as vertex-marker discs (`render_sketch_picking` in `crates/cadmark-renderer/src/viewport.rs`, `sketch_*_pick_vertices` in `pipeline.rs`). Their IDs occupy the sketch ranges of `picking.rs` and decode to `PickedElement::Sketch`. The filter maps Faces/Edges/Vertices to regions/curves/corners (`SelectionFilter::allows_pick`). The ghosted solid behind a sketch is excluded from the picking pass, since its ledger belongs to an earlier script. The visible sketch shader tints the selected and hovered element with the same colours the mesh pass uses.
 
 Selected elements glow in the viewport. The status bar shows which element is selected. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable.
 
@@ -187,17 +187,20 @@ Source: `crates/cadmark-ui/src/toolbar.rs` (history controls), `crates/cadmark-a
 
 ## Export
 
-Export menu in the toolbar. Available when a model is loaded. Formats:
+Export menu in the toolbar. Available when a model is loaded. The formats offered depend on what the script produced (`LoadedModel::export_formats`):
 
-| Format | Extension | Description |
-|--------|-----------|-------------|
-| STEP | `.step` | STEP AP214 B-rep for other CAD tools |
-| STL | `.stl` | Binary STL mesh for slicers |
-| 3MF | `.3mf` | 3MF mesh with units for slicers |
+| Result | Format | Extension | Description |
+|--------|--------|-----------|-------------|
+| Solid | STEP | `.step` | STEP AP214 B-rep for other CAD tools |
+| Solid | STL | `.stl` | Binary STL mesh for slicers |
+| Solid | 3MF | `.3mf` | 3MF mesh with units for slicers |
+| Sketch | SVG | `.svg` | Vector drawing in the sketch's plane, millimetres |
+| Sketch | DXF | `.dxf` | 2D CAD drawing in the sketch's plane |
+| Sketch | STEP | `.step` | The sketch's faces and curves as B-rep |
 
-Export writes the file next to the part script. Multi-part models offer per-part and "Export all" options. An open or invalid solid shows a non-blocking warning before export.
+Export writes the file next to the part script from the BREP the worker retained for the result, without re-running the script. A drawing format carries the sketch's plane (`SketchPlane`) across the worker boundary and flattens the shape onto it with build123d's `Plane.to_local_coords` before `ExportSVG` or `ExportDXF` writes it. Multi-part models offer per-part and "Export all" options; the top-level entries write the selected part (`Project::request_export` routes to the active part when several exist) and the menu names it. An open or invalid solid shows a non-blocking warning before export.
 
-Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-ui/src/toolbar.rs`.
+Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-kernel/src/export.rs`, `crates/cadmark-app/src/project.rs`, `crates/cadmark-ui/src/toolbar.rs`.
 
 ## Solid validity
 

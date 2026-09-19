@@ -206,6 +206,9 @@ fn assert_round_trip(
     let tolerance = match format {
         ExportFormat::Step => STEP_RELATIVE_TOLERANCE,
         ExportFormat::Stl | ExportFormat::ThreeMf => MESH_RELATIVE_TOLERANCE,
+        ExportFormat::Svg | ExportFormat::Dxf => {
+            unreachable!("a solid round trip never goes through a drawing")
+        }
     };
     assert!(
         imported.closed,
@@ -248,7 +251,7 @@ fn assert_worker_export_round_trip(format: ExportFormat) {
         .path()
         .join(format!("round-trip.{}", format.extension()));
     worker
-        .export(&solid.file, format, &path, roomy())
+        .export(&solid.file, format, &path, None, roomy())
         .unwrap_or_else(|error| panic!("{} export failed: {error}", format.label()));
     let imported = import_export(&path, format);
     assert_round_trip(format, solid.summary.volume, solid.summary.size(), imported);
@@ -267,6 +270,48 @@ fn stl_export_round_trips_as_a_closed_solid_at_its_original_scale() {
 #[test]
 fn three_mf_export_round_trips_as_a_closed_solid_at_its_original_scale() {
     assert_worker_export_round_trip(ExportFormat::ThreeMf);
+}
+
+/// A sketch-only script's kept file exports as a drawing through the
+/// worker, on the sketch's own plane, and the file re-imports at the
+/// sketch's size.
+#[test]
+fn a_sketch_exports_as_a_drawing_through_the_worker() {
+    let (project, script, mut worker) = project_with_script(
+        "from build123d import *\n\nwith BuildSketch(Plane.XZ) as profile:\n    RectangleRounded(30, 12, 3)\n",
+    );
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    let sketch = model.sketch_result().expect("a sketch result");
+    assert!(sketch.file.0.is_file(), "sketch kept at {:?}", sketch.file);
+
+    let export = project.path().join("profile.svg");
+    worker
+        .export(
+            &sketch.file,
+            ExportFormat::Svg,
+            &export,
+            Some(sketch.profile.plane),
+            roomy(),
+        )
+        .unwrap();
+    let output = Command::new(venv().join("bin/python"))
+        .arg("-c")
+        .arg(
+            "import json, sys\nfrom build123d import import_svg\nwires = import_svg(sys.argv[1])\nbox = wires[0].bounding_box()\nprint(json.dumps([box.size.X, box.size.Y]))",
+        )
+        .arg(&export)
+        .output()
+        .expect("the project Python runtime should launch an import reader");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let size: [f64; 2] = serde_json::from_slice(&output.stdout).unwrap();
+    assert!((size[0] - 30.0).abs() < 0.2, "SVG width {}", size[0]);
+    assert!((size[1] - 12.0).abs() < 0.2, "SVG height {}", size[1]);
 }
 
 #[test]
@@ -290,6 +335,7 @@ fn executes_a_script_and_exports_its_kept_model() {
             &model.solid().expect("a solid result").file,
             ExportFormat::Stl,
             &export,
+            None,
             roomy(),
         )
         .unwrap();
@@ -547,6 +593,7 @@ fn a_model_kept_before_a_killed_worker_still_exports() {
             &model.solid().expect("a solid result").file,
             ExportFormat::Step,
             &export,
+            None,
             roomy(),
         )
         .unwrap();

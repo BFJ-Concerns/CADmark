@@ -160,7 +160,7 @@ impl RenderSource for ViewportRender {
                 // The solid already on screen stays published: a sketch
                 // draws in front of it, ghosted, rather than replacing it.
                 self.scene
-                    .set_sketch(Some((Arc::new(sketch.clone()), None)));
+                    .set_sketch(Some((Arc::new(sketch.profile.clone()), None)));
             }
         }
     }

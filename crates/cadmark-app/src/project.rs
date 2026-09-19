@@ -21,7 +21,7 @@ use cadmark_core::message::{Conversation, Message};
 use cadmark_core::sketch::SketchProfile;
 use cadmark_core::sketch_lineage::SketchLineageLedger;
 use cadmark_core::version::VersionHistory;
-use cadmark_kernel::protocol::{ExecutedModel, ModelFile, ModelForm, SolidResult};
+use cadmark_kernel::protocol::{ExecutedModel, ModelFile, ModelForm, SketchResult, SolidResult};
 use cadmark_renderer::camera::Bounds3;
 
 use crate::orchestrator::{
@@ -71,6 +71,11 @@ impl LoadedModel {
     }
 
     pub fn sketch(&self) -> Option<&SketchProfile> {
+        self.sketch_result().map(|sketch| &sketch.profile)
+    }
+
+    /// The sketch on screen with the file the worker kept for it.
+    pub fn sketch_result(&self) -> Option<&SketchResult> {
         match &self.form {
             ModelForm::Sketch(sketch) => Some(sketch),
             ModelForm::Solid(_) => None,
@@ -81,6 +86,15 @@ impl LoadedModel {
     /// or face count to state until the profile becomes a solid.
     pub fn summary(&self) -> Option<&ModelSummary> {
         self.solid().map(|solid| &solid.summary)
+    }
+
+    /// The formats the model on screen can be written to: solid formats
+    /// for a solid, drawings and STEP for a sketch.
+    pub fn export_formats(&self) -> &'static [ExportFormat] {
+        match &self.form {
+            ModelForm::Solid(_) => &ExportFormat::SOLID,
+            ModelForm::Sketch(_) => &ExportFormat::SKETCH,
+        }
     }
 
     /// Per-solid kernel validity, empty for a sketch.
@@ -455,22 +469,44 @@ impl Project {
         }
     }
 
-    /// Write the current model next to the script.
+    /// Write the current model next to the script: a solid in a solid
+    /// format, a sketch as a drawing in its own plane or as STEP. The part
+    /// last selected is what a multi-part model writes, so the file
+    /// matches every visible cue about which part is chosen.
     pub fn request_export(&mut self, format: ExportFormat) -> Result<PathBuf, String> {
         let model = self.model.as_ref().ok_or("no model to export")?;
-        let solid = model
-            .solid()
-            .ok_or("a sketch cannot be exported until the script makes it a solid")?;
-        let decision = export_decision(&solid.validity);
-        if decision != ExportDecision::Ready {
-            return Err(export_warning(&decision).expect("non-ready decision has warning"));
+        if !model.export_formats().contains(&format) {
+            return Err(format!(
+                "{} is not a format {} can be written to",
+                format.label(),
+                match &model.form {
+                    ModelForm::Solid(_) => "a solid",
+                    ModelForm::Sketch(_) => "a sketch",
+                }
+            ));
         }
+        let (file, plane) = match &model.form {
+            ModelForm::Sketch(sketch) => (sketch.file.clone(), Some(sketch.profile.plane)),
+            ModelForm::Solid(solid) => {
+                if let Some(id) = self.active_model_part_id
+                    && self.model_parts.len() > 1
+                {
+                    return self.request_part_export(id, format);
+                }
+                let decision = export_decision(&solid.validity);
+                if decision != ExportDecision::Ready {
+                    return Err(export_warning(&decision).expect("non-ready decision has warning"));
+                }
+                (solid.file.clone(), None)
+            }
+        };
         let stem = parts::part_display_name(self.part.file_name());
         let path = self.dir.join(format!("{stem}.{}", format.extension()));
         self.send(OrchestratorCommand::Export {
-            model: solid.file.clone(),
+            model: file,
             format,
             path: path.clone(),
+            plane,
         })?;
         self.exports_in_flight += 1;
         Ok(path)
@@ -501,6 +537,7 @@ impl Project {
             model,
             format,
             path: path.clone(),
+            plane: None,
         })?;
         self.exports_in_flight += 1;
         Ok(path)
@@ -574,7 +611,7 @@ impl Project {
         // A sketch has no mesh, so its own points are what the camera
         // frames; a solid is framed across every part it defines.
         let bounds = match &model.form {
-            ModelForm::Sketch(sketch) => Bounds3::from_positions(sketch.points()),
+            ModelForm::Sketch(sketch) => Bounds3::from_positions(sketch.profile.points()),
             ModelForm::Solid(solid) => Bounds3::from_positions(
                 solid
                     .parts
@@ -734,15 +771,18 @@ mod tests {
     use super::*;
 
     fn sketch_form() -> ModelForm {
-        ModelForm::Sketch(SketchProfile {
-            plane: cadmark_core::sketch::SketchPlane {
-                origin: [0.0; 3],
-                normal: [0.0, 0.0, 1.0],
-                x_axis: [1.0, 0.0, 0.0],
+        ModelForm::Sketch(SketchResult {
+            profile: SketchProfile {
+                plane: cadmark_core::sketch::SketchPlane {
+                    origin: [0.0; 3],
+                    normal: [0.0, 1.0, 0.0],
+                    x_axis: [1.0, 0.0, 0.0],
+                },
+                curves: Vec::new(),
+                corners: Vec::new(),
+                regions: Vec::new(),
             },
-            curves: Vec::new(),
-            corners: Vec::new(),
-            regions: Vec::new(),
+            file: ModelFile(PathBuf::from("/scratch/sketch-1.brep")),
         })
     }
 
@@ -778,10 +818,12 @@ mod tests {
         assert!(sketch.sketch().is_some());
         assert!(sketch.summary().is_none());
         assert!(sketch.validity().is_empty());
+        assert_eq!(sketch.export_formats(), &ExportFormat::SKETCH);
 
         assert!(solid.sketch().is_none());
         assert_eq!(solid.summary().map(|summary| summary.face_count), Some(6));
         assert_eq!(solid.validity().len(), 1);
+        assert_eq!(solid.export_formats(), &ExportFormat::SOLID);
     }
 
     /// A project with no worker behind it: the receiver stands in for the
@@ -1036,13 +1078,105 @@ mod tests {
                 model,
                 format,
                 path: command_path,
+                plane,
             } => {
                 assert_eq!(model, kept_brep);
                 assert_eq!(format, ExportFormat::Stl);
                 assert_eq!(command_path, path);
+                assert_eq!(plane, None);
             }
             _ => panic!("part export must send an export command"),
         }
+    }
+
+    /// The top-level export of a multi-part model writes the part the
+    /// user last selected — the one every cue on screen names — not the
+    /// last part the script happened to bind.
+    #[test]
+    fn exporting_a_multi_part_model_writes_the_selected_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut project, cmd_rx) = project_for_test(dir.path().to_path_buf());
+        let valid = vec![SolidValidity {
+            valid: true,
+            closed: true,
+        }];
+        let mut box_part = part_for_export_test(
+            ModelFile(PathBuf::from("/worker-scratch/box.brep")),
+            valid.clone(),
+        );
+        box_part.id = 0;
+        box_part.name = "box".to_string();
+        let mut lid = part_for_export_test(
+            ModelFile(PathBuf::from("/worker-scratch/lid.brep")),
+            valid.clone(),
+        );
+        lid.id = 1;
+        lid.name = "lid".to_string();
+        project.model_parts = vec![box_part, lid];
+        project.model = Some(LoadedModel {
+            descriptors: GeometryDescriptors::default(),
+            bounds: None,
+            form: ModelForm::Solid(SolidResult {
+                summary: ModelSummary {
+                    volume: 1.0,
+                    bounds_min: [0.0; 3],
+                    bounds_max: [1.0; 3],
+                    face_count: 6,
+                    edge_count: 12,
+                    vertex_count: 8,
+                },
+                validity: valid,
+                file: ModelFile(PathBuf::from("/worker-scratch/lid.brep")),
+                parts: Vec::new(),
+            }),
+        });
+        project.select_model_part(0);
+
+        let path = project.request_export(ExportFormat::Stl).unwrap();
+
+        assert_eq!(path, dir.path().join("bracket-box.stl"));
+        match cmd_rx.recv().unwrap() {
+            OrchestratorCommand::Export { model, .. } => {
+                assert_eq!(model, ModelFile(PathBuf::from("/worker-scratch/box.brep")));
+            }
+            _ => panic!("export must send an export command"),
+        }
+    }
+
+    /// A sketch exports as a drawing on its own plane, from the file the
+    /// worker kept for it; a solid format is refused by name.
+    #[test]
+    fn exporting_a_sketch_sends_its_kept_file_and_plane() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut project, cmd_rx) = project_for_test(dir.path().to_path_buf());
+        project.model = Some(LoadedModel {
+            descriptors: GeometryDescriptors::default(),
+            bounds: None,
+            form: sketch_form(),
+        });
+
+        let path = project.request_export(ExportFormat::Dxf).unwrap();
+
+        assert_eq!(path, dir.path().join("bracket.dxf"));
+        assert_eq!(project.exports_in_flight, 1);
+        match cmd_rx.recv().unwrap() {
+            OrchestratorCommand::Export {
+                model,
+                format,
+                plane,
+                ..
+            } => {
+                assert_eq!(model, ModelFile(PathBuf::from("/scratch/sketch-1.brep")));
+                assert_eq!(format, ExportFormat::Dxf);
+                assert_eq!(plane.map(|plane| plane.normal), Some([0.0, 1.0, 0.0]));
+            }
+            _ => panic!("sketch export must send an export command"),
+        }
+
+        let error = project.request_export(ExportFormat::Stl).unwrap_err();
+        assert!(error.contains("STL"), "{error}");
+        assert!(error.contains("a sketch"), "{error}");
+        assert_eq!(project.exports_in_flight, 1);
     }
 
     #[test]

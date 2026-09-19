@@ -133,6 +133,22 @@ pub(crate) fn finalise(
     Ok((raw, ledger, sketch_lineage))
 }
 
+/// The sketch lineage of a drawn profile: which line drew each of its
+/// regions, curves and corners, keyed as the profile view numbers them.
+pub(crate) fn finalise_sketch(
+    py: Python<'_>,
+    session: &InstrumentationSession,
+    shape: &Bound<'_, PyAny>,
+    source: &str,
+) -> Result<SketchLineageLedger, ProvenanceError> {
+    let capture = session
+        .inner
+        .bind(py)
+        .call_method1("finalise_sketch", (shape,))?;
+    let operations = parse_operations(&item(&capture, "operations")?)?;
+    crate::sketch_lineage::build_profile_ledger(&capture, &operations, source)
+}
+
 pub(crate) fn restore(
     py: Python<'_>,
     session: &InstrumentationSession,
@@ -285,6 +301,8 @@ fn parse_operation(value: &str) -> Result<SemanticOperation, ProvenanceError> {
         "Mirror" => Ok(SemanticOperation::Mirror),
         "Rotate" => Ok(SemanticOperation::Rotate),
         "Scale" => Ok(SemanticOperation::Scale),
+        "Offset" => Ok(SemanticOperation::Offset),
+        "MakeFace" => Ok(SemanticOperation::MakeFace),
         other => Err(ProvenanceError::MalformedCapture(format!(
             "unknown semantic operation {other}"
         ))),
@@ -419,7 +437,7 @@ mod tests {
         Python::with_gil(|py| {
             let namespace = run_instrumentation_source(py).unwrap();
             let manifest = namespace.get_item("_cadmark_manifest").unwrap().unwrap();
-            assert_eq!(manifest.len().unwrap(), 25);
+            assert_eq!(manifest.len().unwrap(), 28);
             let bindings: Vec<(String, String)> = manifest
                 .try_iter()
                 .unwrap()
@@ -438,6 +456,16 @@ mod tests {
             assert!(bindings.contains(&(
                 "build123d.topology.utils".into(),
                 "BRepPrimAPI_MakePrism".into()
+            )));
+            // The 2D sketch makers, bound where build123d's face and wire
+            // operations reach them.
+            assert!(bindings.contains(&(
+                "build123d.topology.two_d".into(),
+                "BRepFilletAPI_MakeFillet2d".into()
+            )));
+            assert!(bindings.contains(&(
+                "build123d.topology.one_d".into(),
+                "BRepOffsetAPI_MakeOffset".into()
             )));
             for expected in [
                 "BRepPrimAPI_MakeSphere",

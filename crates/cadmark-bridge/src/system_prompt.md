@@ -56,7 +56,10 @@ know is wrong.
   or `Compound` binding. Aliases of one shape do not duplicate a part. To
   build one part in stages, rebind the same name at each stage; Python then
   leaves only the completed binding. A script that has only reached a sketch is
-  reported as not yet a solid.
+  reported as not yet a solid: it is drawn flat on its plane, the user can
+  point at its curves, corners and regions, and it exports as an SVG or DXF
+  drawing or as STEP. A flat part for a laser cutter, plotter or CNC router
+  is a sketch left as the result, not an extrusion.
 - Write **parametrically**. Every dimension, distance, angle, count, and
   radius a designer might adjust is a named variable in a parameter block
   at the top of the file, after the imports and before any geometry.

@@ -14,7 +14,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use thiserror::Error;
 
-use crate::protocol::{ExecutedModel, ExecutedPart, ModelFile, ModelForm, SolidResult};
+use crate::protocol::{
+    ExecutedModel, ExecutedPart, ModelFile, ModelForm, SketchResult, SolidResult,
+};
 
 #[derive(Error, Debug)]
 pub enum ExecutionError {
@@ -313,21 +315,31 @@ fn capture_result(
             })
         }
         crate::tessellation::ScriptResult::Sketch(sketch) => {
-            let profile = crate::sketch_tessellation::extract_profile(py, globals, &sketch)?;
-            log::info!("Sketch drawn: {}", profile.describe());
+            let extracted = crate::sketch_tessellation::extract_profile(py, globals, &sketch)?;
+            // The lineage and the kept file are both read from the placed
+            // shape the profile was extracted from, so the region, curve
+            // and corner numbering agrees across all three.
+            let sketch_lineage =
+                crate::provenance::finalise_sketch(py, session, &extracted.shape, source)?;
+            let file = keep_model(py, &extracted.shape, scratch_dir)?;
+            log::info!("Sketch drawn: {}", extracted.profile.describe());
             Ok(ExecutedModel {
                 mesh: TessellatedMesh::default(),
                 ledger: ProvenanceLedger::new(),
-                sketch_lineage: cadmark_core::sketch_lineage::SketchLineageLedger::default(),
+                sketch_lineage,
                 descriptors: cadmark_core::geometry::GeometryDescriptors::default(),
-                form: ModelForm::Sketch(profile),
+                form: ModelForm::Sketch(SketchResult {
+                    profile: extracted.profile,
+                    file,
+                }),
             })
         }
     }
 }
 
-/// Write the executed model to a fresh BREP file in `scratch_dir` so it can
-/// be exported later without re-running the script.
+/// Write the executed model — a build123d shape or a bare OCP shape — to a
+/// fresh BREP file in `scratch_dir` so it can be exported later without
+/// re-running the script.
 fn keep_model(
     py: Python<'_>,
     shape: &Bound<'_, PyAny>,
@@ -335,9 +347,10 @@ fn keep_model(
 ) -> Result<ModelFile, ExecutionError> {
     let sequence = MODEL_FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = scratch_dir.join(format!("model-{sequence}.brep"));
-    let exporters = py.import("build123d.exporters3d")?;
-    let written: bool = exporters
-        .call_method1("export_brep", (shape, path.display().to_string()))?
+    let ocp_shape = crate::tessellation::unwrap_shape(shape)?;
+    let tools = py.import("OCP.BRepTools")?.getattr("BRepTools")?;
+    let written: bool = tools
+        .call_method1("Write_s", (ocp_shape, path.display().to_string()))?
         .extract()?;
     if !written {
         return Err(ExecutionError::ModelFile(path.display().to_string()));
@@ -2325,7 +2338,7 @@ with BuildPart() as part:
             result.solid().expect("a solid result").file
         );
         let directory = tempfile::tempdir().unwrap();
-        for format in cadmark_core::export::ExportFormat::ALL {
+        for format in cadmark_core::export::ExportFormat::SOLID {
             let path = directory
                 .path()
                 .join(format!("part.{}", format.extension()));
@@ -2333,10 +2346,214 @@ with BuildPart() as part:
                 &result.solid().expect("a solid result").file,
                 format,
                 &path,
+                None,
             )
             .unwrap();
             assert!(std::fs::metadata(&path).unwrap().len() > 0, "{path:?}");
         }
+    }
+
+    /// A drawing export writes the sketch in its own plane at true size:
+    /// read back, an SVG of a 40 × 20 rectangle with a hole spans 40 by
+    /// 20 and carries the hole as a second wire, and a DXF carries the
+    /// circle as a circle. The sketch was drawn on the YZ plane, so a
+    /// drawing written in world coordinates would collapse to a line.
+    #[test]
+    fn a_sketch_exports_as_a_drawing_in_its_own_plane_and_as_step() {
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildSketch(Plane.YZ.offset(3)) as profile:
+    Rectangle(40, 20)
+    Circle(5, mode=Mode.SUBTRACT)
+"#);
+        let result = result.unwrap();
+        let sketch = result.sketch_result().expect("a sketch result");
+        assert!(sketch.file.0.is_file(), "sketch kept at {:?}", sketch.file);
+        let plane = sketch.profile.plane;
+        assert_eq!(plane.normal.map(|c| c.abs().round()), [1.0, 0.0, 0.0]);
+
+        let directory = tempfile::tempdir().unwrap();
+        for format in cadmark_core::export::ExportFormat::SKETCH {
+            let path = directory
+                .path()
+                .join(format!("profile.{}", format.extension()));
+            crate::export::export_model(&sketch.file, format, &path, Some(plane)).unwrap();
+            assert!(std::fs::metadata(&path).unwrap().len() > 0, "{path:?}");
+        }
+        // A drawing without a plane is refused rather than flattened onto
+        // a plane the sketch was never drawn on.
+        assert!(matches!(
+            crate::export::export_model(
+                &sketch.file,
+                cadmark_core::export::ExportFormat::Svg,
+                &directory.path().join("nowhere.svg"),
+                None,
+            ),
+            Err(crate::export::ExportError::NoPlane("SVG"))
+        ));
+
+        let read_back = pyo3::Python::with_gil(|py| -> pyo3::PyResult<(Vec<f64>, usize, Vec<String>)> {
+            let namespace = pyo3::types::PyDict::new(py);
+            namespace.set_item("directory", directory.path().display().to_string())?;
+            py.run(
+                c"
+import os
+import ezdxf
+from build123d import import_svg
+wires = import_svg(os.path.join(directory, 'profile.svg'))
+box = wires[0].bounding_box()
+for wire in wires[1:]:
+    box = box.add(wire.bounding_box())
+size = [box.size.X, box.size.Y]
+wire_count = len(wires)
+dxf_entities = sorted(entity.dxftype() for entity in ezdxf.readfile(os.path.join(directory, 'profile.dxf')).modelspace())
+",
+                Some(&namespace),
+                None,
+            )?;
+            Ok((
+                namespace.get_item("size")?.unwrap().extract()?,
+                namespace.get_item("wire_count")?.unwrap().extract()?,
+                namespace.get_item("dxf_entities")?.unwrap().extract()?,
+            ))
+        })
+        .unwrap();
+        let (size, wire_count, dxf_entities) = read_back;
+        assert!((size[0] - 40.0).abs() < 0.2, "SVG width {}", size[0]);
+        assert!((size[1] - 20.0).abs() < 0.2, "SVG height {}", size[1]);
+        assert_eq!(wire_count, 2, "the outline and the hole");
+        assert_eq!(
+            dxf_entities,
+            ["CIRCLE", "LINE", "LINE", "LINE", "LINE"],
+            "the DXF carries the rectangle's sides and the hole as a circle"
+        );
+    }
+
+    /// The lineage of a drawn profile is keyed by the same region, curve
+    /// and corner numbering the profile is drawn and picked under, so a
+    /// click on any element names the line that drew it.
+    #[test]
+    fn every_element_of_a_drawn_profile_resolves_to_the_line_that_drew_it() {
+        use cadmark_core::geometry::{SketchElement, SketchElementKind};
+
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildSketch() as profile:
+    Rectangle(40, 20)
+    with Locations((10, 0)):
+        Circle(5, mode=Mode.SUBTRACT)
+"#);
+        let result = result.unwrap();
+        let profile = result.sketch().expect("a sketch profile");
+        let lineage = &result.sketch_lineage;
+        assert_eq!(
+            lineage.element_count(),
+            profile.regions.len() + profile.curves.len() + profile.corners.len(),
+            "one route per drawn element"
+        );
+
+        let expect_line = |element: SketchElement| {
+            let route = lineage.lookup_element(&element);
+            route
+                .resolved()
+                .map(|source| source.source.line)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} has no route: {}",
+                        element.display_label(),
+                        route.describe()
+                    )
+                })
+        };
+        for curve in &profile.curves {
+            let element = SketchElement {
+                kind: SketchElementKind::Curve,
+                index: curve.curve_id,
+            };
+            let expected = if curve.curve_type == "circle" { 6 } else { 4 };
+            assert_eq!(
+                expect_line(element),
+                expected,
+                "{}",
+                element.display_label()
+            );
+        }
+        for corner in &profile.corners {
+            let element = SketchElement {
+                kind: SketchElementKind::Corner,
+                index: corner.corner_id,
+            };
+            // A circle's seam vertex is the circle's; every other corner
+            // is the rectangle's.
+            let on_circle =
+                ((corner.position[0] - 10.0).powi(2) + corner.position[1].powi(2)).sqrt();
+            let expected = if (on_circle - 5.0).abs() < 1e-3 { 6 } else { 4 };
+            assert_eq!(
+                expect_line(element),
+                expected,
+                "{}",
+                element.display_label()
+            );
+        }
+        // The region is the rectangle with the circle cut out: the cut is
+        // a boolean whose face history names the rectangle it modified.
+        assert_eq!(profile.regions.len(), 1);
+        let region = SketchElement {
+            kind: SketchElementKind::Region,
+            index: profile.regions[0].region_id,
+        };
+        let route = lineage.lookup_element(&region);
+        assert!(
+            route
+                .candidates()
+                .iter()
+                .any(|source| source.source.line == 4),
+            "the region reaches the rectangle that drew it: {}",
+            route.describe()
+        );
+
+        // An element the profile does not have states an absence.
+        let missing = lineage.lookup_element(&SketchElement {
+            kind: SketchElementKind::Curve,
+            index: 99,
+        });
+        assert!(missing.no_route().is_some());
+    }
+
+    /// Measurements ride with the profile: a curve's type, length and
+    /// radius, a region's area, the sketch's own size.
+    #[test]
+    fn a_drawn_profile_is_measured_exactly() {
+        let profile = sketch_of(
+            "from build123d import *
+
+with BuildSketch() as profile:
+    Rectangle(40, 20)
+    Circle(5, mode=Mode.SUBTRACT)
+",
+        );
+        assert_eq!(profile.size().map(f32::round), [40.0, 20.0]);
+        let circle = profile
+            .curves
+            .iter()
+            .find(|curve| curve.curve_type == "circle")
+            .expect("the hole is a circle");
+        assert_eq!(circle.radius, Some(5.0));
+        assert!((circle.length - std::f64::consts::TAU * 5.0).abs() < 1e-6);
+        let lines: Vec<f64> = profile
+            .curves
+            .iter()
+            .filter(|curve| curve.curve_type == "line")
+            .map(|curve| curve.length.round())
+            .collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.iter().filter(|&&length| length == 40.0).count(), 2);
+        assert_eq!(lines.iter().filter(|&&length| length == 20.0).count(), 2);
+        assert!(
+            (profile.regions[0].area - (800.0 - std::f64::consts::PI * 25.0)).abs() < 1e-6,
+            "area {} excludes the hole",
+            profile.regions[0].area
+        );
     }
 
     #[test]
