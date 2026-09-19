@@ -6,6 +6,11 @@
 //! application and the model read: a drawn curve where one was reached, and
 //! otherwise the stated reason none was — the operation that answered
 //! nothing, or the clean-up step that keeps no history at all.
+//!
+//! A solid's ledger is keyed by its face, edge and vertex IDs; a drawn
+//! profile's by the region, curve and corner IDs the profile view draws
+//! and picks under. Both are the kernel's own indexed-map order, so a
+//! click resolves against the same numbering the capture recorded.
 
 use std::collections::HashMap;
 
@@ -18,7 +23,7 @@ use pyo3::prelude::*;
 
 use crate::provenance::{ProvenanceError, RawOperation};
 
-/// Build the sketch lineage ledger from a finalised capture.
+/// Build the sketch lineage ledger of a solid from a finalised capture.
 pub(crate) fn build_ledger(
     capture: &Bound<'_, PyAny>,
     operations: &[RawOperation],
@@ -33,10 +38,6 @@ pub(crate) fn build_ledger(
     let sketches = parse_sketches(&item(capture, "sketches")?, &source_lines)?;
 
     let mut ledger = SketchLineageLedger::new();
-    for (element, sketch_id) in parse_sketch_elements(&item(capture, "sketch_elements")?)? {
-        ledger.record_element(element, sketch_source(sketch_id, &sketches)?);
-    }
-
     for (index, element) in item(capture, "faces")?.try_iter()?.enumerate() {
         let lineage = parse_lineage(&element?, &sketches, &operations, &source_lines)?;
         ledger.record_face(FaceId(index as u32), lineage);
@@ -50,6 +51,41 @@ pub(crate) fn build_ledger(
         ledger.record_vertex(VertexId(index as u32), lineage);
     }
 
+    Ok(ledger)
+}
+
+/// Build the sketch lineage ledger of a drawn profile from a sketch
+/// capture: one route per region, curve and corner, in the profile's own
+/// topology order.
+pub(crate) fn build_profile_ledger(
+    capture: &Bound<'_, PyAny>,
+    operations: &[RawOperation],
+    source: &str,
+) -> Result<SketchLineageLedger, ProvenanceError> {
+    let source_lines: Vec<&str> = source.lines().collect();
+    let operations: HashMap<u64, &RawOperation> = operations
+        .iter()
+        .map(|operation| (operation.operation_id, operation))
+        .collect();
+    let sketches = parse_sketches(&item(capture, "sketches")?, &source_lines)?;
+
+    let mut ledger = SketchLineageLedger::new();
+    for (kind, key) in [
+        (SketchElementKind::Region, "regions"),
+        (SketchElementKind::Curve, "curves"),
+        (SketchElementKind::Corner, "corners"),
+    ] {
+        for (index, element) in item(capture, key)?.try_iter()?.enumerate() {
+            let lineage = parse_lineage(&element?, &sketches, &operations, &source_lines)?;
+            ledger.record_element(
+                SketchElement {
+                    kind,
+                    index: index as u32,
+                },
+                lineage,
+            );
+        }
+    }
     Ok(ledger)
 }
 
@@ -81,40 +117,6 @@ fn parse_sketches(
         }
     }
     Ok(sketches)
-}
-
-/// Sketch elements are numbered per kind in the order the script drew
-/// them, so a curve's index does not shift when a corner is added.
-fn parse_sketch_elements(
-    value: &Bound<'_, PyAny>,
-) -> Result<Vec<(SketchElement, u64)>, ProvenanceError> {
-    let mut next_index: HashMap<SketchElementKind, u32> = HashMap::new();
-    let mut elements = Vec::new();
-    for entry in value.try_iter()? {
-        let entry = entry?;
-        let kind = parse_element_kind(&item(&entry, "kind")?.extract::<String>()?)?;
-        let index = next_index.entry(kind).or_insert(0);
-        elements.push((
-            SketchElement {
-                kind,
-                index: *index,
-            },
-            item(&entry, "sketch_id")?.extract()?,
-        ));
-        *index += 1;
-    }
-    Ok(elements)
-}
-
-fn parse_element_kind(value: &str) -> Result<SketchElementKind, ProvenanceError> {
-    match value {
-        "curve" => Ok(SketchElementKind::Curve),
-        "corner" => Ok(SketchElementKind::Corner),
-        "region" => Ok(SketchElementKind::Region),
-        other => Err(ProvenanceError::MalformedCapture(format!(
-            "unknown sketch element kind {other}"
-        ))),
-    }
 }
 
 fn sketch_source(

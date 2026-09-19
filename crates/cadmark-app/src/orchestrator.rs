@@ -12,6 +12,7 @@ use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{MinimumDistance, TopologyElement};
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::Conversation;
+use cadmark_core::sketch::SketchPlane;
 use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 
@@ -31,11 +32,13 @@ pub enum OrchestratorCommand {
         conversation: Conversation,
         cancel: CancelFlag,
     },
-    /// Write a kept model to `path`.
+    /// Write a kept model to `path`; a drawing format flattens it onto
+    /// `plane`.
     Export {
         model: ModelFile,
         format: ExportFormat,
         path: PathBuf,
+        plane: Option<SketchPlane>,
     },
     /// Measure two elements from the model currently on screen.
     MinimumDistance {
@@ -188,11 +191,12 @@ impl Orchestrator {
         model: &ModelFile,
         format: ExportFormat,
         path: &Path,
+        plane: Option<SketchPlane>,
     ) -> OrchestratorResult {
         let result = self
             .executor
             .worker
-            .export(model, format, path, self.executor.limits)
+            .export(model, format, path, plane, self.executor.limits)
             .map(|()| path.to_path_buf())
             .map_err(|error| error.to_string());
         OrchestratorResult::Exported { format, result }
@@ -297,7 +301,8 @@ pub fn spawn_orchestrator(
                             model,
                             format,
                             path,
-                        } => orchestrator.handle_export(&model, format, &path),
+                            plane,
+                        } => orchestrator.handle_export(&model, format, &path, plane),
                         OrchestratorCommand::MinimumDistance {
                             model,
                             first,

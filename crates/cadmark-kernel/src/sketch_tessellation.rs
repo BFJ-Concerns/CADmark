@@ -1,7 +1,8 @@
 // Sketch extraction — converts the OCP shape behind a script's sketch into
 // the kernel-neutral profile the renderer draws: curves as polylines,
 // corners as points, enclosed regions as triangulated areas, all placed on
-// the plane the sketch was drawn on.
+// the plane the sketch was drawn on, each measured exactly (curve type and
+// length, circle radius, region area) so the sketch reads like a solid.
 //
 // A solid's tessellation (`tessellation.rs`) carries triangles and edges
 // only; a sketch needs point geometry and filled regions that the solid
@@ -16,20 +17,34 @@ use crate::tessellation::TessellationError;
 
 /// Python source for sketch extraction. Topology is indexed through
 /// `TopExp.MapShapes_s`, so an edge two regions share is one curve with one
-/// stable ID rather than one per region — the IDs a later unit needs to
-/// resolve a picked curve back to the sketch's own topology.
+/// stable ID rather than one per region — the same indexing the sketch
+/// lineage capture uses, so a picked curve resolves against the numbering
+/// it was drawn under.
 const SKETCH_SOURCE: &std::ffi::CStr = c"
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
+from OCP.BRepGProp import BRepGProp
 from OCP.BRepMesh import BRepMesh_IncrementalMesh
 from OCP.GCPnts import GCPnts_TangentialDeflection
-from OCP.GeomAbs import GeomAbs_SurfaceType
+from OCP.GeomAbs import GeomAbs_CurveType, GeomAbs_SurfaceType
+from OCP.GProp import GProp_GProps
 from OCP.TopAbs import TopAbs_EDGE, TopAbs_FACE, TopAbs_REVERSED, TopAbs_VERTEX
 from OCP.TopExp import TopExp
 from OCP.TopLoc import TopLoc_Location
 from OCP.TopoDS import TopoDS
 from OCP.TopTools import TopTools_IndexedMapOfShape
 import math
+
+_cadmark_sketch_curve_names = {
+    GeomAbs_CurveType.GeomAbs_Line: 'line',
+    GeomAbs_CurveType.GeomAbs_Circle: 'circle',
+    GeomAbs_CurveType.GeomAbs_Ellipse: 'ellipse',
+    GeomAbs_CurveType.GeomAbs_Hyperbola: 'hyperbola',
+    GeomAbs_CurveType.GeomAbs_Parabola: 'parabola',
+    GeomAbs_CurveType.GeomAbs_BezierCurve: 'bezier',
+    GeomAbs_CurveType.GeomAbs_BSplineCurve: 'bspline',
+    GeomAbs_CurveType.GeomAbs_OffsetCurve: 'offset',
+}
 
 
 def _cadmark_indexed(shape, kind):
@@ -129,10 +144,13 @@ def _cadmark_sketch_profile(shape):
             first, second, third = triangulation.Triangle(triangle).Get()
             region_indices.extend([first - 1, second - 1, third - 1])
         if region_indices:
+            props = GProp_GProps()
+            BRepGProp.SurfaceProperties_s(face, props)
             regions.append({
                 'region_id': index - 1,
                 'vertices': region_vertices,
                 'indices': region_indices,
+                'area': props.Mass(),
             })
 
     curves = []
@@ -145,12 +163,22 @@ def _cadmark_sketch_profile(shape):
             for point_index in range(1, deflector.NbPoints() + 1):
                 point = deflector.Value(point_index)
                 points.append([point.X(), point.Y(), point.Z()])
+            curve_type = _cadmark_sketch_curve_names.get(adaptor.GetType(), 'other')
+            radius = adaptor.Circle().Radius() if curve_type == 'circle' else None
         except Exception:
             # A degenerate edge carries no drawable curve; the rest of the
             # profile still draws.
             continue
         if len(points) > 1:
-            curves.append({'curve_id': index - 1, 'points': points})
+            props = GProp_GProps()
+            BRepGProp.LinearProperties_s(edge, props)
+            curves.append({
+                'curve_id': index - 1,
+                'points': points,
+                'curve_type': curve_type,
+                'length': props.Mass(),
+                'radius': radius,
+            })
 
     corners = []
     for index in range(1, vertices.Extent() + 1):
@@ -196,13 +224,22 @@ if _cadmark_sketch_location is not None:
 _cadmark_sketch_output = _cadmark_sketch_profile(_cadmark_sketch_shape)
 ";
 
+/// A sketch as the kernel read it: the profile the renderer draws, and the
+/// placed OCP shape it was read from — what the lineage capture indexes
+/// and what is kept on disk for export, so both agree with the profile's
+/// own numbering.
+pub struct ExtractedSketch<'py> {
+    pub profile: SketchProfile,
+    pub shape: Bound<'py, PyAny>,
+}
+
 /// Extract the profile of `sketch` — a build123d sketch builder, sketch,
-/// face, wire, or edge — as plain data.
-pub fn extract_profile(
-    py: Python<'_>,
-    namespace: &Bound<'_, PyDict>,
-    sketch: &Bound<'_, PyAny>,
-) -> Result<SketchProfile, TessellationError> {
+/// face, wire, or edge — as plain data, with the placed shape behind it.
+pub fn extract_profile<'py>(
+    py: Python<'py>,
+    namespace: &Bound<'py, PyDict>,
+    sketch: &Bound<'py, PyAny>,
+) -> Result<ExtractedSketch<'py>, TessellationError> {
     namespace
         .set_item("_cadmark_sketch_result", sketch)
         .map_err(TessellationError::Python)?;
@@ -215,7 +252,13 @@ pub fn extract_profile(
     let output = namespace
         .get_item("_cadmark_sketch_output")?
         .ok_or_else(|| TessellationError::NoShape("Sketch extraction produced no result".into()))?;
-    parse_profile(&output)
+    let shape = namespace
+        .get_item("_cadmark_sketch_shape")?
+        .ok_or_else(|| TessellationError::NoShape("Sketch extraction kept no shape".into()))?;
+    Ok(ExtractedSketch {
+        profile: parse_profile(&output)?,
+        shape,
+    })
 }
 
 fn parse_profile(output: &Bound<'_, PyAny>) -> Result<SketchProfile, TessellationError> {
@@ -241,6 +284,9 @@ fn parse_profile(output: &Bound<'_, PyAny>) -> Result<SketchProfile, Tessellatio
         curves.push(SketchCurve {
             curve_id: field(&entry, "curve_id")?.extract()?,
             points: points(&field(&entry, "points")?)?,
+            curve_type: field(&entry, "curve_type")?.extract()?,
+            length: field(&entry, "length")?.extract()?,
+            radius: field(&entry, "radius")?.extract()?,
         });
     }
 
@@ -260,6 +306,7 @@ fn parse_profile(output: &Bound<'_, PyAny>) -> Result<SketchProfile, Tessellatio
             region_id: field(&entry, "region_id")?.extract()?,
             vertices: points(&field(&entry, "vertices")?)?,
             indices: field(&entry, "indices")?.extract()?,
+            area: field(&entry, "area")?.extract()?,
         });
     }
 

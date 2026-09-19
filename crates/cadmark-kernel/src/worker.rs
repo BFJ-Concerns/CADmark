@@ -26,6 +26,7 @@ use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{MinimumDistance, TopologyElement};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
+use cadmark_core::sketch::SketchPlane;
 use thiserror::Error;
 
 use crate::protocol::{ExecutedModel, ModelFile, WorkerFailure, WorkerReply, WorkerRequest};
@@ -165,19 +166,22 @@ impl KernelWorker {
         }
     }
 
-    /// Write a kept model to `path`. Exports run under the wall-clock
-    /// ceiling but no memory ceiling: writing a mesh is bounded work.
+    /// Write a kept model to `path`; a drawing format flattens it onto
+    /// `plane`. Exports run under the wall-clock ceiling but no memory
+    /// ceiling: writing a mesh is bounded work.
     pub fn export(
         &mut self,
         model: &ModelFile,
         format: ExportFormat,
         path: &Path,
+        plane: Option<SketchPlane>,
         limits: ExecutionLimits,
     ) -> Result<(), WorkerError> {
         let request = WorkerRequest::Export {
             model: model.clone(),
             format,
             path: path.to_path_buf(),
+            plane,
         };
         let limits = ExecutionLimits {
             memory_bytes: u64::MAX,
@@ -611,7 +615,8 @@ fn serve(request: WorkerRequest, scratch_dir: &Path) -> WorkerReply {
             model,
             format,
             path,
-        } => match crate::export::export_model(&model, format, &path) {
+            plane,
+        } => match crate::export::export_model(&model, format, &path, plane) {
             Ok(()) => WorkerReply::Exported,
             Err(error) => WorkerReply::Failed(WorkerFailure::Runtime {
                 message: error.to_string(),

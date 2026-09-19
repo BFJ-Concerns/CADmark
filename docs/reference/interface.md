@@ -37,6 +37,8 @@ The **Select** menu in the toolbar turns each kind of click target on or off. Th
 
 When a design contains only a sketch, the view switches to face its plane in orthographic projection, and any existing solid is ghosted behind it. Its curves, corners and filled regions can be clicked and commented on like a solid's edges, vertices and faces: a corner wins over the curves meeting at it, a curve over the region it bounds, and the Select menu's three checkboxes govern the three kinds. The ghosted solid is not a click target, since it belongs to an earlier version of the script.
 
+A selected sketch element is measured like a solid's: a curve shows its length, a circular curve its diameter, and a region its area, and the status line gives the sketch's overall width and height in its own plane. The comment overlay names the line that drew the element — "drawn by Rectangle at line 4" — and where an operation such as `fillet` or `make_face` rebuilt the outline so that no drawn curve survives, it says which operation broke the route rather than guessing a line. On a finished solid, selecting a face or edge that came from a sketch lists the drawing line beneath its own origin; resting the pointer on that row brings the line into view in the code panel.
+
 ## View cube
 
 The cube in the viewport's top-right corner turns with the model and is the way to reorient the view. Its six faces are labelled Front, Back, Left, Right, Top and Bottom. Click the middle of a face to look squarely at it, the strip along an edge to look from halfway between two faces, or a corner to look from an isometric direction — the region under the pointer lights up, and a tooltip names the view. Drag the cube to orbit freely. The curved arrows that appear beside it turn the view a quarter turn either way about the line of sight; snapping to any named view undoes the turn.
@@ -125,7 +127,7 @@ Every accepted AI edit is saved as a design step. Steps record which part they c
 
 ## Export
 
-The Export menu in the toolbar writes the model to a file next to the part script. Three formats:
+The Export menu in the toolbar writes the model to a file next to the part script. A solid offers three formats:
 
 | Format | Use |
 |--------|-----|
@@ -133,7 +135,15 @@ The Export menu in the toolbar writes the model to a file next to the part scrip
 | STL (.stl) | Slicer input (binary mesh) |
 | 3MF (.3mf) | Slicer input (mesh with units) |
 
-Multi-part models can export one part or all parts. An open or invalid solid shows a warning before export.
+A design that has reached only a sketch offers drawing formats instead, written flat in the plane the sketch was drawn on and at true size in millimetres:
+
+| Format | Use |
+|--------|-----|
+| SVG (.svg) | Vector drawing for laser cutters, plotters and illustration tools |
+| DXF (.dxf) | 2D CAD and CNC toolpath input |
+| STEP (.step) | The sketch's faces and curves for another CAD tool |
+
+Multi-part models can export one part or all parts; the top-level entries write the part currently selected and name it in the menu. An open or invalid solid shows a warning before export.
 
 ## Solid validity
 
