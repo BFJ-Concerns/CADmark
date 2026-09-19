@@ -2520,6 +2520,80 @@ with BuildSketch() as profile:
         assert!(missing.no_route().is_some());
     }
 
+    /// A sketch object hands its geometry to the enclosing builder before
+    /// its own construction finishes, so the label must be on the input
+    /// before the boolean consumes it: the hole a subtracted circle cuts
+    /// resolves to the circle's line, and a chamfered profile keeps the
+    /// rectangle's line on the sides the chamfer left alone while the
+    /// chamfer states itself as the barrier on the corners it rebuilt.
+    #[test]
+    fn a_consumed_sketch_object_still_labels_the_curves_it_drew() {
+        use cadmark_core::geometry::{SketchElement, SketchElementKind};
+        use cadmark_core::ledger::SemanticOperation;
+        use cadmark_core::sketch_lineage::NoSketchRoute;
+
+        let (_scratch, result) = run(r#"from build123d import *
+
+with BuildSketch(Plane.XZ) as profile:
+    Rectangle(60, 40)
+    chamfer(profile.vertices(), 6)
+    Circle(4, mode=Mode.SUBTRACT)
+"#);
+        let result = result.unwrap();
+        let profile = result.sketch().expect("a sketch profile");
+        let mut circle_lines = Vec::new();
+        let mut side_lines = Vec::new();
+        let mut chamfer_barriers = 0;
+        for curve in &profile.curves {
+            let route = result.sketch_lineage.lookup_element(&SketchElement {
+                kind: SketchElementKind::Curve,
+                index: curve.curve_id,
+            });
+            match (
+                curve.curve_type.as_str(),
+                route.resolved(),
+                route.no_route(),
+            ) {
+                ("circle", Some(source), _) => circle_lines.push(source.source.line),
+                ("line", Some(source), _)
+                    if curve.length.round() == 48.0 || curve.length.round() == 28.0 =>
+                {
+                    side_lines.push(source.source.line)
+                }
+                (
+                    "line",
+                    None,
+                    Some(NoSketchRoute::OperationHistoryEmpty { operation, source }),
+                ) => {
+                    assert_eq!(*operation, SemanticOperation::Chamfer);
+                    assert_eq!(source.line, 5);
+                    chamfer_barriers += 1;
+                }
+                other => panic!("unexpected route for {}: {other:?}", curve.curve_id),
+            }
+        }
+        assert_eq!(circle_lines, [6], "the hole names the circle that cut it");
+        assert_eq!(side_lines, [4, 4, 4, 4], "each side names the rectangle");
+        assert_eq!(chamfer_barriers, 4, "each chamfer names the chamfer");
+        // The region was rebuilt by the chamfer and then cut: the chamfer,
+        // which first lost the route, is the barrier it states.
+        let region = result.sketch_lineage.lookup_element(&SketchElement {
+            kind: SketchElementKind::Region,
+            index: profile.regions[0].region_id,
+        });
+        assert!(
+            matches!(
+                region.no_route(),
+                Some(NoSketchRoute::OperationHistoryEmpty {
+                    operation: SemanticOperation::Chamfer,
+                    ..
+                })
+            ),
+            "the region names the chamfer that rebuilt it: {}",
+            region.describe()
+        );
+    }
+
     /// Measurements ride with the profile: a curve's type, length and
     /// radius, a region's area, the sketch's own size.
     #[test]
