@@ -334,13 +334,16 @@ class _CadmarkSession:
     # position, so where no maker answers, the element gets a barrier
     # naming what was asked, and the consumer states an absence.
 
-    def register_sketch_object(self, instance):
-        shape = self.unwrap(instance)
-        if shape is None or not isinstance(shape, _cadmark_shape_type) or shape.IsNull():
-            return
-        topology = self.topology(shape)
-        if not any(shapes for _kind, shapes in topology):
-            return
+    def begin_sketch_object(self, instance, arguments):
+        """Label what a sketch object is about to draw, before it draws.
+
+        A stock sketch object hands its geometry to the enclosing builder
+        — where a subtract or fuse consumes it — before its own base class
+        finishes constructing, so the label must be on the input shapes
+        by then for the boolean's history to carry it. The record is
+        opened here and the finished object's own topology is labelled
+        under the same identity once construction completes.
+        """
         sketch_id = self._next_sketch_id
         self._next_sketch_id += 1
         self.sketches.append(
@@ -350,7 +353,18 @@ class _CadmarkSession:
                 "object": type(instance).__name__,
             }
         )
-        for _kind, shapes in topology:
+        for shape in self.collect_shapes(arguments):
+            self.label_sketch_topology(shape, sketch_id)
+        return sketch_id
+
+    def register_sketch_object(self, instance, sketch_id):
+        shape = self.unwrap(instance)
+        if shape is None or not isinstance(shape, _cadmark_shape_type) or shape.IsNull():
+            return
+        self.label_sketch_topology(shape, sketch_id)
+
+    def label_sketch_topology(self, shape, sketch_id):
+        for _kind, shapes in self.topology(shape):
             for member in shapes:
                 self.sketch_registry.slot(member, set).add(sketch_id)
 
@@ -379,6 +393,23 @@ class _CadmarkSession:
     def note_sketch_barrier(self, shape, barrier):
         slot = self.sketch_barriers.slot(shape, lambda: [None])
         slot[0] = barrier
+
+    def barrier_lookup(self, shape):
+        """The barrier on this shape, by the same identity labels use.
+
+        The exact shape first; failing that, the same underlying shape
+        moved or re-oriented, which is how a sketch reaches its plane.
+        """
+        direct = self.sketch_barriers.get(shape)
+        if direct and direct[0] is not None:
+            return direct[0]
+        for position in range(1, self.sketch_barriers.index.Extent() + 1):
+            candidate = self.sketch_barriers.index.FindKey(position)
+            if shape.IsPartner(candidate):
+                existing = self.sketch_barriers.values[position - 1]
+                if existing[0] is not None:
+                    return existing[0]
+        return None
 
     @staticmethod
     def direct_sources(reached):
@@ -413,39 +444,54 @@ class _CadmarkSession:
             for labels in (label_of(shape) or (),)
             if labels
         }
-        if not labelled_inputs:
+        # An input that already lost its route carries the barrier that
+        # lost it: the step that first broke the route is the honest
+        # answer, not the last step to pass the shape on.
+        barriered_inputs = {
+            (kind, ordinal): existing
+            for kind, inputs in inputs_by_kind.items()
+            for ordinal, shape in enumerate(inputs)
+            for existing in (self.barrier_lookup(shape),)
+            if existing is not None
+        }
+        if not labelled_inputs and not barriered_inputs:
             return
         for kind, outputs in self.topology(result):
             for output in outputs:
                 if label_of(output):
                     continue
-                sketch_ids = set()
-                for source in self.direct_sources(tables[kind].get(output) or ()):
-                    sketch_ids |= labelled_inputs.get(source, set())
-                same = None
+                sources = self.direct_sources(tables[kind].get(output) or ())
                 if identity_tables is not None:
                     same = identity_tables[kind].get(output)
                     if same is not None:
-                        sketch_ids |= labelled_inputs.get((kind, same), set())
+                        sources.add((kind, same))
+                sketch_ids = set()
+                for source in sources:
+                    sketch_ids |= labelled_inputs.get(source, set())
                 if sketch_ids:
                     self.register_sketch_ancestry(output, sketch_ids)
-                elif barrier is not None:
-                    # A shape carried through unchanged keeps the barrier
-                    # it already had: the step that first lost the route
-                    # is the honest answer, not the last step to pass it on.
-                    if same is not None and self.sketch_barriers.get(
-                        inputs_by_kind[kind][same]
-                    ):
-                        continue
+                    continue
+                # A shape that already carries a barrier keeps it: the step
+                # that first lost the route is the honest answer.
+                if self.barrier_lookup(output) is not None:
+                    continue
+                inherited = [
+                    barriered_inputs[source]
+                    for source in sorted(sources)
+                    if source in barriered_inputs
+                ]
+                if inherited:
+                    self.note_sketch_barrier(output, inherited[0])
+                elif barrier is not None and (labelled_inputs or sources):
                     self.note_sketch_barrier(output, barrier)
 
     def sketch_state(self, shape):
         sketch_ids = self.sketch_lookup(shape)
         if sketch_ids:
             return {"candidates": sorted(sketch_ids)}
-        barrier = self.sketch_barriers.get(shape)
-        if barrier is not None and barrier[0] is not None:
-            return {"barrier": barrier[0]}
+        barrier = self.barrier_lookup(shape)
+        if barrier is not None:
+            return {"barrier": barrier}
         return {}
 
     def new_operation(self, source_line, operation, api_class):
@@ -957,8 +1003,9 @@ class _CadmarkSession:
         session = self
 
         def init(instance, *args, **kwargs):
+            sketch_id = session.begin_sketch_object(instance, (args, kwargs))
             original_init(instance, *args, **kwargs)
-            session.register_sketch_object(instance)
+            session.register_sketch_object(instance, sketch_id)
 
         return init
 
