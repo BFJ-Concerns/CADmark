@@ -31,6 +31,24 @@ pub struct Example {
 /// The library, in the order examples are shown.
 pub const LIBRARY: &[Example] = &[
     Example {
+        name: "sketch_profile_only",
+        operations: &[
+            "drawing",
+            "2d",
+            "flat",
+            "svg",
+            "dxf",
+            "laser",
+            "lasercut",
+            "plotter",
+            "cnc",
+            "cutout",
+            "template",
+            "silhouette",
+        ],
+        body: include_str!("example_library/sketch_profile_only.md"),
+    },
+    Example {
         name: "sketched_profile_extrude",
         operations: &[
             "sketch",
@@ -186,6 +204,11 @@ mod tests {
         assert!(names("round these corners").contains(&"fillet_and_chamfer"));
         assert!(!names("round these corners").contains(&"revolve_profile"));
         assert!(names("bore two holes through the boss").contains(&"cut_and_holes"));
+        // A flat part is a sketch left as the result, not an extrusion.
+        assert!(names("a DXF template for the laser cutter").contains(&"sketch_profile_only"));
+        assert!(
+            !names("a DXF template for the laser cutter").contains(&"sketched_profile_extrude")
+        );
     }
 
     #[test]

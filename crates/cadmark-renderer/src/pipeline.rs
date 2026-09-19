@@ -2347,6 +2347,7 @@ mod tests {
                 curve_id: 0,
                 // Three points, so two segments, so four line vertices.
                 points: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 3.0, 0.0]],
+                ..SketchCurve::default()
             }],
             corners: vec![SketchCorner {
                 corner_id: 0,
@@ -2356,6 +2357,7 @@ mod tests {
                 region_id: 0,
                 vertices: vec![[0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [4.0, 3.0, 0.0]],
                 indices: vec![0, 1, 2],
+                ..SketchRegion::default()
             }],
         }
     }

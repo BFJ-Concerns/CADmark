@@ -137,7 +137,10 @@ pub struct SketchLineageLedger {
     faces: HashMap<FaceId, SketchLineage>,
     edges: HashMap<EdgeId, SketchLineage>,
     vertices: HashMap<VertexId, SketchLineage>,
-    elements: Vec<(SketchElement, SketchSource)>,
+    /// Every element of the drawn profile the user can point at, keyed by
+    /// the profile's own topology IDs, with the drawn curve that reached
+    /// it or the stated reason none did.
+    elements: HashMap<SketchElement, SketchLineage>,
 }
 
 /// The ledger's wire shape — entry lists, because typed IDs do not
@@ -147,7 +150,7 @@ struct SketchLineageEntries {
     faces: Vec<(FaceId, SketchLineage)>,
     edges: Vec<(EdgeId, SketchLineage)>,
     vertices: Vec<(VertexId, SketchLineage)>,
-    elements: Vec<(SketchElement, SketchSource)>,
+    elements: Vec<(SketchElement, SketchLineage)>,
 }
 
 impl From<SketchLineageLedger> for SketchLineageEntries {
@@ -158,11 +161,13 @@ impl From<SketchLineageLedger> for SketchLineageEntries {
         edges.sort_by_key(|(id, _)| id.0);
         let mut vertices: Vec<_> = ledger.vertices.into_iter().collect();
         vertices.sort_by_key(|(id, _)| id.0);
+        let mut elements: Vec<_> = ledger.elements.into_iter().collect();
+        elements.sort_by_key(|(element, _)| (element.kind as u8, element.index));
         Self {
             faces,
             edges,
             vertices,
-            elements: ledger.elements,
+            elements,
         }
     }
 }
@@ -173,7 +178,7 @@ impl From<SketchLineageEntries> for SketchLineageLedger {
             faces: entries.faces.into_iter().collect(),
             edges: entries.edges.into_iter().collect(),
             vertices: entries.vertices.into_iter().collect(),
-            elements: entries.elements,
+            elements: entries.elements.into_iter().collect(),
         }
     }
 }
@@ -195,11 +200,10 @@ impl SketchLineageLedger {
         self.vertices.insert(id, lineage);
     }
 
-    /// Record a sketch element the user can point at. Elements are numbered
-    /// per kind in the order the script drew them, which is the order the
-    /// profile view draws them in.
-    pub fn record_element(&mut self, element: SketchElement, source: SketchSource) {
-        self.elements.push((element, source));
+    /// Record the sketch route of an element of the drawn profile, keyed
+    /// by the ID the profile view draws and picks it under.
+    pub fn record_element(&mut self, element: SketchElement, lineage: SketchLineage) {
+        self.elements.insert(element, lineage);
     }
 
     /// The sketch route of a solid element. An element the execution never
@@ -220,15 +224,7 @@ impl SketchLineageLedger {
     /// element outside this execution resolves to no route, never to a
     /// neighbouring curve.
     pub fn lookup_element(&self, element: &SketchElement) -> SketchLineage {
-        self.elements
-            .iter()
-            .find(|(candidate, _)| candidate == element)
-            .map(|(_, source)| SketchLineage::Resolved(source.clone()))
-            .unwrap_or_default()
-    }
-
-    pub fn elements(&self) -> &[(SketchElement, SketchSource)] {
-        &self.elements
+        self.elements.get(element).cloned().unwrap_or_default()
     }
 
     pub fn element_count(&self) -> usize {
@@ -272,7 +268,7 @@ mod tests {
                 kind: SketchElementKind::Curve,
                 index: 0,
             },
-            source(4, "Rectangle"),
+            SketchLineage::Resolved(source(4, "Rectangle")),
         );
 
         let missing = ledger.lookup_element(&SketchElement {
@@ -291,14 +287,14 @@ mod tests {
                 kind: SketchElementKind::Curve,
                 index: 2,
             },
-            source(4, "Rectangle"),
+            SketchLineage::Resolved(source(4, "Rectangle")),
         );
         ledger.record_element(
             SketchElement {
                 kind: SketchElementKind::Corner,
                 index: 2,
             },
-            source(9, "Circle"),
+            SketchLineage::Resolved(source(9, "Circle")),
         );
 
         let curve = ledger.lookup_element(&SketchElement {
@@ -364,7 +360,7 @@ mod tests {
                 kind: SketchElementKind::Region,
                 index: 0,
             },
-            source(4, "Rectangle"),
+            SketchLineage::Resolved(source(4, "Rectangle")),
         );
 
         let json = serde_json::to_string(&ledger).unwrap();

@@ -180,6 +180,12 @@ pub struct ToolbarState<'a> {
     pub controls_enabled: bool,
     /// Export needs a loaded model.
     pub has_model: bool,
+    /// The formats the model on screen can be written to: solid formats
+    /// for a solid, drawings and STEP for a sketch.
+    pub export_formats: &'a [ExportFormat],
+    /// The name of the part the top-level export writes, when the model
+    /// has several and one is selected.
+    pub export_target: Option<&'a str>,
     /// The parts the executed script defines, as picking ID, script binding
     /// name, and whether the part is a closed valid solid.
     pub model_parts: &'a [(u32, String, bool)],
@@ -559,12 +565,23 @@ pub fn show_toolbar(
                     ui.label(egui::RichText::new(warning).small().color(theme::WARNING));
                     ui.separator();
                 }
-                for format in ExportFormat::ALL {
+                if let Some(target) = state.export_target {
+                    ui.label(
+                        egui::RichText::new(format!("Selected part: {target}"))
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                    );
+                }
+                let stem = state.part_name;
+                for &format in state.export_formats {
+                    let file_name = match state.export_target {
+                        Some(target) => format!("{stem}-{target}.{}", format.extension()),
+                        None => format!("{stem}.{}", format.extension()),
+                    };
                     if ui
-                        .button(format!("{} (part.{})", format.label(), format.extension()))
+                        .button(format!("{} ({file_name})", format.label()))
                         .on_hover_text(format!(
-                            "Write part.{} next to {}",
-                            format.extension(),
+                            "Write {file_name} next to {}",
                             state.script_filename
                         ))
                         .clicked()
@@ -575,7 +592,7 @@ pub fn show_toolbar(
                 }
                 if state.model_parts.len() > 1 {
                     ui.separator();
-                    for format in ExportFormat::ALL {
+                    for &format in state.export_formats {
                         if ui
                             .button(format!("Export all parts as {}", format.label()))
                             .clicked()
@@ -588,7 +605,7 @@ pub fn show_toolbar(
                         ui.menu_button(
                             format!("{name}{}", if *printable { "" } else { " (warning)" }),
                             |ui| {
-                                for format in ExportFormat::ALL {
+                                for &format in state.export_formats {
                                     if ui.button(format!("Export as {}", format.label())).clicked()
                                     {
                                         action = ToolbarAction::ExportPart(*id, format);

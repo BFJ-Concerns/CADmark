@@ -10,6 +10,7 @@ use crate::geometry::{
     GeometryContext, GeometryDescriptors, PickedElement, SketchElement, TopologyElement,
 };
 use crate::ledger::{LedgerValue, ProvenanceLedger};
+use crate::sketch::SketchProfile;
 use crate::sketch_lineage::{SketchLineage, SketchLineageLedger};
 
 /// The picked element is outside the ledger the current model was built
@@ -172,6 +173,7 @@ pub fn with_sketch_route(
 pub fn resolve_sketch_context(
     element: SketchElement,
     lineage: &SketchLineageLedger,
+    profile: &SketchProfile,
 ) -> GeometryContext {
     let sketch = lineage.lookup_element(&element);
     GeometryContext {
@@ -180,7 +182,7 @@ pub fn resolve_sketch_context(
         // provenance is honestly empty; the sketch route below carries the
         // line that drew it.
         provenance: LedgerValue::Untraced,
-        identification: std::collections::HashMap::new(),
+        identification: profile.identification(&element),
         source_context: String::new(),
         neighbours: Vec::new(),
         chosen_candidate: None,
@@ -516,17 +518,27 @@ mod tests {
         };
         lineage.record_element(
             curve,
-            crate::sketch_lineage::SketchSource {
+            SketchLineage::Resolved(crate::sketch_lineage::SketchSource {
                 source: SourceRef {
                     line: 8,
                     code: "Rectangle(20, 10)".to_string(),
                 },
                 object: "Rectangle".to_string(),
-            },
+            }),
         );
+        let profile = SketchProfile {
+            curves: vec![crate::sketch::SketchCurve {
+                curve_id: 2,
+                points: vec![[0.0; 3], [20.0, 0.0, 0.0]],
+                curve_type: "line".to_string(),
+                length: 20.0,
+                radius: None,
+            }],
+            ..SketchProfile::default()
+        };
 
         let context = with_source_context(
-            resolve_sketch_context(curve, &lineage),
+            resolve_sketch_context(curve, &lineage, &profile),
             Some(
                 "from build123d import *\n\n\n\n\n\nwith BuildSketch():\n    Rectangle(20, 10)\nextrude(amount=5)\n",
             ),
@@ -542,6 +554,12 @@ mod tests {
         // Nothing the kernel built claims a drawn curve, so the window
         // comes from the sketch route rather than from ledger provenance.
         assert_eq!(context.provenance, LedgerValue::Untraced);
+        // The curve's own measurements ride with the anchor, as a solid
+        // edge's do.
+        assert_eq!(
+            context.identification.get("length_mm").map(String::as_str),
+            Some("20.00")
+        );
         assert!(context.source_context.contains("8 |     Rectangle(20, 10)"));
         assert!(!context.source_context.contains("1 | from build123d"));
 
@@ -553,6 +571,7 @@ mod tests {
                 index: 9,
             },
             &lineage,
+            &profile,
         );
         assert!(unknown.sketch.no_route().is_some());
     }

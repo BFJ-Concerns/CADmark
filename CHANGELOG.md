@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- A sketch exports as a drawing: SVG and DXF written flat in the plane the
+  sketch was drawn on at true size, or STEP carrying its faces and curves.
+  The Export menu offers the formats the result on screen can take
+- A selected sketch curve shows its length or diameter and a region its
+  area, and the status line gives the sketch's overall size in its plane;
+  the AI receives the same measurements with a sketch anchor
+- The comment overlay names the line that drew a clicked sketch curve,
+  corner or region, and on a solid lists the sketch line beneath a face or
+  edge that came from one; hovering that row brings the line into the code
+  panel. Where a sketch operation rebuilt the outline, the operation is
+  named as the reason no drawn curve survives
+- build123d's 2D chamfer and offset keep each curve's drawing line through
+  the kernel's own history; 2D fillet, make_face and make_hull are recorded
+  as operations and state themselves as the barrier
 - Edges and vertices are clickable: edges are drawn at a width you can
   hit and every vertex gets a marker, both keeping their size on screen
   however far you zoom
@@ -46,7 +60,7 @@ All notable changes to this project will be documented in this file.
   view, with any solid already on screen ghosted behind them. A sketch-only
   script is a successful build rather than an error, and the status line,
   the chat and the AI's render all report it as a profile that is not yet a
-  solid and so cannot be exported or measured
+  solid, with no volume or validity to report
 - Section plane: cut the model along X, Y or Z, slide the plane across
   it, and flip which half is kept, so an internal pocket can be seen
   without exporting. Cut-away geometry is also unclickable
@@ -54,6 +68,9 @@ All notable changes to this project will be documented in this file.
   it without cutting
 
 ### Changed
+- The top-level Export entries of a multi-part model write the part
+  currently selected and name it in the menu, rather than the last part
+  the script bound
 - New conversation control archives the current chat before starting a blank
   one, leaving the project script unchanged
 - Chat shows estimated model-context occupancy, including reserved reference
