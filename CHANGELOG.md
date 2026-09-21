@@ -68,6 +68,8 @@ All notable changes to this project will be documented in this file.
   it without cutting
 
 ### Changed
+- Version numbers follow semantic versioning, starting at 0.1.0 in place of
+  the earlier date-derived scheme
 - The top-level Export entries of a multi-part model write the part
   currently selected and name it in the menu, rather than the last part
   the script bound
