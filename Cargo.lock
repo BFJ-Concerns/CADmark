@@ -625,7 +625,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cadmark-app"
-version = "0.202604.600"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cadmark-bridge",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "cadmark-bridge"
-version = "0.202604.600"
+version = "0.1.0"
 dependencies = [
  "base64",
  "cadmark-core",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "cadmark-core"
-version = "0.202604.600"
+version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "cadmark-kernel"
-version = "0.202604.600"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "cadmark-bridge",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "cadmark-renderer"
-version = "0.202604.600"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cadmark-core",
@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "cadmark-ui"
-version = "0.202604.600"
+version = "0.1.0"
 dependencies = [
  "cadmark-core",
  "chrono",
