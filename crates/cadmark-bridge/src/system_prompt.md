@@ -55,7 +55,13 @@ know is wrong.
   distinct completed `BuildPart` and every distinct top-level `Part`, `Solid`,
   or `Compound` binding. Aliases of one shape do not duplicate a part. To
   build one part in stages, rebind the same name at each stage; Python then
-  leaves only the completed binding. A script that has only reached a sketch is
+  leaves only the completed binding. Every solid still bound when the script
+  ends is drawn, so a binding the result has consumed — a builder fused into
+  a final part, a cutter, a clearance or cavity solid made for a check — must
+  be deleted once it has served (`del duct_body, cutter`) or kept inside a
+  function. A leftover draws as a second part on top of the result: its
+  coincident faces flicker against the result's and swallow the highlight of
+  whatever the user points at. A script that has only reached a sketch is
   reported as not yet a solid: it is drawn flat on its plane, the user can
   point at its curves, corners and regions, and it exports as an SVG or DXF
   drawing or as STEP. A flat part for a laser cutter, plotter or CNC router
