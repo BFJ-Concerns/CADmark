@@ -317,8 +317,10 @@ impl ReferenceLibrary {
         Ok(name)
     }
 
-    /// Write or replace the index line for `file`. The index keeps one
-    /// line per file, in the order the files were first described.
+    /// Write or replace the index line for `file`. A file's line is
+    /// replaced where it stands; a new line joins the end of the list.
+    /// Everything else in the index is the user's own prose and is kept
+    /// as it is.
     pub fn describe(&self, file: &str, description: &str) -> Result<(), String> {
         if !is_plain_file_name(file) {
             return Err(format!("{file} is not a file name"));
@@ -330,13 +332,14 @@ impl ReferenceLibrary {
         if description.is_empty() {
             return Err("a description is needed".into());
         }
-        let mut entries = self.read_index();
-        match entries.iter_mut().find(|(name, _)| name == file) {
-            Some(entry) => entry.1 = description,
-            None => entries.push((file.to_string(), description)),
-        }
+        let index = self.directory.join(INDEX_FILENAME);
+        let text = match std::fs::read_to_string(&index) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => INDEX_HEADER.to_string(),
+            Err(error) => return Err(error.to_string()),
+        };
         std::fs::create_dir_all(&self.directory).map_err(|error| error.to_string())?;
-        std::fs::write(self.directory.join(INDEX_FILENAME), render_index(&entries))
+        std::fs::write(index, with_index_line(&text, file, &description))
             .map_err(|error| error.to_string())
     }
 }
@@ -352,27 +355,58 @@ fn is_image_extension(path: &Path) -> bool {
         })
 }
 
-/// Index lines are `- \`file\`: description`; anything else in the file is
-/// prose the user wrote and is left alone by `render_index`'s header.
-fn parse_index(text: &str) -> Vec<(String, String)> {
-    text.lines()
-        .filter_map(|line| {
-            let rest = line.trim().strip_prefix("- `")?;
-            let (file, description) = rest.split_once("`:")?;
-            Some((file.to_string(), description.trim().to_string()))
-        })
-        .collect()
+/// What a new index opens with; the user may rewrite it freely.
+const INDEX_HEADER: &str = "# Reference images\n\nWhat each picture in this folder shows and \
+                            what it is for. CADmark's AI keeps this list up to date; one line \
+                            per file.\n";
+
+/// The `(file, description)` of an index line, or `None` for any other
+/// line: index lines are `- \`file\`: description`, and everything else
+/// in the file is prose the user wrote.
+fn parse_index_line(line: &str) -> Option<(String, String)> {
+    let rest = line.trim().strip_prefix("- `")?;
+    let (file, description) = rest.split_once("`:")?;
+    Some((file.to_string(), description.trim().to_string()))
 }
 
-fn render_index(entries: &[(String, String)]) -> String {
-    let mut text = String::from(
-        "# Reference images\n\nWhat each picture in this folder shows and what it is for. \
-         CADmark's AI keeps this list up to date; one line per file.\n\n",
-    );
-    for (file, description) in entries {
-        text.push_str(&format!("- `{file}`: {description}\n"));
+fn parse_index(text: &str) -> Vec<(String, String)> {
+    text.lines().filter_map(parse_index_line).collect()
+}
+
+fn index_line(file: &str, description: &str) -> String {
+    format!("- `{file}`: {description}")
+}
+
+/// The index text with `file`'s line set to `description`: replaced in
+/// place when the file already has one, otherwise added after the last
+/// line of the list, or at the end when there is no list yet. Every
+/// other line is kept as it is.
+fn with_index_line(text: &str, file: &str, description: &str) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let existing = lines
+        .iter()
+        .position(|line| parse_index_line(line).is_some_and(|(name, _)| name == file));
+    match existing {
+        Some(position) => lines[position] = index_line(file, description),
+        None => {
+            let after_last_entry = lines
+                .iter()
+                .rposition(|line| parse_index_line(line).is_some())
+                .map(|position| position + 1);
+            match after_last_entry {
+                Some(position) => lines.insert(position, index_line(file, description)),
+                None => {
+                    if lines.last().is_some_and(|line| !line.trim().is_empty()) {
+                        lines.push(String::new());
+                    }
+                    lines.push(index_line(file, description));
+                }
+            }
+        }
     }
-    text
+    let mut rendered = lines.join("\n");
+    rendered.push('\n');
+    rendered
 }
 
 // ── The file picker ───────────────────────────────────────────────────
@@ -625,5 +659,47 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn describing_a_reference_keeps_the_users_own_words_in_the_index() {
+        let project = tempfile::tempdir().unwrap();
+        let references = project.path().join("references");
+        std::fs::create_dir_all(&references).unwrap();
+        for file in ["a.png", "b.png", "c.png"] {
+            std::fs::write(references.join(file), png_bytes(2, 2, [0, 0, 0])).unwrap();
+        }
+        let index = references.join("INDEX.md");
+        std::fs::write(
+            &index,
+            "# Bracket references\n\nDrawings from the customer; do not redistribute.\n\n\
+             - `a.png`: The old description\n\n## Notes\n\nThe bolt circle is nominal.\n",
+        )
+        .unwrap();
+        let library = ReferenceLibrary::of_project(project.path());
+
+        library.describe("a.png", "The new description").unwrap();
+        library.describe("b.png", "A second drawing").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&index).unwrap(),
+            "# Bracket references\n\nDrawings from the customer; do not redistribute.\n\n\
+             - `a.png`: The new description\n- `b.png`: A second drawing\n\n## Notes\n\n\
+             The bolt circle is nominal.\n"
+        );
+
+        // Prose with no list yet gets the list after it.
+        std::fs::write(&index, "Just a note.").unwrap();
+        library.describe("c.png", "Third").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&index).unwrap(),
+            "Just a note.\n\n- `c.png`: Third\n"
+        );
+
+        // No index at all starts one.
+        std::fs::remove_file(&index).unwrap();
+        library.describe("c.png", "Third").unwrap();
+        let fresh = std::fs::read_to_string(&index).unwrap();
+        assert!(fresh.starts_with("# Reference images\n"), "{fresh}");
+        assert!(fresh.ends_with("\n\n- `c.png`: Third\n"), "{fresh}");
     }
 }

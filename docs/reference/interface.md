@@ -168,7 +168,7 @@ Use an image-capable AI and tick **The model reads images** in Settings. With a 
 
 ### The reference library
 
-Pictures that define a part, such as a dimensioned drawing or a photo of the original, are worth keeping beyond one conversation. The AI keeps them in the project's `references/` folder when they matter, with a line in `references/INDEX.md` describing what each shows and what it is for. In a later conversation it reads that index, lists the library, and looks at any image it needs. Ask it to keep an image if it has not, or to describe one you have placed in the folder by hand.
+Pictures that define a part, such as a dimensioned drawing or a photo of the original, are worth keeping beyond one conversation. The AI keeps them in the project's `references/` folder when they matter, with a line in `references/INDEX.md` describing what each shows and what it is for. The rest of that file is yours: notes you add to it are left alone when the AI updates a line. In a later conversation it reads that index, lists the library, and looks at any image it needs. Ask it to keep an image if it has not, or to describe one you have placed in the folder by hand.
 
 ## Keyboard shortcuts
 
