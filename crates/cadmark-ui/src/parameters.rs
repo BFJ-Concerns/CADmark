@@ -108,21 +108,34 @@ impl ParametersPanel {
     ) -> Option<f64> {
         let mut committed = None;
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(row.name)
-                    .monospace()
-                    .color(theme::TEXT)
-                    .size(theme::CODE_SIZE),
-            )
-            .on_hover_text(format!("line {}", row.line));
+            // The row never grows past its column: a name that does not
+            // fit is cut short (egui shows the whole of a truncated label
+            // on hover), and the value keeps a fixed share at the right.
+            let name_width = (ui.available_width() - VALUE_WIDTH).max(0.0);
+            ui.scope(|ui| {
+                ui.set_max_width(name_width);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(row.name)
+                            .monospace()
+                            .color(theme::TEXT)
+                            .size(theme::CODE_SIZE),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(format!("line {}", row.line));
+            });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(value) = row.value else {
-                    ui.label(
-                        egui::RichText::new(row.expression)
-                            .monospace()
-                            .size(theme::CODE_SIZE)
-                            .color(theme::TEXT_MUTED),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(row.expression)
+                                .monospace()
+                                .size(theme::CODE_SIZE)
+                                .color(theme::TEXT_MUTED),
+                        )
+                        .truncate(),
                     )
                     .on_hover_text("Derived from other parameters; edit those instead.");
                     return;
@@ -159,6 +172,10 @@ impl ParametersPanel {
     }
 }
 
+/// Width kept for the value field at the right of each row, so a long
+/// name is cut short rather than pushing the value out of the panel.
+const VALUE_WIDTH: f32 = 80.0;
+
 /// A drag step proportional to the value, so a 200 mm plate and a 0.4 mm
 /// clearance are both draggable.
 fn drag_speed(value: f64) -> f64 {
@@ -174,7 +191,72 @@ fn drag_speed(value: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::drag_speed;
+    use super::{ParameterRow, ParametersPanel, ParametersView, drag_speed};
+
+    /// Lay the panel out in a column of the given width and return the
+    /// width the rows actually claimed.
+    fn claimed_width(column_width: f32, rows: &[ParameterRow<'_>]) -> f32 {
+        let context = egui::Context::default();
+        crate::theme::apply(&context);
+        let mut panel = ParametersPanel::default();
+        let mut claimed = 0.0;
+        // Two passes: the first frame lays fonts out; the second is stable.
+        for _ in 0..2 {
+            let _ = context.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(column_width, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default()
+                        .frame(egui::Frame::NONE)
+                        .show(ctx, |ui| {
+                            panel.show(
+                                ui,
+                                ParametersView {
+                                    script_filename: "part.py",
+                                    parameters: rows,
+                                    has_script: true,
+                                    controls_enabled: true,
+                                },
+                            );
+                            claimed = ui.min_rect().width();
+                        });
+                },
+            );
+        }
+        claimed
+    }
+
+    /// A row that would be wider than its column is cut to fit: the panel
+    /// beside the viewport keeps its width and the viewport starts at its
+    /// edge, with no void between them.
+    #[test]
+    fn long_rows_stay_within_the_column() {
+        let rows = [
+            ParameterRow {
+                name: "printer_build_volume_usable_height_after_brim_and_purge_tower",
+                value: Some(250.0),
+                expression: "250.0",
+                line: 3,
+            },
+            ParameterRow {
+                name: "clip_height",
+                value: None,
+                expression: "printer_build_volume_z - 2 * flange_thickness - mating_flange_thickness",
+                line: 4,
+            },
+        ];
+        let column_width = 240.0;
+        let claimed = claimed_width(column_width, &rows);
+        assert!(
+            claimed <= column_width,
+            "rows claimed {claimed} of a {column_width} column"
+        );
+    }
 
     #[test]
     fn the_drag_step_follows_the_size_of_the_value() {

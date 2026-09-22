@@ -136,6 +136,7 @@ All notable changes to this project will be documented in this file.
 - Window title carries the project name
 
 ### Fixed
+- A long parameter name or expression no longer widens the parameters panel past its column, which left a dark void between the panel and the viewport; the row is cut short and the full text sits in its tooltip
 - The AI is sent the script on disk with every turn, so a reopened project,
   a new conversation or a condensed chat no longer leaves it reconstructing
   the file from memory or asking for it to be pasted; when the file differs
