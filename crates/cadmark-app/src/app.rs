@@ -23,7 +23,7 @@ use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingCommen
 use cadmark_renderer::camera::{Bounds3, Camera, Projection};
 use cadmark_renderer::pipeline::{Renderer, ViewportMarker};
 use cadmark_renderer::section::{self, Axis};
-use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, StagedImageView, TurnStatus};
+use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
 use cadmark_ui::parameters::{ParameterRow, ParametersAction, ParametersPanel, ParametersView};
@@ -39,7 +39,7 @@ use crate::launch::LaunchTarget;
 use crate::orchestrator::OrchestratorResult;
 use crate::parts::{self, OpenPart};
 use crate::project::{Busy, Project, SCRIPT_WATCH_INTERVAL};
-use crate::reference_images::{ImagePicker, StagedImage, store_attachment};
+use crate::reference_images::{ImagePicker, stage_file, store_attachment};
 use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
 use crate::script_parameters::{self, Parameter};
 use crate::turn::{NoRender, RenderSource, RequestAssembly, TurnEvent, TurnInput, TurnOutcome};
@@ -208,9 +208,9 @@ pub struct CadmarkApp {
     settings: UserSettings,
     settings_store: Option<SettingsStore>,
     chat: ChatPane,
-    /// Decoded images waiting to go with the next message, in the order
-    /// the chat strip shows them.
-    staged_images: Vec<StagedImage>,
+    /// The picker for images to attach. Its result goes to the chat pane
+    /// of whichever project is open when it arrives, so opening another
+    /// project drops a picker still open for the last one.
     image_picker: ImagePicker,
     /// Editable spatial comments for the current design state, not yet sent.
     pending_comments: PendingComments,
@@ -304,7 +304,6 @@ impl CadmarkApp {
             settings,
             settings_store,
             chat: ChatPane::new(),
-            staged_images: Vec::new(),
             image_picker: ImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
@@ -423,8 +422,12 @@ impl CadmarkApp {
             self.settings.limits,
             render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
+        // The pane owns the images staged for the next message, so a new
+        // pane leaves nothing of the last project to be sent from this one;
+        // a picker still open would deliver into it, so it is dropped too.
         self.chat = ChatPane::new();
         self.chat.ai_available = project.ai_model.is_some();
+        self.image_picker = ImagePicker::default();
         self.project = Some(project);
         self.start_notice = None;
         self.pending_comments = PendingComments::default();
@@ -504,6 +507,7 @@ impl CadmarkApp {
             // The occupancy figure needs the staged images' count, not
             // their bytes; a placeholder per image weighs the same.
             images: self
+                .chat
                 .staged_images
                 .iter()
                 .map(|image| ImageAttachment {
@@ -928,7 +932,7 @@ impl CadmarkApp {
             Ok(Some(picked)) => {
                 let count = picked.images.len();
                 for image in picked.images {
-                    self.stage_image(image);
+                    self.chat.stage_image(image);
                 }
                 if !picked.errors.is_empty() {
                     self.status = Some(Status::error(format!(
@@ -2016,8 +2020,8 @@ impl CadmarkApp {
             ChatAction::DroppedFiles(paths) => {
                 let mut errors = Vec::new();
                 for path in paths {
-                    match StagedImage::from_file(&path) {
-                        Ok(image) => self.stage_image(image),
+                    match stage_file(&path) {
+                        Ok(image) => self.chat.stage_image(image),
                         Err(error) => errors.push(error),
                     }
                 }
@@ -2029,21 +2033,12 @@ impl CadmarkApp {
         }
     }
 
-    /// Put an image in the chat strip to go with the next message.
-    fn stage_image(&mut self, image: StagedImage) {
-        self.chat.stage_image(StagedImageView {
-            name: image.name.clone(),
-            thumbnail: image.thumbnail.clone(),
-        });
-        self.staged_images.push(image);
-    }
-
     /// Read an image from the clipboard into the chat strip. The clipboard
     /// is read on this thread: the compositor answers in milliseconds, and
     /// a paste is a deliberate act the user is waiting on.
     fn paste_image(&mut self) {
         match crate::clipboard::read_image() {
-            Ok(Some(image)) => self.stage_image(image),
+            Ok(Some(image)) => self.chat.stage_image(image),
             Ok(None) => {
                 self.status = Some(Status::info(
                     "Nothing to paste: the clipboard holds neither text nor an image",
@@ -2053,17 +2048,16 @@ impl CadmarkApp {
         }
     }
 
-    /// Keep the staged images with the project and take them off the strip,
-    /// for the message about to be sent. Images that cannot be stored are
-    /// reported and left off; the message still goes.
+    /// Keep the images staged in the chat pane with the project and take
+    /// them off the strip, for the message about to be sent. Images that
+    /// cannot be stored are reported and left off; the message still goes.
     fn take_staged_attachments(&mut self) -> Vec<ImageAttachment> {
         let Some(project) = self.project.as_ref() else {
             return Vec::new();
         };
-        self.chat.clear_staged_images();
         let mut attachments = Vec::new();
         let mut errors = Vec::new();
-        for image in self.staged_images.drain(..) {
+        for image in self.chat.take_staged_images() {
             match store_attachment(&project.dir, &image) {
                 Ok(attachment) => attachments.push(attachment),
                 Err(error) => errors.push(error),
@@ -2794,7 +2788,6 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
-            staged_images: Vec::new(),
             image_picker: ImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
@@ -2850,7 +2843,6 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
-            staged_images: Vec::new(),
             image_picker: ImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
@@ -3866,6 +3858,35 @@ mod tests {
             StartAction::OpenRecent(remembered),
             "no row of the start view opens the project the app remembers"
         );
+    }
+
+    #[test]
+    fn opening_another_project_drops_the_images_staged_for_the_last_one() {
+        let (_dir, mut app) = two_part_project();
+        app.chat.stage_image(cadmark_ui::chat::StagedImage {
+            name: "Flange".into(),
+            data: cadmark_core::message::ImageData {
+                media_type: "image/png".into(),
+                bytes: vec![1],
+            },
+            thumbnail: egui::ColorImage::example(),
+        });
+        assert_eq!(app.chat.staged_images.len(), 1);
+        // The first project's build has finished, as it would have long
+        // before the user reaches for another folder.
+        app.project_mut().unwrap().busy = None;
+
+        let other = tempfile::tempdir().unwrap();
+        std::fs::write(other.path().join("part.py"), "width = 1\n").unwrap();
+        app.open_project(&egui::Context::default(), other.path().to_path_buf());
+
+        assert!(
+            app.chat.staged_images.is_empty(),
+            "the strip belongs to the last project"
+        );
+        assert!(app.take_staged_attachments().is_empty());
+        assert!(!other.path().join(".cadmark/attachments").exists());
+        assert!(!app.image_picker.pending());
     }
 
     #[test]
