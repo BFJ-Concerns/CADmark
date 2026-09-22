@@ -16,17 +16,18 @@ use cadmark_core::geometry::{
     GeometryContext, GeometryDescriptors, MinimumDistance, PartId, PartMeasurements, PickedElement,
     ScreenPosition, SelectionState, TopologyElement, describe_model_change,
 };
-use cadmark_core::message::{Conversation, Message, MessageId, MessageKind, ToolActivity};
+use cadmark_core::message::{
+    Conversation, ImageAttachment, Message, MessageId, MessageKind, ToolActivity,
+};
 use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection};
 use cadmark_renderer::pipeline::{Renderer, ViewportMarker};
 use cadmark_renderer::section::{self, Axis};
-use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
+use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, StagedImageView, TurnStatus};
 use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
 use cadmark_ui::parameters::{ParameterRow, ParametersAction, ParametersPanel, ParametersView};
 use cadmark_ui::part_name_dialog::{PartNameAction, PartNameDialog};
-use cadmark_ui::reference_images::{ReferenceImageView, ReferenceImagesPanel};
 use cadmark_ui::settings_dialog::{SettingsAction, SettingsDialog, SettingsForm};
 use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
 use cadmark_ui::status::{Status, StatusView};
@@ -38,7 +39,7 @@ use crate::launch::LaunchTarget;
 use crate::orchestrator::OrchestratorResult;
 use crate::parts::{self, OpenPart};
 use crate::project::{Busy, Project, SCRIPT_WATCH_INTERVAL};
-use crate::reference_images::ReferenceImagePicker;
+use crate::reference_images::{ImagePicker, StagedImage, store_attachment};
 use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
 use crate::script_parameters::{self, Parameter};
 use crate::turn::{NoRender, RenderSource, RequestAssembly, TurnEvent, TurnInput, TurnOutcome};
@@ -207,8 +208,10 @@ pub struct CadmarkApp {
     settings: UserSettings,
     settings_store: Option<SettingsStore>,
     chat: ChatPane,
-    reference_panel: ReferenceImagesPanel,
-    reference_picker: ReferenceImagePicker,
+    /// Decoded images waiting to go with the next message, in the order
+    /// the chat strip shows them.
+    staged_images: Vec<StagedImage>,
+    image_picker: ImagePicker,
     /// Editable spatial comments for the current design state, not yet sent.
     pending_comments: PendingComments,
     overlay: OverlayState,
@@ -301,8 +304,8 @@ impl CadmarkApp {
             settings,
             settings_store,
             chat: ChatPane::new(),
-            reference_panel: ReferenceImagesPanel::default(),
-            reference_picker: ReferenceImagePicker::default(),
+            staged_images: Vec::new(),
+            image_picker: ImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::new(),
@@ -421,7 +424,6 @@ impl CadmarkApp {
             render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
         self.chat = ChatPane::new();
-        self.reference_panel = ReferenceImagesPanel::default();
         self.chat.ai_available = project.ai_model.is_some();
         self.project = Some(project);
         self.start_notice = None;
@@ -499,28 +501,49 @@ impl CadmarkApp {
                     anchors: comment.live_anchors().unwrap_or_default(),
                 })
                 .collect(),
-            images: Vec::new(),
+            // The occupancy figure needs the staged images' count, not
+            // their bytes; a placeholder per image weighs the same.
+            images: self
+                .staged_images
+                .iter()
+                .map(|image| ImageAttachment {
+                    file: String::new(),
+                    name: image.name.clone(),
+                    media_type: image.data.media_type.clone(),
+                    bytes: vec![0],
+                })
+                .collect(),
             context_window_tokens: self.context_window_tokens(),
         }
     }
 
-    /// Send a chat message: one turn with this text and no anchors.
+    /// Send a chat message: one turn with this text, the images staged
+    /// with it, and no anchors.
     fn send_chat_message(&mut self, text: String) {
+        if self.project.is_none() {
+            return;
+        }
+        let attachments = self.take_staged_attachments();
         let Some(project) = self.project_mut() else {
             return;
         };
         let history = project.conversation.clone();
-        project.conversation.push(Message::user_chat(&text));
-        self.start_turn(
+        let message_id = project
+            .conversation
+            .push(Message::user_chat(&text).with_attachments(attachments.clone()));
+        if !self.start_turn(
             TurnInput {
-                chat: Some(text),
+                chat: (!text.is_empty()).then_some(text),
                 comments: Vec::new(),
-                images: Vec::new(),
+                images: attachments,
                 context_window_tokens: self.context_window_tokens(),
             },
             history,
             Vec::new(),
-        );
+        ) && let Some(project) = self.project_mut()
+        {
+            project.conversation.remove(message_id);
+        }
     }
 
     /// Leave a spatial comment pending so several comments can form one turn.
@@ -548,6 +571,11 @@ impl CadmarkApp {
         let pending = self.pending_comments.drain();
         let mut comment_ids = Vec::with_capacity(pending.len());
         let comments = grounded_comments(&pending);
+        // Staged images go on the chat message; when the user typed
+        // nothing beside the comments, a wordless chat message carries
+        // them so the pane shows the pictures where they were sent.
+        let attachments = self.take_staged_attachments();
+        let chat = chat.or_else(|| (!attachments.is_empty()).then(String::new));
         let chat_id = {
             let project = self.project_mut().expect("project was checked above");
             for comment in &pending {
@@ -560,15 +588,18 @@ impl CadmarkApp {
                         .push(Message::spatial_comment(&comment.text, anchors)),
                 );
             }
-            chat.as_ref()
-                .map(|text| project.conversation.push(Message::user_chat(text)))
+            chat.as_ref().map(|text| {
+                project
+                    .conversation
+                    .push(Message::user_chat(text).with_attachments(attachments.clone()))
+            })
         };
         let rollback_ids = comment_ids.clone();
         if !self.start_turn(
             TurnInput {
-                chat,
+                chat: chat.filter(|text| !text.is_empty()),
                 comments,
-                images: Vec::new(),
+                images: attachments,
                 context_window_tokens: self.context_window_tokens(),
             },
             history,
@@ -893,27 +924,18 @@ impl CadmarkApp {
             }
         }
 
-        match self.reference_picker.poll() {
-            Ok(Some(result)) => {
-                if let Some(project) = self.project.as_mut()
-                    && project.dir == result.project
-                {
-                    project.reference_images = result.references;
-                    self.reference_panel = ReferenceImagesPanel::default();
+        match self.image_picker.poll() {
+            Ok(Some(picked)) => {
+                let count = picked.images.len();
+                for image in picked.images {
+                    self.stage_image(image);
                 }
-                self.status = Some(if result.errors.is_empty() {
-                    Status::info(format!(
-                        "Attached {} reference image(s) to {}",
-                        result.added,
-                        result.project.display()
-                    ))
-                } else {
-                    Status::error(format!(
-                        "Attached {} image(s). {}",
-                        result.added,
-                        result.errors.join("; ")
-                    ))
-                });
+                if !picked.errors.is_empty() {
+                    self.status = Some(Status::error(format!(
+                        "Attached {count} image(s). {}",
+                        picked.errors.join("; ")
+                    )));
+                }
             }
             Ok(None) => {}
             Err(error) => self.status = Some(Status::error(error)),
@@ -1906,7 +1928,6 @@ impl CadmarkApp {
     }
 
     fn show_chat(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let mut attach = false;
         let mut new_conversation = false;
         let mut action = ChatAction::None;
         egui::SidePanel::right("chat_panel")
@@ -1921,18 +1942,8 @@ impl CadmarkApp {
                 let Some(project) = self.project.as_ref() else {
                     return;
                 };
-                let images: Vec<_> = project.reference_images.images.iter().map(|image| ReferenceImageView {
-                    name: &image.name, thumbnail: &image.thumbnail,
-                }).collect();
-                attach = self.reference_panel.show(ui, &images, self.reference_picker.pending());
-                for error in &project.reference_images.errors {
-                    ui.colored_label(cadmark_ui::theme::ERROR, error);
-                }
-                if !images.is_empty() && !project.ai_accepts_images {
-                    ui.colored_label(cadmark_ui::theme::WARNING,
-                        "Images are saved. Choose an image-capable AI and enable ‘The model reads images’ in Settings to use them.");
-                }
-                ui.separator();
+                self.chat.picker_pending = self.image_picker.pending();
+                self.chat.ai_accepts_images = project.ai_accepts_images;
                 self.chat.activity = match &project.busy {
                     None => ChatActivity::Idle,
                     Some(Busy::Building) => ChatActivity::Building,
@@ -1970,22 +1981,11 @@ impl CadmarkApp {
                     &self.draft_input(),
                     project.ai_accepts_images,
                 )
-                .reserving_images(if project.ai_accepts_images {
-                    project.reference_images.images.len()
-                } else {
-                    0
-                })
                 .usage(self.context_window_tokens());
                 action =
                     self.chat
                         .show(ui, &project.conversation, usage, &mut self.pending_comments);
             });
-        if attach
-            && let Some(project) = &self.project
-            && let Err(error) = self.reference_picker.open(frame, ctx, project.dir.clone())
-        {
-            self.status = Some(Status::error(error));
-        }
         if new_conversation {
             self.start_new_conversation();
         }
@@ -2000,8 +2000,79 @@ impl CadmarkApp {
                     project.cancel_turn();
                 }
             }
+            ChatAction::AttachImages => {
+                // Pictures to attach are usually downloads or screenshots,
+                // not files in the project folder.
+                let start_in = std::env::home_dir()
+                    .map(|home| home.join("Downloads"))
+                    .filter(|folder| folder.is_dir())
+                    .or_else(std::env::home_dir)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                if let Err(error) = self.image_picker.open(frame, ctx, start_in) {
+                    self.status = Some(Status::error(error));
+                }
+            }
+            ChatAction::PasteImage => self.paste_image(),
+            ChatAction::DroppedFiles(paths) => {
+                let mut errors = Vec::new();
+                for path in paths {
+                    match StagedImage::from_file(&path) {
+                        Ok(image) => self.stage_image(image),
+                        Err(error) => errors.push(error),
+                    }
+                }
+                if !errors.is_empty() {
+                    self.status = Some(Status::error(errors.join("; ")));
+                }
+            }
             ChatAction::None => {}
         }
+    }
+
+    /// Put an image in the chat strip to go with the next message.
+    fn stage_image(&mut self, image: StagedImage) {
+        self.chat.stage_image(StagedImageView {
+            name: image.name.clone(),
+            thumbnail: image.thumbnail.clone(),
+        });
+        self.staged_images.push(image);
+    }
+
+    /// Read an image from the clipboard into the chat strip. The clipboard
+    /// is read on this thread: the compositor answers in milliseconds, and
+    /// a paste is a deliberate act the user is waiting on.
+    fn paste_image(&mut self) {
+        match crate::clipboard::read_image() {
+            Ok(Some(image)) => self.stage_image(image),
+            Ok(None) => {
+                self.status = Some(Status::info(
+                    "Nothing to paste: the clipboard holds neither text nor an image",
+                ));
+            }
+            Err(error) => self.status = Some(Status::error(format!("Could not paste: {error}"))),
+        }
+    }
+
+    /// Keep the staged images with the project and take them off the strip,
+    /// for the message about to be sent. Images that cannot be stored are
+    /// reported and left off; the message still goes.
+    fn take_staged_attachments(&mut self) -> Vec<ImageAttachment> {
+        let Some(project) = self.project.as_ref() else {
+            return Vec::new();
+        };
+        self.chat.clear_staged_images();
+        let mut attachments = Vec::new();
+        let mut errors = Vec::new();
+        for image in self.staged_images.drain(..) {
+            match store_attachment(&project.dir, &image) {
+                Ok(attachment) => attachments.push(attachment),
+                Err(error) => errors.push(error),
+            }
+        }
+        if !errors.is_empty() {
+            self.status = Some(Status::error(errors.join("; ")));
+        }
+        attachments
     }
 
     /// Re-read the open part's parameters from the source that was
@@ -2497,7 +2568,7 @@ impl eframe::App for CadmarkApp {
             || measuring
             || self.pick_in_flight.is_some()
             || self.folder_pick_rx.is_some()
-            || self.reference_picker.pending()
+            || self.image_picker.pending()
         {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -2576,12 +2647,11 @@ mod tests {
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, NoRender, OverlayState,
-        ParametersPanel, PartNameDialog, Project, ReferenceImagePicker, ReferenceImagesPanel,
-        Renderer, SceneHandle, SettingsDialog, SettingsStore, TurnGeometry, TurnOutcome,
-        TurnRecord, UserSettings, VersionDialog, ai_services, camera_change,
-        candidate_highlight_ids, history_move_note, measurement_pair, measurement_readout,
-        pending_markers, record_tool_start, turn_chat_message,
+        Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, ImagePicker, NoRender, OverlayState,
+        ParametersPanel, PartNameDialog, Project, Renderer, SceneHandle, SettingsDialog,
+        SettingsStore, TurnGeometry, TurnOutcome, TurnRecord, UserSettings, VersionDialog,
+        ai_services, camera_change, candidate_highlight_ids, history_move_note, measurement_pair,
+        measurement_readout, pending_markers, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2724,8 +2794,8 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
-            reference_panel: ReferenceImagesPanel::default(),
-            reference_picker: ReferenceImagePicker::default(),
+            staged_images: Vec::new(),
+            image_picker: ImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::default(),
@@ -2780,8 +2850,8 @@ mod tests {
             settings: UserSettings::default(),
             settings_store: None,
             chat: ChatPane::new(),
-            reference_panel: ReferenceImagesPanel::default(),
-            reference_picker: ReferenceImagePicker::default(),
+            staged_images: Vec::new(),
+            image_picker: ImagePicker::default(),
             pending_comments: PendingComments::default(),
             overlay: OverlayState::default(),
             renderer: Renderer::default(),

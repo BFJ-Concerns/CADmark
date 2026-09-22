@@ -6,6 +6,7 @@
 use eframe::egui;
 
 mod app;
+mod clipboard;
 pub mod git_ops;
 mod launch;
 pub mod orchestrator;

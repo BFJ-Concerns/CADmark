@@ -14,7 +14,7 @@ CADmark talks to any OpenAI Responses-compatible endpoint — OpenAI itself, a g
 
 - **Base URL** — the endpoint, for example `https://api.openai.com/v1`.
 - **Model** — the model name your endpoint serves.
-- **The model reads images** — tick this if the model can read images. It enables the AI's render tool (the model can look at the model it built) and sends PNG and JPEG reference images from the project's `references/` folder.
+- **The model reads images** — tick this if the model can read images. It enables the AI's render tool (the model can look at the model it built), sends the images you attach to messages, and enables the project's reference library.
 - **Allow insecure HTTP** — only needed for a local server on `http://`.
 
 Without a provider configured, the toolbar shows "AI off". The model still loads and rebuilds; you can edit parameters and export — the AI chat is the only thing unavailable.

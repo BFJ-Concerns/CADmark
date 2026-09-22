@@ -213,15 +213,19 @@ When exporting, an invalid part shows a non-blocking warning: "Cannot export: Pa
 
 Source: `crates/cadmark-app/src/validity.rs:33–53`, `crates/cadmark-app/src/app.rs:886–896`.
 
-## Reference images
+## Images in chat
 
-**Project references → Attach images…** opens a multi-file picker for PNG and JPEG images. Validated original bytes are copied into the project folder's `references/` directory; filename collisions receive a numeric suffix. Chat shows bounded thumbnails with the original aspect ratio. Import failures are shown in-app.
+Images are attached to a message, not to the project. Three routes stage an image in the chat input: the **Attach…** button (a multi-file picker offering every file, since the format is read from the bytes rather than the name), `Ctrl+V` in the input when the clipboard holds an image rather than text, and dropping files on the window. Staged images show as removable thumbnails above the input; a message may be an image alone. PNG and JPEG are accepted, up to 20 MB each; anything else is refused with the reason in the status bar.
 
-References belong to the project. New conversations and reopening the project retain them, independently of the original source files. All conversations and part scripts in the same project share the references. Files placed manually in `references/` are loaded when the project opens; `.png`, `.jpg` and `.jpeg` extensions are case-insensitive.
+On send, each staged image's original bytes are written once to `.cadmark/attachments/<timestamp>-<name>.<ext>` and the message records the file name, the user-facing name, and the media type; the conversation file never carries image bytes. Reopening the project reloads the bytes by file name; a missing file leaves the message showing the name with no image to send. The sent message shows thumbnails.
 
-Every turn includes the saved references as image inputs when `ai.accepts_images` is enabled, and reserves their token budget in the context-occupancy display. With an unavailable or text-only AI, images remain saved and the panel explains how to enable image input.
+When `ai.accepts_images` is enabled, the message's images ride with it on the wire every time the message is replayed to the model, and each is reserved at a fixed 765-token budget in the context figure. When it is disabled, the model is told the image names in an `[Attached images: …]` line and no bytes are sent.
 
-Source: `crates/cadmark-app/src/reference_images.rs` (`ReferenceImages::load`, `attach`, `ReferenceImagePicker::open`), `project.rs` (`Project::open`, `Project::start_turn`) and `crates/cadmark-ui/src/reference_images.rs` (`ReferenceImagesPanel::show`).
+### The reference library
+
+`references/` in the project folder is the AI-maintained library, shared by every conversation, with `references/INDEX.md` as its catalogue (one `- \`file\`: description` line per image). Two tools, offered only to image-reading models, manage it: `reference_images` lists the library with each file's description (files placed by hand are listed without one) or returns one image by file name; `keep_reference` copies an attachment from the current turn into the library under a chosen name and writes its description, or re-describes a file already there. Names are confined to the folder; the extension follows the image's format; an existing file is never overwritten.
+
+Source: `crates/cadmark-app/src/reference_images.rs` (`StagedImage`, `store_attachment`, `load_attachment_bytes`, `ReferenceLibrary`, `ImagePicker`), `clipboard.rs`, `turn.rs` (`ReferenceSource`, `history_items`), `crates/cadmark-bridge/src/tools.rs`, and `crates/cadmark-ui/src/chat.rs` (`ChatPane::stage_image`, `show_attachments`).
 
 ## Keyboard shortcuts
 

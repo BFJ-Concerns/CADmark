@@ -78,13 +78,35 @@ pub enum ChatAction {
     RemovePending(PendingCommentId),
     /// The user asked for the running turn to stop.
     Cancel,
+    /// The user asked to choose image files to attach.
+    AttachImages,
+    /// The user pressed paste in the input while the clipboard's text was
+    /// empty, so it may hold an image; the application reads it.
+    PasteImage,
+    /// The user dropped these files on the window.
+    DroppedFiles(Vec<std::path::PathBuf>),
+}
+
+/// An image staged with the draft: shown as a thumbnail until the
+/// message is sent or the user removes it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedImageView {
+    pub name: String,
+    pub thumbnail: egui::ColorImage,
 }
 
 /// State for the chat pane UI.
-#[derive(Debug)]
 pub struct ChatPane {
     /// Current text in the input field.
     pub input_text: String,
+    /// Images to send with the next message.
+    pub staged_images: Vec<StagedImageView>,
+    /// Whether an image picker is open; the attach button waits for it.
+    pub picker_pending: bool,
+    /// Whether the configured model reads images. When it does not, the
+    /// staged strip says so rather than letting the send look like it
+    /// carried them.
+    pub ai_accepts_images: bool,
     /// What the worker is doing.
     pub activity: ChatActivity,
     /// Whether AI is configured. Without it the input explains why rather
@@ -95,6 +117,11 @@ pub struct ChatPane {
     seen_messages: usize,
     /// Focus the input on the next frame.
     focus_input: bool,
+    /// Textures for the staged thumbnails, by position; rebuilt when the
+    /// staged list changes.
+    staged_textures: Vec<egui::TextureHandle>,
+    /// Textures for the thumbnails of sent messages, by attachment file.
+    sent_textures: std::collections::HashMap<String, egui::TextureHandle>,
 }
 
 impl Default for ChatPane {
@@ -107,16 +134,34 @@ impl ChatPane {
     pub fn new() -> Self {
         Self {
             input_text: String::new(),
+            staged_images: Vec::new(),
+            picker_pending: false,
+            ai_accepts_images: true,
             activity: ChatActivity::Idle,
             ai_available: true,
             seen_messages: 0,
             focus_input: true,
+            staged_textures: Vec::new(),
+            sent_textures: std::collections::HashMap::new(),
         }
     }
 
     /// Put the keyboard cursor in the input on the next frame.
     pub fn focus_input(&mut self) {
         self.focus_input = true;
+    }
+
+    /// Add an image to send with the next message.
+    pub fn stage_image(&mut self, image: StagedImageView) {
+        self.staged_images.push(image);
+        self.staged_textures.clear();
+        self.focus_input = true;
+    }
+
+    /// Empty the strip: the staged images have gone with a message.
+    pub fn clear_staged_images(&mut self) {
+        self.staged_textures.clear();
+        self.staged_images.clear();
     }
 
     /// Render the chat pane and report what the user did.
@@ -176,7 +221,7 @@ impl ChatPane {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let width = ui.available_width();
                 for message in conversation.messages() {
-                    show_message(ui, message, width);
+                    show_message(ui, message, width, &mut self.sent_textures);
                 }
                 // Pending cards follow history so bottom sticking keeps a
                 // newly staged card in view rather than hiding it above it.
@@ -201,6 +246,72 @@ impl ChatPane {
             .inner
     }
 
+    /// The thumbnails of the images going with the next message, each
+    /// with a remove control, above the text.
+    fn show_staged_images(&mut self, ui: &mut egui::Ui) {
+        if self.staged_textures.len() != self.staged_images.len() {
+            self.staged_textures = self
+                .staged_images
+                .iter()
+                .enumerate()
+                .map(|(index, image)| {
+                    ui.ctx().load_texture(
+                        format!("staged/{index}/{}", image.name),
+                        image.thumbnail.clone(),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+                .collect();
+        }
+        let mut remove = None;
+        egui::ScrollArea::horizontal()
+            .id_salt("staged_images")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, image) in self.staged_images.iter().enumerate() {
+                        ui.vertical(|ui| {
+                            let thumbnail = ui
+                                .add(
+                                    egui::Image::new(&self.staged_textures[index])
+                                        .max_size(egui::vec2(72.0, 54.0)),
+                                )
+                                .on_hover_text(&image.name);
+                            ui.allocate_new_ui(
+                                egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                                    thumbnail.rect.right_top() - egui::vec2(18.0, 0.0),
+                                    egui::vec2(18.0, 18.0),
+                                )),
+                                |ui| {
+                                    if ui
+                                        .small_button("\u{2715}")
+                                        .on_hover_text("Remove this image")
+                                        .clicked()
+                                    {
+                                        remove = Some(index);
+                                    }
+                                },
+                            );
+                        });
+                    }
+                });
+            });
+        if !self.ai_accepts_images {
+            ui.label(
+                egui::RichText::new(
+                    "The configured model does not read images; enable \u{2018}The model \
+                     reads images\u{2019} in Settings, or these are sent by name only.",
+                )
+                .small()
+                .color(theme::WARNING),
+            );
+        }
+        if let Some(index) = remove {
+            self.staged_images.remove(index);
+            self.staged_textures.clear();
+        }
+        ui.add_space(4.0);
+    }
+
     /// The input box and the send row under it. The box grows with its
     /// text up to a cap, then scrolls inside itself. Typing is never
     /// blocked by a running turn: the text waits for the turn to end.
@@ -222,12 +333,28 @@ impl ChatPane {
         let min_rows = 3;
         let max_input_height = row_height * 10.0;
 
+        // Files dropped anywhere on the window are for the message.
+        let dropped: Vec<std::path::PathBuf> = ui.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|file| file.path.clone())
+                .collect()
+        });
+        if !dropped.is_empty() && self.ai_available {
+            action = ChatAction::DroppedFiles(dropped);
+        }
+
         let response = egui::Frame::new()
             .fill(theme::SUNKEN)
             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
             .corner_radius(egui::CornerRadius::same(theme::RADIUS + 1))
             .inner_margin(egui::Margin::symmetric(8, 6))
             .show(ui, |ui| {
+                if !self.staged_images.is_empty() {
+                    self.show_staged_images(ui);
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("chat_input_scroll")
                     .max_height(max_input_height)
@@ -258,9 +385,19 @@ impl ChatPane {
         }
 
         let enter_sent = crate::text_input::consume_submit(ui, &response);
+        if self.ai_available && crate::text_input::consume_image_paste(ui, &response) {
+            action = ChatAction::PasteImage;
+        }
 
         ui.horizontal_wrapped(|ui| {
             ui.add_enabled_ui(self.ai_available, |ui| {
+                if ui
+                    .add_enabled(!self.picker_pending, egui::Button::new("Attach\u{2026}"))
+                    .on_hover_text("Attach PNG or JPEG images to this message. You can also paste an image, or drop files here.")
+                    .clicked()
+                {
+                    action = ChatAction::AttachImages;
+                }
                 ui.menu_button("Skills", |ui| {
                     for skill in skills::BUILT_IN {
                         if ui
@@ -306,11 +443,14 @@ impl ChatPane {
             );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let has_text = !self.input_text.trim().is_empty();
+                let has_images = !self.staged_images.is_empty();
                 let sending_pending = !pending.is_empty();
+                // An image alone is a message: "what is this?" needs no
+                // words.
                 let can_submit = if sending_pending {
                     pending.can_send()
                 } else {
-                    has_text
+                    has_text || has_images
                 };
                 if turn_running
                     && ui
@@ -398,10 +538,10 @@ fn context_breakdown(context: ContextUsage) -> String {
             context.request_tokens
         ),
     ];
-    if context.reference_image_tokens > 0 {
+    if context.image_tokens > 0 {
         lines.push(format!(
-            "Reserved for reference images: {} tokens",
-            context.reference_image_tokens
+            "Images with this message: {} tokens",
+            context.image_tokens
         ));
     }
     lines.push("Estimates: four characters to a token, whatever the provider counts.".to_string());
@@ -477,6 +617,60 @@ fn show_pending_comment(ui: &mut egui::Ui, comment: &mut PendingComment, width: 
     remove
 }
 
+/// The images attached to a sent message, as a row of small thumbnails
+/// above its text. A thumbnail is decoded from the attachment's bytes the
+/// first time it is shown and cached by file; an attachment whose file is
+/// gone shows its name alone.
+fn show_attachments(
+    ui: &mut egui::Ui,
+    message: &Message,
+    textures: &mut std::collections::HashMap<String, egui::TextureHandle>,
+) {
+    if message.attachments.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for attachment in &message.attachments {
+            let texture = match textures.get(&attachment.file) {
+                Some(texture) => Some(texture.clone()),
+                None => decode_thumbnail(&attachment.bytes).map(|thumbnail| {
+                    let texture = ui.ctx().load_texture(
+                        format!("attachment/{}", attachment.file),
+                        thumbnail,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    textures.insert(attachment.file.clone(), texture.clone());
+                    texture
+                }),
+            };
+            match texture {
+                Some(texture) => {
+                    ui.add(egui::Image::new(&texture).max_size(egui::vec2(96.0, 72.0)))
+                        .on_hover_text(&attachment.name);
+                }
+                None => {
+                    theme::chip(ui, &attachment.name, theme::TEXT_MUTED)
+                        .on_hover_text("The image file is no longer in the project");
+                }
+            }
+        }
+    });
+}
+
+/// A bounded thumbnail of an encoded image, or nothing when the bytes
+/// are absent or unreadable.
+fn decode_thumbnail(bytes: &[u8]) -> Option<egui::ColorImage> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let decoded = image::load_from_memory(bytes).ok()?;
+    let thumbnail = decoded.thumbnail(96, 96).to_rgba8();
+    Some(egui::ColorImage::from_rgba_unmultiplied(
+        [thumbnail.width() as usize, thumbnail.height() as usize],
+        thumbnail.as_raw(),
+    ))
+}
+
 /// "looking up build123d docs · 1m 12s · last event 3s ago".
 fn turn_status_line(status: &TurnStatus) -> String {
     let quiet = status.last_event.elapsed().as_secs();
@@ -504,7 +698,12 @@ fn activity_row(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
+fn show_message(
+    ui: &mut egui::Ui,
+    message: &Message,
+    width: f32,
+    textures: &mut std::collections::HashMap<String, egui::TextureHandle>,
+) {
     // A card's content must leave room for its own margins and border, or
     // the card outgrows the pane and the pane grows to match, every frame.
     let card_inner = |frame: &egui::Frame| width - frame.total_margin().sum().x;
@@ -518,6 +717,7 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
                 frame.show(ui, |ui| {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                         ui.set_max_width(inner * 0.85);
+                        show_attachments(ui, message, textures);
                         ui.add(egui::Label::new(&message.text).wrap());
                     });
                 });
@@ -556,6 +756,7 @@ fn show_message(ui: &mut egui::Ui, message: &Message, width: f32) {
                         } else {
                             theme::TEXT
                         };
+                        show_attachments(ui, message, textures);
                         ui.add(
                             egui::Label::new(egui::RichText::new(&message.text).color(text_colour))
                                 .wrap(),
@@ -956,7 +1157,7 @@ mod tests {
                     &conversation,
                     cadmark_core::message::ContextUsage {
                         conversation_tokens: 0,
-                        reference_image_tokens: 0,
+                        image_tokens: 0,
                         request_tokens: 0,
                         window_tokens: 128_000,
                     },
@@ -997,7 +1198,7 @@ mod tests {
     fn the_context_breakdown_names_each_part_and_the_images_only_when_present() {
         let usage = ContextUsage {
             conversation_tokens: 120,
-            reference_image_tokens: 0,
+            image_tokens: 0,
             request_tokens: 4_500,
             window_tokens: 128_000,
         };
@@ -1007,13 +1208,13 @@ mod tests {
             text.contains("script, examples and draft: 4500 tokens"),
             "{text}"
         );
-        assert!(!text.contains("reference images"), "{text}");
+        assert!(!text.contains("Images with this message"), "{text}");
         let with_images = context_breakdown(ContextUsage {
-            reference_image_tokens: 765,
+            image_tokens: 765,
             ..usage
         });
         assert!(
-            with_images.contains("reference images: 765 tokens"),
+            with_images.contains("Images with this message: 765 tokens"),
             "{with_images}"
         );
     }
