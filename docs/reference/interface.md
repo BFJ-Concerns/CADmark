@@ -154,15 +154,21 @@ After each build, the status bar reports every produced part's validity:
 
 The export menu shows a warning before writing an invalid part.
 
-## Reference images
+## Images in chat
 
-Click **Attach images…** beside **Project references**, above the conversation, and choose one or more PNG or JPEG photos or drawings. CADmark copies them into the project and shows thumbnails.
+Attach a photo or drawing to a message in any of three ways:
 
-The images stay with the project when you start a new conversation or reopen it, even if you move or delete the originals. All parts and conversations in that project share them. An existing image with the same filename is kept; the new copy receives a numbered name.
+- Click **Attach…** below the input and choose one or more files. The picker shows every file; CADmark reads the format from the file's contents, so a download saved without a `.png` or `.jpg` extension still works.
+- Paste with `Ctrl+V` while the input has focus. A screenshot or an image copied from a browser is attached as a PNG.
+- Drop files from a file manager onto the CADmark window.
 
-Use an image-capable AI and tick **The model reads images** in Settings. The references then accompany every AI turn. With a text-only AI, the images remain saved and the panel shows a reminder. Import errors appear in the app.
+Attached images show as thumbnails above the input until you send. Click the × on a thumbnail to remove it. An image can be sent on its own, without any text. The message keeps its images in the conversation, and the AI sees them again whenever that message is part of the history, in this session and after the project is reopened. Copies are kept in the project's `.cadmark/attachments/` folder; the originals can be moved or deleted.
 
-You can also place PNG or JPEG files in the project's `references/` folder and reopen the project to load them.
+Use an image-capable AI and tick **The model reads images** in Settings. With a text-only AI the strip says so: the message is sent with the image names only.
+
+### The reference library
+
+Pictures that define a part, such as a dimensioned drawing or a photo of the original, are worth keeping beyond one conversation. The AI keeps them in the project's `references/` folder when they matter, with a line in `references/INDEX.md` describing what each shows and what it is for. The rest of that file is yours: notes you add to it are left alone when the AI updates a line. In a later conversation it reads that index, lists the library, and looks at any image it needs. Ask it to keep an image if it has not, or to describe one you have placed in the folder by hand.
 
 ## Keyboard shortcuts
 
