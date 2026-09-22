@@ -46,8 +46,8 @@ pub struct TurnInput {
     pub chat: Option<String>,
     pub comments: Vec<GroundedComment>,
     /// The images attached to this turn's messages. Sent to the model
-    /// only when it reads images; the name is what `keep_reference`
-    /// refers to them by.
+    /// only when it reads images; the stored file name is what
+    /// `keep_reference` refers to them by.
     pub images: Vec<ImageAttachment>,
     /// The configured provider context window. Compatible providers do not
     /// expose one shared capability, so this comes from user settings.
@@ -560,29 +560,30 @@ impl<
                     "updating the reference library".to_string(),
                 ));
                 let result = match &args.source {
-                    KeepReferenceSource::Attachment { name } => {
+                    KeepReferenceSource::Attachment { file } => {
                         match attachments
                             .iter()
-                            .find(|attachment| &attachment.name == name)
+                            .find(|attachment| &attachment.file == file)
                         {
                             Some(attachment) => match attachment.image() {
                                 Some(image) => self
                                     .references
                                     .keep(
                                         &image,
-                                        args.file.as_deref().unwrap_or(name),
+                                        args.file.as_deref().unwrap_or(&attachment.name),
                                         &args.description,
                                     )
-                                    .map(|file| {
-                                        format!("kept as {file} and described in the index")
+                                    .map(|kept| {
+                                        format!("kept as {kept} and described in the index")
                                     }),
                                 None => {
-                                    Err(format!("the attachment {name} has no image data any more"))
+                                    Err(format!("the attachment {file} has no image data any more"))
                                 }
                             },
                             None => Err(format!(
-                                "no image named {name} is attached to any message in this \
-                                 conversation; the names are shown with each message"
+                                "no attachment {file} is on any message in this conversation; \
+                                 each message's [Attached images: …] line gives its images' \
+                                 file names in brackets"
                             )),
                         }
                     }
@@ -677,16 +678,17 @@ fn render_input(input: &TurnInput) -> String {
     with_attachment_names(&parts.join("\n\n"), &input.images)
 }
 
-/// Name the images that go with a message, so the model can refer to one
-/// by name — to `keep_reference` — and knows which is which when several
-/// are attached.
+/// Name the images that go with a message, each with its stored file
+/// name, so the model knows which is which when several are attached and
+/// can refer to one unambiguously — to `keep_reference` — even when two
+/// share the name the user knows them by.
 fn with_attachment_names(text: &str, attachments: &[ImageAttachment]) -> String {
     if attachments.is_empty() {
         return text.to_string();
     }
     let names = attachments
         .iter()
-        .map(|attachment| format!("\"{}\"", attachment.name))
+        .map(|attachment| format!("\"{}\" ({})", attachment.name, attachment.file))
         .collect::<Vec<_>>()
         .join(", ");
     format!("{text}\n\n[Attached images: {names}]")
@@ -1717,7 +1719,10 @@ mod tests {
             panic!("the request is last");
         };
         assert!(images.is_empty());
-        assert!(text.contains("[Attached images: \"Flange\"]"), "{text}");
+        assert!(
+            text.contains("[Attached images: \"Flange\" (stored-Flange.png)]"),
+            "{text}"
+        );
         let ModelItem::User { images, .. } =
             RequestAssembly::new(&conversation, None, &input, true)
                 .items
@@ -1824,7 +1829,7 @@ mod tests {
                     id: "c3".into(),
                     name: KEEP_REFERENCE.into(),
                     arguments: serde_json::json!({
-                        "source": {"attachment": {"name": "Flange"}},
+                        "source": {"attachment": {"file": "stored-Flange.png"}},
                         "file": "flange-top",
                         "description": "Top view of the flange."
                     }),
@@ -1841,7 +1846,7 @@ mod tests {
                     id: "c5".into(),
                     name: KEEP_REFERENCE.into(),
                     arguments: serde_json::json!({
-                        "source": {"attachment": {"name": "Nope"}},
+                        "source": {"attachment": {"file": "stored-Nope.png"}},
                         "description": "x"
                     }),
                 },
@@ -1897,8 +1902,8 @@ mod tests {
             "kept as flange-top.png and described in the index"
         );
         assert_eq!(finished[3].1, "old.png is described in the index");
-        assert!(finished[4].2, "an unknown attachment name fails");
-        assert!(finished[4].1.contains("Nope"));
+        assert!(finished[4].2, "an unknown attachment file fails");
+        assert!(finished[4].1.contains("stored-Nope.png"));
 
         // The read image reached the model as a user item after the
         // tool result, like a render does.
@@ -1936,7 +1941,9 @@ mod tests {
             };
             assert_eq!(images.len(), 1);
             assert!(
-                text.contains(&format!("[Attached images: \"{name}\"]")),
+                text.contains(&format!(
+                    "[Attached images: \"{name}\" (stored-{name}.png)]"
+                )),
                 "{text}"
             );
             let ModelItem::User { text, images } = &blind[index] else {
