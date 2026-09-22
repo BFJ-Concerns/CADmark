@@ -7,14 +7,16 @@
 //! tools and browsers offer copied pictures as `image/png`, which is what
 //! the clipboard library asks for on Linux.
 
-use crate::reference_images::StagedImage;
+use cadmark_ui::chat::StagedImage;
+
+use crate::reference_images::stage_rgba;
 
 /// The image on the clipboard, or `None` when it holds none. A clipboard
 /// that cannot be reached at all is an error.
 pub fn read_image() -> Result<Option<StagedImage>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
     match clipboard.get_image() {
-        Ok(image) => StagedImage::from_rgba(
+        Ok(image) => stage_rgba(
             "Pasted image".to_string(),
             image.width,
             image.height,

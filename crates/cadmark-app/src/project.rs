@@ -873,9 +873,7 @@ mod tests {
                 image::ImageFormat::Png,
             )
             .unwrap();
-        let staged =
-            crate::reference_images::StagedImage::from_bytes("Flange".into(), bytes.clone())
-                .unwrap();
+        let staged = crate::reference_images::stage_bytes("Flange".into(), bytes.clone()).unwrap();
         let attachment = crate::reference_images::store_attachment(dir.path(), &staged).unwrap();
         let (mut project, _commands) = project_for_test(dir.path().to_path_buf());
         project

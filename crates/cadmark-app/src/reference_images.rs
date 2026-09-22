@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use cadmark_core::message::{ImageAttachment, ImageData};
+use cadmark_ui::chat::StagedImage;
 
 /// Where a message's images are kept, inside the project folder.
 const ATTACHMENTS_DIRECTORY: &str = ".cadmark/attachments";
@@ -30,88 +31,83 @@ pub const INDEX_FILENAME: &str = "INDEX.md";
 /// a phone is a few megabytes, and a provider rejects far less than this.
 const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 
-/// A picture the user has staged in the chat input, decoded once so the
-/// pane can show it and the store can keep the original bytes.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StagedImage {
-    /// The name the user knows it by: the file name it came from, or
-    /// a label for a pasted picture.
-    pub name: String,
-    pub data: ImageData,
-    pub thumbnail: egui::ColorImage,
-    /// The extension the stored copy takes.
-    extension: &'static str,
+/// The extension a stored copy of an image takes, from its media type.
+fn extension_for(media_type: &str) -> Result<&'static str, String> {
+    match media_type {
+        "image/png" => Ok("png"),
+        "image/jpeg" => Ok("jpg"),
+        other => Err(format!("{other} images cannot be kept")),
+    }
 }
 
-impl StagedImage {
-    /// Decode a file the user chose. The format is read from the bytes,
-    /// not the name: a download saved without an extension is still the
-    /// picture it is.
-    pub fn from_file(path: &Path) -> Result<Self, String> {
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let read = || -> Result<Self, String> {
-            let size = std::fs::metadata(path)
-                .map_err(|error| error.to_string())?
-                .len();
-            if size > MAX_IMAGE_BYTES {
-                return Err(format!(
-                    "{} MB is larger than the {} MB an image may be",
-                    size / (1024 * 1024),
-                    MAX_IMAGE_BYTES / (1024 * 1024)
-                ));
-            }
-            let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
-            Self::from_bytes(name.clone(), bytes)
-        };
-        read().map_err(|error| format!("{name}: {error}"))
-    }
+/// Decode a file the user chose into a staged image. The format is read
+/// from the bytes, not the name: a download saved without an extension
+/// is still the picture it is.
+pub fn stage_file(path: &Path) -> Result<StagedImage, String> {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let read = || -> Result<StagedImage, String> {
+        let size = std::fs::metadata(path)
+            .map_err(|error| error.to_string())?
+            .len();
+        if size > MAX_IMAGE_BYTES {
+            return Err(format!(
+                "{} MB is larger than the {} MB an image may be",
+                size / (1024 * 1024),
+                MAX_IMAGE_BYTES / (1024 * 1024)
+            ));
+        }
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        stage_bytes(name.clone(), bytes)
+    };
+    read().map_err(|error| format!("{name}: {error}"))
+}
 
-    /// Decode encoded bytes whose format is read from their header.
-    pub fn from_bytes(name: String, bytes: Vec<u8>) -> Result<Self, String> {
-        let format = image::guess_format(&bytes).map_err(|_| "not a PNG or JPEG image")?;
-        let (media_type, extension) = match format {
-            image::ImageFormat::Png => ("image/png", "png"),
-            image::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
-            other => {
-                return Err(format!(
-                    "{other:?} images are not supported; use PNG or JPEG"
-                ));
-            }
-        };
-        // ImageReader's allocation limits apply before decoding a photograph.
-        let decoded = image::ImageReader::with_format(Cursor::new(&bytes), format)
-            .decode()
-            .map_err(|error| error.to_string())?;
-        Ok(Self {
-            name,
-            thumbnail: thumbnail_of(&decoded),
-            data: ImageData {
-                media_type: media_type.into(),
-                bytes,
-            },
-            extension,
-        })
-    }
+/// Decode encoded bytes, whose format is read from their header, into a
+/// staged image: the original bytes for the store, a thumbnail for the
+/// pane.
+pub fn stage_bytes(name: String, bytes: Vec<u8>) -> Result<StagedImage, String> {
+    let format = image::guess_format(&bytes).map_err(|_| "not a PNG or JPEG image")?;
+    let media_type = match format {
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::Jpeg => "image/jpeg",
+        other => {
+            return Err(format!(
+                "{other:?} images are not supported; use PNG or JPEG"
+            ));
+        }
+    };
+    // ImageReader's allocation limits apply before decoding a photograph.
+    let decoded = image::ImageReader::with_format(Cursor::new(&bytes), format)
+        .decode()
+        .map_err(|error| error.to_string())?;
+    Ok(StagedImage {
+        name,
+        thumbnail: thumbnail_of(&decoded),
+        data: ImageData {
+            media_type: media_type.into(),
+            bytes,
+        },
+    })
+}
 
-    /// Encode raw pixels from the clipboard as a PNG.
-    pub fn from_rgba(
-        name: String,
-        width: usize,
-        height: usize,
-        rgba: &[u8],
-    ) -> Result<Self, String> {
-        let image = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec())
-            .ok_or("the clipboard image's pixels do not match its size")?;
-        let mut bytes = Vec::new();
-        image
-            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
-            .map_err(|error| error.to_string())?;
-        Self::from_bytes(name, bytes)
-    }
+/// Encode raw pixels from the clipboard as a PNG and stage them.
+pub fn stage_rgba(
+    name: String,
+    width: usize,
+    height: usize,
+    rgba: &[u8],
+) -> Result<StagedImage, String> {
+    let image = image::RgbaImage::from_raw(width as u32, height as u32, rgba.to_vec())
+        .ok_or("the clipboard image's pixels do not match its size")?;
+    let mut bytes = Vec::new();
+    image
+        .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    stage_bytes(name, bytes)
 }
 
 fn thumbnail_of(decoded: &image::DynamicImage) -> egui::ColorImage {
@@ -187,12 +183,15 @@ fn write_new_file(directory: &Path, wanted: &str, bytes: &[u8]) -> Result<String
 /// attachment store; the returned attachment carries them too, so the turn
 /// that is about to start reads them from memory.
 pub fn store_attachment(project: &Path, staged: &StagedImage) -> Result<ImageAttachment, String> {
-    let file = write_new_file(
-        &project.join(ATTACHMENTS_DIRECTORY),
-        &stored_name(&staged.name, staged.extension),
-        &staged.data.bytes,
-    )
-    .map_err(|error| format!("Could not keep {}: {error}", staged.name))?;
+    let file = extension_for(&staged.data.media_type)
+        .and_then(|extension| {
+            write_new_file(
+                &project.join(ATTACHMENTS_DIRECTORY),
+                &stored_name(&staged.name, extension),
+                &staged.data.bytes,
+            )
+        })
+        .map_err(|error| format!("Could not keep {}: {error}", staged.name))?;
     Ok(ImageAttachment {
         file,
         name: staged.name.clone(),
@@ -297,8 +296,7 @@ impl ReferenceLibrary {
         if !is_image_extension(&path) {
             return Err(format!("{file} is not a PNG or JPEG image"));
         }
-        let staged = StagedImage::from_file(&path)?;
-        Ok(staged.data)
+        Ok(stage_file(&path)?.data)
     }
 
     /// Copy an attachment into the library under `file`, and record
@@ -308,11 +306,7 @@ impl ReferenceLibrary {
         if !is_plain_file_name(file) {
             return Err(format!("{file} is not a file name"));
         }
-        let extension = match image.media_type.as_str() {
-            "image/png" => "png",
-            "image/jpeg" => "jpg",
-            other => return Err(format!("{other} images cannot be kept")),
-        };
+        let extension = extension_for(&image.media_type)?;
         let stem = Path::new(file)
             .file_stem()
             .unwrap_or_default()
@@ -431,7 +425,7 @@ impl ImagePicker {
                     let mut images = Vec::new();
                     let mut errors = Vec::new();
                     for file in files {
-                        match StagedImage::from_file(&file) {
+                        match stage_file(&file) {
                             Ok(image) => images.push(image),
                             Err(error) => errors.push(error),
                         }
@@ -481,7 +475,7 @@ mod tests {
         let sources = tempfile::tempdir().unwrap();
         let path = sources.path().join("Flange");
         std::fs::write(&path, png_bytes(480, 240, [20, 80, 160])).unwrap();
-        let staged = StagedImage::from_file(&path).unwrap();
+        let staged = stage_file(&path).unwrap();
         assert_eq!(staged.name, "Flange");
         assert_eq!(staged.data.media_type, "image/png");
         assert_eq!(staged.thumbnail.size, [96, 48]);
@@ -490,23 +484,19 @@ mod tests {
         image::RgbImage::from_pixel(4, 2, image::Rgb([1, 2, 3]))
             .save_with_format(&jpeg, image::ImageFormat::Jpeg)
             .unwrap();
-        let staged = StagedImage::from_file(&jpeg).unwrap();
+        let staged = stage_file(&jpeg).unwrap();
         assert_eq!(
             staged.data.media_type, "image/jpeg",
             "the bytes decide, not the name"
         );
 
         std::fs::write(&path, b"not an image").unwrap();
-        assert!(
-            StagedImage::from_file(&path)
-                .unwrap_err()
-                .contains("Flange")
-        );
+        assert!(stage_file(&path).unwrap_err().contains("Flange"));
     }
 
     #[test]
     fn pasted_pixels_become_a_png() {
-        let staged = StagedImage::from_rgba(
+        let staged = stage_rgba(
             "Pasted image".into(),
             2,
             1,
@@ -518,14 +508,13 @@ mod tests {
             image::guess_format(&staged.data.bytes).unwrap(),
             image::ImageFormat::Png
         );
-        assert!(StagedImage::from_rgba("x".into(), 3, 3, &[0; 4]).is_err());
+        assert!(stage_rgba("x".into(), 3, 3, &[0; 4]).is_err());
     }
 
     #[test]
     fn attachments_are_kept_out_of_the_way_and_reload_by_name() {
         let project = tempfile::tempdir().unwrap();
-        let staged =
-            StagedImage::from_bytes("my flange.png".into(), png_bytes(4, 2, [0, 80, 160])).unwrap();
+        let staged = stage_bytes("my flange.png".into(), png_bytes(4, 2, [0, 80, 160])).unwrap();
         let first = store_attachment(project.path(), &staged).unwrap();
         let second = store_attachment(project.path(), &staged).unwrap();
         assert_ne!(first.file, second.file);

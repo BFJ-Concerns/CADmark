@@ -12,7 +12,9 @@ use std::time::Instant;
 
 use cadmark_core::geometry::{GeometryContext, PickedElement};
 use cadmark_core::ledger::LedgerValue;
-use cadmark_core::message::{ContextUsage, Conversation, Message, MessageKind, ToolActivity};
+use cadmark_core::message::{
+    ContextUsage, Conversation, ImageData, Message, MessageKind, ToolActivity,
+};
 use cadmark_core::pending_comment::{
     PendingAnchor, PendingComment, PendingCommentId, PendingComments,
 };
@@ -88,10 +90,15 @@ pub enum ChatAction {
 }
 
 /// An image staged with the draft: shown as a thumbnail until the
-/// message is sent or the user removes it.
+/// message is sent or the user removes it. The pane is its only owner,
+/// so a thumbnail removed here is an image that will not be sent.
 #[derive(Debug, Clone, PartialEq)]
-pub struct StagedImageView {
+pub struct StagedImage {
+    /// The name the user knows it by: the file it came from, or a label
+    /// for a pasted picture.
     pub name: String,
+    /// The encoded bytes the message will carry.
+    pub data: ImageData,
     pub thumbnail: egui::ColorImage,
 }
 
@@ -99,8 +106,9 @@ pub struct StagedImageView {
 pub struct ChatPane {
     /// Current text in the input field.
     pub input_text: String,
-    /// Images to send with the next message.
-    pub staged_images: Vec<StagedImageView>,
+    /// Images to send with the next message, in the order the strip
+    /// shows them.
+    pub staged_images: Vec<StagedImage>,
     /// Whether an image picker is open; the attach button waits for it.
     pub picker_pending: bool,
     /// Whether the configured model reads images. When it does not, the
@@ -152,16 +160,23 @@ impl ChatPane {
     }
 
     /// Add an image to send with the next message.
-    pub fn stage_image(&mut self, image: StagedImageView) {
+    pub fn stage_image(&mut self, image: StagedImage) {
         self.staged_images.push(image);
         self.staged_textures.clear();
         self.focus_input = true;
     }
 
-    /// Empty the strip: the staged images have gone with a message.
-    pub fn clear_staged_images(&mut self) {
+    /// Take an image off the strip: it will not be sent.
+    pub fn remove_staged_image(&mut self, index: usize) {
+        self.staged_images.remove(index);
         self.staged_textures.clear();
-        self.staged_images.clear();
+    }
+
+    /// Empty the strip, handing over the images for the message being
+    /// sent.
+    pub fn take_staged_images(&mut self) -> Vec<StagedImage> {
+        self.staged_textures.clear();
+        std::mem::take(&mut self.staged_images)
     }
 
     /// Render the chat pane and report what the user did.
@@ -306,8 +321,7 @@ impl ChatPane {
             );
         }
         if let Some(index) = remove {
-            self.staged_images.remove(index);
-            self.staged_textures.clear();
+            self.remove_staged_image(index);
         }
         ui.add_space(4.0);
     }
@@ -976,6 +990,30 @@ mod tests {
             operation_id: u64::from(line),
             relation: ProvenanceRelation::Generated,
         }
+    }
+
+    #[test]
+    fn a_removed_thumbnail_is_not_among_the_images_taken_for_the_message() {
+        let staged = |name: &str| StagedImage {
+            name: name.to_string(),
+            data: ImageData {
+                media_type: "image/png".into(),
+                bytes: vec![1],
+            },
+            thumbnail: egui::ColorImage::example(),
+        };
+        let mut pane = ChatPane::new();
+        pane.stage_image(staged("keep"));
+        pane.stage_image(staged("drop"));
+        pane.stage_image(staged("also keep"));
+        pane.remove_staged_image(1);
+        let names: Vec<_> = pane
+            .take_staged_images()
+            .into_iter()
+            .map(|image| image.name)
+            .collect();
+        assert_eq!(names, ["keep", "also keep"]);
+        assert!(pane.staged_images.is_empty(), "taking empties the strip");
     }
 
     #[test]
