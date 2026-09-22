@@ -75,9 +75,10 @@ pub struct ReferenceImagesArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeepReferenceSource {
-    /// An image attached to a message in this conversation, by the name
-    /// the message shows for it.
-    Attachment { name: String },
+    /// An image attached to a message in this conversation, by the file
+    /// name the message shows beside it. Two attachments may share the
+    /// name the user knows them by; the file is unique.
+    Attachment { file: String },
     /// A file already in the library: only its description changes.
     Library { file: String },
 }
@@ -182,11 +183,11 @@ pub fn keep_reference_spec() -> ToolSpec {
             "properties": {
                 "source": {
                     "type": "object",
-                    "description": "Where the image is: {\"attachment\": {\"name\": ...}} for an image attached to a message in this conversation, by the name shown for it; {\"library\": {\"file\": ...}} to re-describe a file already in the library.",
+                    "description": "Where the image is: {\"attachment\": {\"file\": ...}} for an image attached to a message in this conversation, by the file name shown in brackets after its name in the message's [Attached images: …] line; {\"library\": {\"file\": ...}} to re-describe a file already in the library.",
                     "oneOf": [
                         {
                             "type": "object",
-                            "properties": {"attachment": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": false}},
+                            "properties": {"attachment": {"type": "object", "properties": {"file": {"type": "string"}}, "required": ["file"], "additionalProperties": false}},
                             "required": ["attachment"],
                             "additionalProperties": false
                         },
@@ -260,7 +261,7 @@ mod tests {
             serde_json::from_value(json!({"file": "flange.png"})).unwrap();
         assert_eq!(read.file.as_deref(), Some("flange.png"));
         let keep: KeepReferenceArgs = serde_json::from_value(json!({
-            "source": {"attachment": {"name": "Flange"}},
+            "source": {"attachment": {"file": "20260922-143000-flange.png"}},
             "file": "flange-top",
             "description": "Top view of the flange."
         }))
@@ -268,7 +269,7 @@ mod tests {
         assert_eq!(
             keep.source,
             KeepReferenceSource::Attachment {
-                name: "Flange".into()
+                file: "20260922-143000-flange.png".into()
             }
         );
         let redescribe: KeepReferenceArgs = serde_json::from_value(json!({
