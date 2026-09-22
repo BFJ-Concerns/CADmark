@@ -19,6 +19,12 @@ pub const RUN_SCRIPT: &str = "run_script";
 pub const LOOKUP_DOCS: &str = "lookup_docs";
 /// The tool that shows the model the current viewport.
 pub const RENDER_VIEW: &str = "render_view";
+/// The tool that lists the project's reference library, or reads one of
+/// its images.
+pub const REFERENCE_IMAGES: &str = "reference_images";
+/// The tool that keeps an image in the reference library, or updates the
+/// description of one already there.
+pub const KEEP_REFERENCE: &str = "keep_reference";
 
 /// Arguments of `run_script`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +61,37 @@ pub enum RenderView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderViewArgs {
     pub view: RenderView,
+}
+
+/// Arguments of `reference_images`: no file lists the library; a file
+/// name reads that image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReferenceImagesArgs {
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// Where the image `keep_reference` keeps comes from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepReferenceSource {
+    /// An image attached to a message in this conversation, by the file
+    /// name the message shows beside it. Two attachments may share the
+    /// name the user knows them by; the file is unique.
+    Attachment { file: String },
+    /// A file already in the library: only its description changes.
+    Library { file: String },
+}
+
+/// Arguments of `keep_reference`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeepReferenceArgs {
+    pub source: KeepReferenceSource,
+    /// The file name to keep it under; ignored for a library file.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// What the picture shows and what it is for, for the index.
+    pub description: String,
 }
 
 pub fn run_script_spec() -> ToolSpec {
@@ -115,26 +152,86 @@ pub fn render_view_spec() -> ToolSpec {
     }
 }
 
-/// The tools offered for one turn. The render tool is offered only to a
-/// model that reads images; a text-only model is told so in the
-/// instructions rather than handed a tool it cannot use.
+pub fn reference_images_spec() -> ToolSpec {
+    ToolSpec {
+        name: REFERENCE_IMAGES.to_string(),
+        description: "The project's reference library: photos and drawings kept in the \
+                      project's references/ folder for every conversation. With no file, \
+                      lists each image with its description from the index. With a file name, \
+                      returns that image for you to look at."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "description": "A file name from the listing, to read that image. Omit to list the library."}
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
+pub fn keep_reference_spec() -> ToolSpec {
+    ToolSpec {
+        name: KEEP_REFERENCE.to_string(),
+        description: "Keep an image attached to this conversation in the project's reference \
+                      library so later conversations can find it, or update the description of \
+                      an image already there. The description goes in the library's index: say \
+                      what the picture shows and what it is used for."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "source": {
+                    "type": "object",
+                    "description": "Where the image is: {\"attachment\": {\"file\": ...}} for an image attached to a message in this conversation, by the file name shown in brackets after its name in the message's [Attached images: …] line; {\"library\": {\"file\": ...}} to re-describe a file already in the library.",
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"attachment": {"type": "object", "properties": {"file": {"type": "string"}}, "required": ["file"], "additionalProperties": false}},
+                            "required": ["attachment"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"library": {"type": "object", "properties": {"file": {"type": "string"}}, "required": ["file"], "additionalProperties": false}},
+                            "required": ["library"],
+                            "additionalProperties": false
+                        }
+                    ]
+                },
+                "file": {"type": "string", "description": "The file name to keep an attachment under, e.g. 'flange-top-view'. The extension follows the image format."},
+                "description": {"type": "string", "description": "One or two sentences: what the picture shows and what it is for."}
+            },
+            "required": ["source", "description"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+/// The tools offered for one turn. The image tools — the render, and the
+/// reference library — are offered only to a model that reads images; a
+/// text-only model is told so in the instructions rather than handed
+/// tools it cannot use.
 pub fn tools_for(accepts_images: bool) -> Vec<ToolSpec> {
     let mut tools = vec![run_script_spec(), lookup_docs_spec()];
     if accepts_images {
         tools.push(render_view_spec());
+        tools.push(reference_images_spec());
+        tools.push(keep_reference_spec());
     }
     tools
 }
 
-/// What a model is told about a tool it is not being offered. A model
-/// that cannot read images would otherwise have to infer the render
-/// tool's absence from a list it never sees in full, so the instructions
-/// say it plainly instead.
+/// What a model is told about tools it is not being offered. A model
+/// that cannot read images would otherwise have to infer the image tools'
+/// absence from a list it never sees in full, so the instructions say it
+/// plainly instead.
 pub fn unavailable_tools_note(accepts_images: bool) -> Option<&'static str> {
     (!accepts_images).then_some(
-        "The `render_view` tool is unavailable in this session: the model in use cannot read \
-         images. Judge the result from the measurements and validity the run reports, and say \
-         so when you cannot check it by eye.",
+        "The `render_view`, `reference_images` and `keep_reference` tools are unavailable in \
+         this session: the model in use cannot read images, and images attached to messages \
+         are not sent. Judge the result from the measurements and validity the run reports, \
+         and say so when you cannot check it by eye.",
     )
 }
 
@@ -158,17 +255,57 @@ mod tests {
         let render: RenderViewArgs = serde_json::from_value(json!({"view": "top"})).unwrap();
         assert_eq!(render.view, RenderView::Top);
         assert!(serde_json::from_value::<RenderViewArgs>(json!({"view": "sideways"})).is_err());
+        let list: ReferenceImagesArgs = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(list.file, None);
+        let read: ReferenceImagesArgs =
+            serde_json::from_value(json!({"file": "flange.png"})).unwrap();
+        assert_eq!(read.file.as_deref(), Some("flange.png"));
+        let keep: KeepReferenceArgs = serde_json::from_value(json!({
+            "source": {"attachment": {"file": "20260922-143000-flange.png"}},
+            "file": "flange-top",
+            "description": "Top view of the flange."
+        }))
+        .unwrap();
+        assert_eq!(
+            keep.source,
+            KeepReferenceSource::Attachment {
+                file: "20260922-143000-flange.png".into()
+            }
+        );
+        let redescribe: KeepReferenceArgs = serde_json::from_value(json!({
+            "source": {"library": {"file": "flange-top.png"}},
+            "description": "Top view, bolt circle visible."
+        }))
+        .unwrap();
+        assert_eq!(
+            redescribe.source,
+            KeepReferenceSource::Library {
+                file: "flange-top.png".into()
+            }
+        );
+        assert_eq!(redescribe.file, None);
     }
 
     #[test]
-    fn the_render_tool_is_withheld_from_text_only_models() {
+    fn the_image_tools_are_withheld_from_text_only_models() {
         let names = |accepts: bool| {
             tools_for(accepts)
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(true), [RUN_SCRIPT, LOOKUP_DOCS, RENDER_VIEW]);
+        assert_eq!(
+            names(true),
+            [
+                RUN_SCRIPT,
+                LOOKUP_DOCS,
+                RENDER_VIEW,
+                REFERENCE_IMAGES,
+                KEEP_REFERENCE
+            ]
+        );
         assert_eq!(names(false), [RUN_SCRIPT, LOOKUP_DOCS]);
+        let note = unavailable_tools_note(false).unwrap();
+        assert!(note.contains(REFERENCE_IMAGES) && note.contains(KEEP_REFERENCE));
     }
 }

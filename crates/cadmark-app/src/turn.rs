@@ -23,12 +23,15 @@ use cadmark_bridge::backend::{
 use cadmark_bridge::examples;
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
 use cadmark_bridge::tools::{
-    LOOKUP_DOCS, LookupDocsArgs, RENDER_VIEW, RUN_SCRIPT, RenderView, RenderViewArgs,
+    KEEP_REFERENCE, KeepReferenceArgs, KeepReferenceSource, LOOKUP_DOCS, LookupDocsArgs,
+    REFERENCE_IMAGES, RENDER_VIEW, RUN_SCRIPT, ReferenceImagesArgs, RenderView, RenderViewArgs,
     RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::geometry::describe_parts;
-use cadmark_core::message::{ContextUsage, Conversation, MessageKind, estimate_tokens};
+use cadmark_core::message::{
+    ContextUsage, Conversation, IMAGE_TOKENS, ImageAttachment, MessageKind, estimate_tokens,
+};
 use cadmark_core::skills;
 use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
 use cadmark_kernel::worker::WorkerError;
@@ -37,12 +40,15 @@ use crate::script_parameters;
 use crate::validity::describe_validity;
 
 /// What the user sent to start a turn: any chat text, the pending
-/// comments with their anchors, and the project's reference images.
+/// comments with their anchors, and the images attached to them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnInput {
     pub chat: Option<String>,
     pub comments: Vec<GroundedComment>,
-    pub images: Vec<ImageData>,
+    /// The images attached to this turn's messages. Sent to the model
+    /// only when it reads images; the stored file name is what
+    /// `keep_reference` refers to them by.
+    pub images: Vec<ImageAttachment>,
     /// The configured provider context window. Compatible providers do not
     /// expose one shared capability, so this comes from user settings.
     pub context_window_tokens: usize,
@@ -151,6 +157,48 @@ impl RenderSource for NoRender {
     }
 }
 
+/// A file in the reference library as the listing tool reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceListing {
+    pub file: String,
+    /// The index line for the file, when the AI has written one.
+    pub description: Option<String>,
+}
+
+/// Answers the reference-library tools: the project's `references/`
+/// folder and its index in production, a scripted stand-in in tests.
+pub trait ReferenceSource: Send {
+    fn list(&self) -> Result<Vec<ReferenceListing>, String>;
+    fn read(&self, file: &str) -> Result<ImageData, String>;
+    /// Keep `image` under a name based on `file`, described in the index.
+    /// Returns the file name used.
+    fn keep(&self, image: &ImageData, file: &str, description: &str) -> Result<String, String>;
+    /// Replace the index line for a file already in the library.
+    fn describe(&self, file: &str, description: &str) -> Result<(), String>;
+}
+
+/// A reference source for a model that cannot see: the tools are not
+/// offered, and a call to them anyway is answered honestly.
+pub struct NoReferences;
+
+impl ReferenceSource for NoReferences {
+    fn list(&self) -> Result<Vec<ReferenceListing>, String> {
+        Err("the reference library is not available to this model".to_string())
+    }
+
+    fn read(&self, _file: &str) -> Result<ImageData, String> {
+        Err("the reference library is not available to this model".to_string())
+    }
+
+    fn keep(&self, _image: &ImageData, _file: &str, _description: &str) -> Result<String, String> {
+        Err("the reference library is not available to this model".to_string())
+    }
+
+    fn describe(&self, _file: &str, _description: &str) -> Result<(), String> {
+        Err("the reference library is not available to this model".to_string())
+    }
+}
+
 /// Everything one turn needs.
 pub struct TurnRunner<
     'a,
@@ -158,17 +206,24 @@ pub struct TurnRunner<
     E: ScriptExecutor,
     D: DocSource + ?Sized,
     R: RenderSource + ?Sized,
+    L: ReferenceSource + ?Sized,
 > {
     pub model: &'a M,
     pub executor: &'a mut E,
     pub docs: &'a D,
     pub render: &'a mut R,
+    pub references: &'a L,
     pub script_path: PathBuf,
     pub cancel: CancelFlag,
 }
 
-impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderSource + ?Sized>
-    TurnRunner<'_, M, E, D, R>
+impl<
+    M: TurnModel + ?Sized,
+    E: ScriptExecutor,
+    D: DocSource + ?Sized,
+    R: RenderSource + ?Sized,
+    L: ReferenceSource + ?Sized,
+> TurnRunner<'_, M, E, D, R, L>
 {
     /// Run one turn. `conversation` is the history the model is shown;
     /// `input` is what starts this turn. Events are delivered to `emit`
@@ -180,6 +235,21 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         mut emit: impl FnMut(TurnEvent) + Send,
     ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
+        // Every image the conversation holds, newest first, so a request
+        // to keep "the drawing" finds the one from three turns ago as
+        // readily as this turn's.
+        let attachments: Vec<ImageAttachment> = input
+            .images
+            .iter()
+            .cloned()
+            .chain(
+                conversation
+                    .messages()
+                    .iter()
+                    .rev()
+                    .flat_map(|message| message.attachments.iter().cloned()),
+            )
+            .collect();
         let assembled = RequestAssembly::new(
             conversation,
             original.as_deref(),
@@ -187,7 +257,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
             self.model.accepts_images(),
         );
         let usage = assembled.usage(input.context_window_tokens);
-        let mut items = history_items(conversation);
+        let mut items = history_items(conversation, self.model.accepts_images());
         if usage.needs_condensing() && !conversation.is_empty() {
             let summary = match self.condense(conversation).await {
                 Ok(summary) => summary,
@@ -264,11 +334,18 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     arguments: call.arguments.clone(),
                 });
                 let mut rendered = None;
-                let (output, failed) = match self.run_tool(&call, &mut attempt, &mut emit).await {
+                let (output, failed) = match self
+                    .run_tool(&call, &mut attempt, &attachments, &mut emit)
+                    .await
+                {
                     ToolRun::Output { output, failed } => (output, failed),
                     ToolRun::Rendered { image } => {
                         rendered = Some(image);
                         ("rendered; the image follows".to_string(), false)
+                    }
+                    ToolRun::ImageRead { file, image } => {
+                        rendered = Some(image);
+                        (format!("{file}; the image follows"), false)
                     }
                     ToolRun::Built {
                         code,
@@ -309,10 +386,14 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     // A tool result carries text only on the wire; the
                     // image rides as the next user item.
                     items.push(ModelItem::User {
-                        text: format!(
-                            "The render you asked for ({}).",
-                            describe_view(render_view_of(&call.arguments))
-                        ),
+                        text: if call.name == REFERENCE_IMAGES {
+                            "The reference image you asked for.".to_string()
+                        } else {
+                            format!(
+                                "The render you asked for ({}).",
+                                describe_view(render_view_of(&call.arguments))
+                            )
+                        },
                         images: vec![image],
                     });
                 }
@@ -347,7 +428,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
     async fn condense(&self, conversation: &Conversation) -> Result<String, TurnOutcome> {
         let request = ModelRequest {
             instructions: "Condense this earlier CAD conversation for the next turn. Retain every decision already made and every request still open, including dimensions, constraints, and unresolved questions. Drop only chatter and completed detail. Return the compact account alone; do not call tools.".to_string(),
-            items: history_items(conversation),
+            items: history_items(conversation, self.model.accepts_images()),
             tools: Vec::new(),
         };
         let mut sink = |_delta: StreamDelta| {};
@@ -372,6 +453,7 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
         &mut self,
         call: &ToolCall,
         attempt: &mut u32,
+        attachments: &[ImageAttachment],
         emit: &mut (impl FnMut(TurnEvent) + Send),
     ) -> ToolRun {
         match call.name.as_str() {
@@ -437,6 +519,90 @@ impl<M: TurnModel + ?Sized, E: ScriptExecutor, D: DocSource + ?Sized, R: RenderS
                     },
                 }
             }
+            REFERENCE_IMAGES => {
+                let args: ReferenceImagesArgs = match serde_json::from_value(call.arguments.clone())
+                {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                match args.file {
+                    None => {
+                        emit(TurnEvent::Phase("listing the reference images".to_string()));
+                        match self.references.list() {
+                            Ok(entries) => ToolRun::Output {
+                                output: describe_references(&entries),
+                                failed: false,
+                            },
+                            Err(reason) => ToolRun::Output {
+                                output: format!("reference library unavailable: {reason}"),
+                                failed: true,
+                            },
+                        }
+                    }
+                    Some(file) => {
+                        emit(TurnEvent::Phase(format!("looking at {file}")));
+                        match self.references.read(&file) {
+                            Ok(image) => ToolRun::ImageRead { file, image },
+                            Err(reason) => ToolRun::Output {
+                                output: format!("could not read {file}: {reason}"),
+                                failed: true,
+                            },
+                        }
+                    }
+                }
+            }
+            KEEP_REFERENCE => {
+                let args: KeepReferenceArgs = match serde_json::from_value(call.arguments.clone()) {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                emit(TurnEvent::Phase(
+                    "updating the reference library".to_string(),
+                ));
+                let result = match &args.source {
+                    KeepReferenceSource::Attachment { file } => {
+                        match attachments
+                            .iter()
+                            .find(|attachment| &attachment.file == file)
+                        {
+                            Some(attachment) => match attachment.image() {
+                                Some(image) => self
+                                    .references
+                                    .keep(
+                                        &image,
+                                        args.file.as_deref().unwrap_or(&attachment.name),
+                                        &args.description,
+                                    )
+                                    .map(|kept| {
+                                        format!("kept as {kept} and described in the index")
+                                    }),
+                                None => {
+                                    Err(format!("the attachment {file} has no image data any more"))
+                                }
+                            },
+                            None => Err(format!(
+                                "no attachment {file} is on any message in this conversation; \
+                                 each message's [Attached images: …] line gives its images' \
+                                 file names in brackets"
+                            )),
+                        }
+                    }
+                    KeepReferenceSource::Library { file } => self
+                        .references
+                        .describe(file, &args.description)
+                        .map(|()| format!("{file} is described in the index")),
+                };
+                match result {
+                    Ok(output) => ToolRun::Output {
+                        output,
+                        failed: false,
+                    },
+                    Err(reason) => ToolRun::Output {
+                        output: format!("could not update the reference library: {reason}"),
+                        failed: true,
+                    },
+                }
+            }
             other => ToolRun::Output {
                 output: format!("unknown tool {other}"),
                 failed: true,
@@ -485,6 +651,11 @@ enum ToolRun {
     Rendered {
         image: ImageData,
     },
+    /// A reference image read from the library, delivered the same way.
+    ImageRead {
+        file: String,
+        image: ImageData,
+    },
     Abort(TurnOutcome),
 }
 
@@ -497,13 +668,51 @@ impl ToolRun {
     }
 }
 
-/// The turn's opening message: chat text and every comment with its anchors.
+/// The turn's opening message: chat text and every comment with its
+/// anchors, naming the images attached.
 fn render_input(input: &TurnInput) -> String {
     let mut parts: Vec<String> = input.comments.iter().map(render_comment).collect();
     if let Some(chat) = &input.chat {
         parts.push(chat.clone());
     }
-    parts.join("\n\n")
+    with_attachment_names(&parts.join("\n\n"), &input.images)
+}
+
+/// Name the images that go with a message, each with its stored file
+/// name, so the model knows which is which when several are attached and
+/// can refer to one unambiguously — to `keep_reference` — even when two
+/// share the name the user knows them by.
+fn with_attachment_names(text: &str, attachments: &[ImageAttachment]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+    let names = attachments
+        .iter()
+        .map(|attachment| format!("\"{}\" ({})", attachment.name, attachment.file))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{text}\n\n[Attached images: {names}]")
+}
+
+/// The reference library as the listing tool reports it.
+fn describe_references(entries: &[ReferenceListing]) -> String {
+    if entries.is_empty() {
+        return "The reference library is empty.".to_string();
+    }
+    let mut text = String::from(
+        "Images in the reference library (call again with a file name to look at one):\n",
+    );
+    for entry in entries {
+        text.push_str(&format!(
+            "- {}: {}\n",
+            entry.file,
+            entry
+                .description
+                .as_deref()
+                .unwrap_or("(no description yet; look at it and describe it with keep_reference)")
+        ));
+    }
+    text
 }
 
 /// The last script the model ran successfully in this conversation, as
@@ -583,20 +792,32 @@ fn changed_parameter_values(before: &str, after: &str) -> Vec<String> {
 }
 
 /// The conversation so far as the model sees it.
-fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
+/// The saved conversation as the model is shown it. A user message's
+/// attached images ride with it again, so a picture the user gave three
+/// turns ago is still in front of the model; a model that cannot read
+/// images is shown the text alone.
+fn history_items(conversation: &Conversation, accepts_images: bool) -> Vec<ModelItem> {
     let mut items = Vec::new();
     for message in conversation.messages() {
+        let images = if accepts_images {
+            message.images()
+        } else {
+            Vec::new()
+        };
         match &message.kind {
             MessageKind::UserChat => items.push(ModelItem::User {
-                text: message.text.clone(),
-                images: Vec::new(),
+                text: with_attachment_names(&message.text, &message.attachments),
+                images,
             }),
             MessageKind::SpatialComment { anchors, .. } => items.push(ModelItem::User {
-                text: render_comment(&GroundedComment {
-                    text: message.text.clone(),
-                    anchors: anchors.clone(),
-                }),
-                images: Vec::new(),
+                text: with_attachment_names(
+                    &render_comment(&GroundedComment {
+                        text: message.text.clone(),
+                        anchors: anchors.clone(),
+                    }),
+                    &message.attachments,
+                ),
+                images,
             }),
             MessageKind::AiResponse => {
                 if !message.text.is_empty() {
@@ -630,10 +851,6 @@ fn history_items(conversation: &Conversation) -> Vec<ModelItem> {
     }
     items
 }
-
-/// Images reserve a conservative fixed budget each, since providers do not
-/// share one way of pricing an image into the context window.
-pub const REFERENCE_IMAGE_TOKENS: usize = 765;
 
 /// Everything one request carries besides the conversation history: the
 /// instructions (with any active skill), the tool definitions, the current
@@ -685,7 +902,17 @@ impl RequestAssembly {
             },
             ModelItem::User {
                 text: request,
-                images: input.images.clone(),
+                // A model that cannot read images is told their names
+                // and nothing else; the bytes would be refused.
+                images: if accepts_images {
+                    input
+                        .images
+                        .iter()
+                        .filter_map(ImageAttachment::image)
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             },
         ];
         let mut instructions = instructions_for(accepts_images);
@@ -700,16 +927,12 @@ impl RequestAssembly {
             tools: tools_for(accepts_images),
             items,
             conversation_tokens: conversation.estimated_tokens(),
-            image_count: input.images.len(),
+            image_count: if accepts_images {
+                input.images.len()
+            } else {
+                0
+            },
         }
-    }
-
-    /// Count `count` images as attached without carrying their bytes: the
-    /// occupancy figure the chat shows every frame needs the weight of the
-    /// project's reference images, not copies of them.
-    pub fn reserving_images(mut self, count: usize) -> Self {
-        self.image_count = count;
-        self
     }
 
     /// What the request weighs against a context window: the history, the
@@ -740,7 +963,7 @@ impl RequestAssembly {
             .sum();
         ContextUsage {
             conversation_tokens: self.conversation_tokens,
-            reference_image_tokens: self.image_count * REFERENCE_IMAGE_TOKENS,
+            image_tokens: self.image_count * IMAGE_TOKENS,
             request_tokens: estimate_tokens(&self.instructions) + tools + items,
             window_tokens,
         }
@@ -790,6 +1013,8 @@ fn describe_tool(name: &str) -> &str {
         RUN_SCRIPT => "run the script",
         LOOKUP_DOCS => "look up the docs",
         RENDER_VIEW => "look at the render",
+        REFERENCE_IMAGES => "look at the reference images",
+        KEEP_REFERENCE => "update the reference library",
         other => other,
     }
 }
@@ -1210,6 +1435,7 @@ mod tests {
                 executor: &mut self.executor,
                 docs: &FakeDocs,
                 render: &mut render,
+                references: &NoReferences,
                 script_path: self.script.clone(),
                 cancel,
             };
@@ -1232,6 +1458,7 @@ mod tests {
                 executor: &mut self.executor,
                 docs: &FakeDocs,
                 render: &mut render,
+                references: &NoReferences,
                 script_path: self.script.clone(),
                 cancel,
             };
@@ -1465,36 +1692,266 @@ mod tests {
     fn context_usage_counts_everything_the_request_carries() {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("x".repeat(300)));
-        let image = ImageData {
-            media_type: "image/png".into(),
-            bytes: vec![0; 16],
+        let input = TurnInput {
+            chat: Some("hi".into()),
+            images: vec![attachment("Flange")],
+            ..Default::default()
         };
         let without_images =
             RequestAssembly::new(&conversation, None, &chat("hi"), false).usage(1_000_000);
-        let with_images = RequestAssembly::new(
-            &conversation,
-            None,
-            &TurnInput {
-                chat: Some("hi".into()),
-                images: vec![image],
-                ..Default::default()
-            },
-            true,
-        )
-        .usage(1_000_000);
+        let with_images = RequestAssembly::new(&conversation, None, &input, true).usage(1_000_000);
+        let blind = RequestAssembly::new(&conversation, None, &input, false);
 
         assert_eq!(with_images.conversation_tokens, 75);
-        assert_eq!(with_images.reference_image_tokens, REFERENCE_IMAGE_TOKENS);
+        assert_eq!(with_images.image_tokens, IMAGE_TOKENS);
         // The instructions and tool definitions alone are thousands of
-        // tokens; the image-reading model is offered one more tool.
+        // tokens; the image-reading model is offered more tools.
         assert!(without_images.request_tokens > 1_000, "{without_images:?}");
         assert!(with_images.request_tokens > without_images.request_tokens);
         assert_eq!(
             with_images.used_tokens(),
-            with_images.conversation_tokens
-                + with_images.reference_image_tokens
-                + with_images.request_tokens
+            with_images.conversation_tokens + with_images.image_tokens + with_images.request_tokens
         );
+        // A model that cannot read images is not sent them, and is not
+        // charged for them; it is told their names.
+        assert_eq!(blind.usage(1_000_000).image_tokens, 0);
+        let ModelItem::User { text, images } = blind.items.last().unwrap() else {
+            panic!("the request is last");
+        };
+        assert!(images.is_empty());
+        assert!(
+            text.contains("[Attached images: \"Flange\" (stored-Flange.png)]"),
+            "{text}"
+        );
+        let ModelItem::User { images, .. } =
+            RequestAssembly::new(&conversation, None, &input, true)
+                .items
+                .pop()
+                .unwrap()
+        else {
+            panic!("the request is last");
+        };
+        assert_eq!(images, [attachment("Flange").image().unwrap()]);
+    }
+
+    fn attachment(name: &str) -> ImageAttachment {
+        ImageAttachment {
+            file: format!("stored-{name}.png"),
+            name: name.to_string(),
+            media_type: "image/png".into(),
+            bytes: vec![0; 16],
+        }
+    }
+
+    /// A reference library held in memory, recording what the loop did
+    /// to it.
+    #[derive(Default)]
+    struct FakeReferences {
+        files: Mutex<Vec<(String, Option<String>, ImageData)>>,
+    }
+
+    impl ReferenceSource for FakeReferences {
+        fn list(&self) -> Result<Vec<ReferenceListing>, String> {
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(file, description, _)| ReferenceListing {
+                    file: file.clone(),
+                    description: description.clone(),
+                })
+                .collect())
+        }
+
+        fn read(&self, file: &str) -> Result<ImageData, String> {
+            self.files
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(name, _, _)| name == file)
+                .map(|(_, _, image)| image.clone())
+                .ok_or_else(|| format!("no {file}"))
+        }
+
+        fn keep(&self, image: &ImageData, file: &str, description: &str) -> Result<String, String> {
+            let name = format!("{file}.png");
+            self.files.lock().unwrap().push((
+                name.clone(),
+                Some(description.to_string()),
+                image.clone(),
+            ));
+            Ok(name)
+        }
+
+        fn describe(&self, file: &str, description: &str) -> Result<(), String> {
+            let mut files = self.files.lock().unwrap();
+            let entry = files
+                .iter_mut()
+                .find(|(name, _, _)| name == file)
+                .ok_or_else(|| format!("no {file}"))?;
+            entry.1 = Some(description.to_string());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn the_model_lists_reads_and_keeps_reference_images() {
+        let references = FakeReferences::default();
+        references.files.lock().unwrap().push((
+            "old.png".into(),
+            None,
+            ImageData {
+                media_type: "image/png".into(),
+                bytes: vec![9],
+            },
+        ));
+        let list = Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c1".into(),
+                name: REFERENCE_IMAGES.into(),
+                arguments: serde_json::json!({}),
+            }],
+        });
+        let read = Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "c2".into(),
+                name: REFERENCE_IMAGES.into(),
+                arguments: serde_json::json!({"file": "old.png"}),
+            }],
+        });
+        let keep = Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "c3".into(),
+                    name: KEEP_REFERENCE.into(),
+                    arguments: serde_json::json!({
+                        "source": {"attachment": {"file": "stored-Flange.png"}},
+                        "file": "flange-top",
+                        "description": "Top view of the flange."
+                    }),
+                },
+                ToolCall {
+                    id: "c4".into(),
+                    name: KEEP_REFERENCE.into(),
+                    arguments: serde_json::json!({
+                        "source": {"library": {"file": "old.png"}},
+                        "description": "An older sketch."
+                    }),
+                },
+                ToolCall {
+                    id: "c5".into(),
+                    name: KEEP_REFERENCE.into(),
+                    arguments: serde_json::json!({
+                        "source": {"attachment": {"file": "stored-Nope.png"}},
+                        "description": "x"
+                    }),
+                },
+            ],
+        });
+        let mut model = ScriptedModel::new([list, read, keep, text("Kept it.")]);
+        model.accepts_images = true;
+        let project = tempfile::tempdir().unwrap();
+        let mut executor = FakeExecutor::new([]);
+        let mut render = NoRender;
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            references: &references,
+            script_path: project.path().join("part.py"),
+            cancel: CancelFlag::new(),
+        };
+        // The drawing was attached two turns ago; keeping it now must
+        // still find it.
+        let mut conversation = Conversation::new();
+        conversation.push(
+            Message::user_chat("here is the drawing").with_attachments(vec![attachment("Flange")]),
+        );
+        conversation.push(Message::ai_response("Noted."));
+        let input = chat("keep that drawing");
+        let mut finished = Vec::new();
+        let outcome = runner
+            .run(&conversation, &input, |event| {
+                if let TurnEvent::ToolFinished {
+                    call_id,
+                    output,
+                    failed,
+                } = event
+                {
+                    finished.push((call_id, output, failed));
+                }
+            })
+            .await;
+        assert_eq!(outcome, TurnOutcome::Answered);
+
+        assert_eq!(finished.len(), 5);
+        assert!(
+            finished[0].1.contains("old.png: (no description yet"),
+            "{}",
+            finished[0].1
+        );
+        assert_eq!(finished[1].1, "old.png; the image follows");
+        assert!(!finished[1].2);
+        assert_eq!(
+            finished[2].1,
+            "kept as flange-top.png and described in the index"
+        );
+        assert_eq!(finished[3].1, "old.png is described in the index");
+        assert!(finished[4].2, "an unknown attachment file fails");
+        assert!(finished[4].1.contains("stored-Nope.png"));
+
+        // The read image reached the model as a user item after the
+        // tool result, like a render does.
+        let requests = model.requests.lock().unwrap();
+        let after_read = &requests[2].items;
+        let image_item = after_read
+            .iter()
+            .rev()
+            .find(|item| matches!(item, ModelItem::User { images, .. } if !images.is_empty()))
+            .expect("the reference image follows its tool result");
+        assert!(
+            matches!(image_item, ModelItem::User { text, images } if text.contains("reference image") && images[0].bytes == [9])
+        );
+
+        let files = references.files.lock().unwrap();
+        assert_eq!(files[0].1.as_deref(), Some("An older sketch."));
+        assert_eq!(files[1].0, "flange-top.png");
+        assert_eq!(files[1].2.bytes, vec![0; 16]);
+    }
+
+    #[test]
+    fn history_replays_attached_images_only_to_models_that_read_them() {
+        let mut conversation = Conversation::new();
+        conversation
+            .push(Message::user_chat("like this").with_attachments(vec![attachment("Flange")]));
+        conversation.push(
+            Message::spatial_comment("this face", Vec::new())
+                .with_attachments(vec![attachment("Detail")]),
+        );
+        let seeing = history_items(&conversation, true);
+        let blind = history_items(&conversation, false);
+        for (index, name) in ["Flange", "Detail"].into_iter().enumerate() {
+            let ModelItem::User { text, images } = &seeing[index] else {
+                panic!("a user item");
+            };
+            assert_eq!(images.len(), 1);
+            assert!(
+                text.contains(&format!(
+                    "[Attached images: \"{name}\" (stored-{name}.png)]"
+                )),
+                "{text}"
+            );
+            let ModelItem::User { text, images } = &blind[index] else {
+                panic!("a user item");
+            };
+            assert!(images.is_empty());
+            assert!(text.contains(name));
+        }
     }
 
     #[test]
@@ -2024,6 +2481,7 @@ mod tests {
             executor: &mut executor,
             docs: &FakeDocs,
             render: &mut render,
+            references: &NoReferences,
             script_path: script,
             cancel: CancelFlag::new(),
         };
@@ -2032,7 +2490,13 @@ mod tests {
             .await;
         assert_eq!(outcome, TurnOutcome::Answered);
         let requests = model.requests.lock().unwrap();
-        assert_eq!(requests[0].tools.len(), 3, "the render tool is offered");
+        assert!(
+            requests[0]
+                .tools
+                .iter()
+                .any(|tool| tool.name == RENDER_VIEW),
+            "the render tool is offered"
+        );
         let second = &requests[1];
         assert!(
             matches!(&second.items[4], ModelItem::ToolResult { call_id, .. } if call_id == "c1")
@@ -2147,6 +2611,7 @@ mod tests {
             executor: &mut executor,
             docs: &FakeDocs,
             render: &mut render,
+            references: &NoReferences,
             script_path: project.path().join("part.py"),
             cancel: CancelFlag::new(),
         };
@@ -2247,6 +2712,7 @@ mod tests {
             executor: &mut executor,
             docs: &FakeDocs,
             render: &mut render,
+            references: &NoReferences,
             script_path: project.path().join("part.py"),
             cancel: CancelFlag::new(),
         };
@@ -2321,7 +2787,7 @@ mod tests {
         conversation.push(Message::design_change(
             "Set width to 90 in the parameters panel.",
         ));
-        let items = history_items(&conversation);
+        let items = history_items(&conversation, false);
         assert_eq!(items.len(), 5);
         assert!(matches!(&items[1], ModelItem::ToolCall(call) if call.id == "c1"));
         assert!(matches!(&items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1"));

@@ -28,7 +28,7 @@ use crate::orchestrator::{
     OrchestratorCommand, OrchestratorHandle, OrchestratorResult, spawn_orchestrator,
 };
 use crate::parts::{self, OpenPart};
-use crate::reference_images::ReferenceImages;
+use crate::reference_images::load_attachment_bytes;
 use crate::turn::{RenderSource, TurnInput};
 use crate::validity::{ExportDecision, export_decision, export_warning};
 
@@ -152,7 +152,6 @@ impl Busy {
 /// An open project folder.
 pub struct Project {
     pub dir: PathBuf,
-    pub reference_images: ReferenceImages,
     pub ai_accepts_images: bool,
     /// The part of the folder currently being modelled.
     part: OpenPart,
@@ -258,7 +257,6 @@ impl Project {
         let history = load_history(&dir);
 
         let mut project = Self {
-            reference_images: ReferenceImages::load(&dir),
             ai_accepts_images,
             parts: parts::list_parts(&dir),
             part,
@@ -422,14 +420,9 @@ impl Project {
     /// shown twice.
     pub fn start_turn(
         &mut self,
-        mut input: TurnInput,
+        input: TurnInput,
         history: Conversation,
     ) -> Result<CancelFlag, String> {
-        input.images = if self.ai_accepts_images {
-            self.reference_images.inputs()
-        } else {
-            Vec::new()
-        };
         let cancel = CancelFlag::new();
         self.send(OrchestratorCommand::Turn {
             input,
@@ -731,14 +724,21 @@ fn write_replacing(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     written
 }
 
+/// The saved conversation with its attached images loaded from the
+/// attachment store, so replaying it shows the model every picture again.
 fn load_conversation(dir: &Path) -> Conversation {
-    match std::fs::read_to_string(dir.join(CONVERSATION_FILENAME)) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|error| {
-            log::warn!("Ignoring unreadable conversation: {error}");
-            Conversation::new()
-        }),
-        Err(_) => Conversation::new(),
+    let mut conversation: Conversation =
+        match std::fs::read_to_string(dir.join(CONVERSATION_FILENAME)) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|error| {
+                log::warn!("Ignoring unreadable conversation: {error}");
+                Conversation::new()
+            }),
+            Err(_) => Conversation::new(),
+        };
+    for message in conversation.messages_mut() {
+        load_attachment_bytes(dir, &mut message.attachments);
     }
+    conversation
 }
 
 fn archive_conversation(dir: &Path, conversation: &Conversation) -> Result<PathBuf, String> {
@@ -832,7 +832,6 @@ mod tests {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (_result_tx, result_rx) = mpsc::channel();
         let project = Project {
-            reference_images: ReferenceImages::load(&dir),
             ai_accepts_images: false,
             parts: Vec::new(),
             part: OpenPart::Named("bracket.py".to_string()),
@@ -865,61 +864,46 @@ mod tests {
     }
 
     #[test]
-    fn project_references_survive_fresh_conversations_and_reopening_and_feed_each_turn() {
+    fn attached_images_come_back_with_their_messages_when_the_project_reopens() {
         let dir = tempfile::tempdir().unwrap();
-        let source_dir = tempfile::tempdir().unwrap();
-        let source = source_dir.path().join("drawing.png");
+        let mut bytes = Vec::new();
         image::RgbImage::from_pixel(48, 24, image::Rgb([20, 80, 160]))
-            .save(&source)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
             .unwrap();
-        let bytes = std::fs::read(&source).unwrap();
-        crate::reference_images::attach(dir.path(), &source).unwrap();
-        source_dir.close().unwrap();
-        let (mut project, commands) = project_for_test(dir.path().to_path_buf());
-        project.ai_accepts_images = true;
-        for _ in 0..2 {
-            project
-                .conversation
-                .push(Message::user_chat("old-session-marker"));
-            project.start_fresh_conversation().unwrap();
-            project
-                .start_turn(TurnInput::default(), project.conversation.clone())
-                .unwrap();
-            let OrchestratorCommand::Turn {
-                input,
-                conversation,
-                ..
-            } = commands.recv().unwrap()
-            else {
-                panic!("expected a turn");
-            };
-            assert!(
-                !serde_json::to_string(&conversation)
-                    .unwrap()
-                    .contains("old-session-marker")
-            );
-            assert_eq!(input.images.len(), 1);
-            assert_eq!(input.images[0].bytes, bytes);
-        }
+        let staged = crate::reference_images::stage_bytes("Flange".into(), bytes.clone()).unwrap();
+        let attachment = crate::reference_images::store_attachment(dir.path(), &staged).unwrap();
+        let (mut project, _commands) = project_for_test(dir.path().to_path_buf());
+        project
+            .conversation
+            .push(Message::user_chat("match this").with_attachments(vec![attachment.clone()]));
+        project.save_conversation().unwrap();
+        let saved = std::fs::read_to_string(dir.path().join(CONVERSATION_FILENAME)).unwrap();
+        assert!(saved.contains(&attachment.file));
+        assert!(
+            !saved.contains("\"bytes\""),
+            "the conversation file holds the name, not the bytes"
+        );
         drop(project);
-        let (mut reopened, commands) = project_for_test(dir.path().to_path_buf());
-        reopened.ai_accepts_images = true;
-        reopened
-            .start_turn(TurnInput::default(), Conversation::new())
-            .unwrap();
-        let OrchestratorCommand::Turn { input, .. } = commands.recv().unwrap() else {
-            panic!("expected a turn");
-        };
-        assert_eq!(input.images[0].bytes, bytes);
-        reopened.ai_accepts_images = false;
-        reopened
-            .start_turn(TurnInput::default(), Conversation::new())
-            .unwrap();
-        let OrchestratorCommand::Turn { input, .. } = commands.recv().unwrap() else {
-            panic!("expected a turn");
-        };
-        assert!(input.images.is_empty());
-        assert_eq!(reopened.reference_images.images.len(), 1);
+
+        let reopened = load_conversation(dir.path());
+        let message = &reopened.messages()[0];
+        assert_eq!(message.attachments[0].name, "Flange");
+        assert_eq!(message.attachments[0].bytes, bytes);
+
+        // A file gone from the store leaves the message naming the image
+        // without any bytes to send.
+        std::fs::remove_file(
+            dir.path()
+                .join(".cadmark/attachments")
+                .join(&attachment.file),
+        )
+        .unwrap();
+        let reopened = load_conversation(dir.path());
+        assert_eq!(reopened.messages()[0].attachments[0].name, "Flange");
+        assert!(reopened.messages()[0].images().is_empty());
     }
 
     fn part_for_export_test(model: ModelFile, validity: Vec<SolidValidity>) -> LoadedPart {

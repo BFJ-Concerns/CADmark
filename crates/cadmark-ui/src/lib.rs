@@ -11,7 +11,6 @@ pub mod code_panel;
 pub mod overlay;
 pub mod parameters;
 pub mod part_name_dialog;
-pub mod reference_images;
 pub mod settings_dialog;
 pub mod start_view;
 pub mod status;

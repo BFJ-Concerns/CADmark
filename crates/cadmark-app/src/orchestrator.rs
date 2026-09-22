@@ -16,8 +16,10 @@ use cadmark_core::sketch::SketchPlane;
 use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 
+use crate::reference_images::ReferenceLibrary;
 use crate::turn::{
-    DocSource, RenderSource, ScriptExecutor, TurnEvent, TurnInput, TurnOutcome, TurnRunner,
+    DocSource, ReferenceListing, ReferenceSource, RenderSource, ScriptExecutor, TurnEvent,
+    TurnInput, TurnOutcome, TurnRunner,
 };
 
 /// Commands sent from the UI thread to the worker.
@@ -101,6 +103,36 @@ impl ScriptExecutor for WorkerExecutor {
     }
 }
 
+impl ReferenceSource for ReferenceLibrary {
+    fn list(&self) -> Result<Vec<ReferenceListing>, String> {
+        Ok(self
+            .entries()?
+            .into_iter()
+            .map(|entry| ReferenceListing {
+                file: entry.file,
+                description: entry.description,
+            })
+            .collect())
+    }
+
+    fn read(&self, file: &str) -> Result<cadmark_core::message::ImageData, String> {
+        ReferenceLibrary::read(self, file)
+    }
+
+    fn keep(
+        &self,
+        image: &cadmark_core::message::ImageData,
+        file: &str,
+        description: &str,
+    ) -> Result<String, String> {
+        ReferenceLibrary::keep(self, image, file, description)
+    }
+
+    fn describe(&self, file: &str, description: &str) -> Result<(), String> {
+        ReferenceLibrary::describe(self, file, description)
+    }
+}
+
 impl DocSource for cadmark_bridge::doc_lookup::DocLookup {
     fn lookup(
         &self,
@@ -171,11 +203,13 @@ impl Orchestrator {
             }
         };
         let script_path = self.script_path();
+        let references = ReferenceLibrary::of_project(&self.project_dir);
         let mut runner = TurnRunner {
             model: &ai.model,
             executor: &mut self.executor,
             docs: &ai.doc_lookup,
             render: self.render.as_mut(),
+            references: &references,
             script_path,
             cancel,
         };

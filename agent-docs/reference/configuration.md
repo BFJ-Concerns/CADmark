@@ -16,7 +16,7 @@ Source: `crates/cadmark-app/src/user_settings.rs:86–99`, `crates/cadmark-app/s
 |-------|------|---------|-------------|
 | `ai.base_url` | string | (none) | OpenAI Responses-compatible base URL |
 | `ai.model` | string | (none) | Model name |
-| `ai.accepts_images` | bool | `false` | Whether the model reads images; enables the render and reference-image tools |
+| `ai.accepts_images` | bool | `false` | Whether the model reads images; sends message attachments and enables the render and reference-library tools |
 | `ai.allow_insecure_http` | bool | `false` | Permit a plain-HTTP endpoint (local model servers) |
 | `limits.wall_clock` | duration | 120 s | Script execution wall-clock ceiling |
 | `limits.memory_bytes` | integer | 4294967296 (4 GB) | Script execution resident-memory ceiling in bytes |
