@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, Once};
+use std::time::Instant;
 
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::mesh::TessellatedMesh;
@@ -230,6 +231,7 @@ fn execute_script_source_named(
         let execution = (|| {
             let builtins = py.import("builtins")?;
             let code = builtins.call_method1("compile", (source, filename, "exec"))?;
+            let started = Instant::now();
             builtins
                 .call_method1("exec", (&code, &globals, &globals))
                 .map_err(|error| {
@@ -237,6 +239,7 @@ fn execute_script_source_named(
                     log::error!("Python execution failed: {message}");
                     ExecutionError::Script(message)
                 })?;
+            log::info!("Script ran in {:.2?}", started.elapsed());
 
             let keys: Vec<String> = globals
                 .keys()
@@ -276,16 +279,26 @@ fn capture_result(
         crate::tessellation::ScriptResult::Solids(shapes) => {
             let mut parts = Vec::with_capacity(shapes.len());
             for (id, (name, shape)) in shapes.into_iter().enumerate() {
+                let mut stage = Stopwatch::start();
                 let (_raw, ledger, sketch_lineage) =
                     crate::provenance::finalise(py, session, &shape, source)?;
+                let provenance = stage.lap();
                 let mesh = crate::tessellation::tessellate_shape(py, globals, &shape)?;
                 validate_tessellation_ids(&mesh, &ledger)?;
+                let tessellation = stage.lap();
                 let ocp_shape = crate::tessellation::unwrap_shape(&shape)?;
                 let (descriptors, summary) =
                     crate::measurement::measure(py, &ocp_shape, session.bound(py))?;
                 let validity = crate::measurement::solid_validity(py, &ocp_shape)?;
+                let measurement = stage.lap();
                 let file = keep_model(py, &shape, scratch_dir)?;
-                log::info!("Part {name} measured: {}", summary.describe());
+                let kept = stage.lap();
+                log::info!(
+                    "Part {name} measured: {} (provenance {provenance:.2?}, \
+                     tessellation {tessellation:.2?}, measurement {measurement:.2?}, \
+                     kept {kept:.2?})",
+                    summary.describe()
+                );
                 parts.push(ExecutedPart {
                     id: id as u32,
                     name,
@@ -334,6 +347,23 @@ fn capture_result(
                 }),
             })
         }
+    }
+}
+
+/// Elapsed time per stage of one capture, for the execution log.
+struct Stopwatch(Instant);
+
+impl Stopwatch {
+    fn start() -> Self {
+        Self(Instant::now())
+    }
+
+    /// The time since the previous lap (or the start), and restart.
+    fn lap(&mut self) -> std::time::Duration {
+        let now = Instant::now();
+        let elapsed = now - self.0;
+        self.0 = now;
+        elapsed
     }
 }
 
