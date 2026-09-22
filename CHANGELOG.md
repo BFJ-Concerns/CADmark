@@ -68,6 +68,14 @@ All notable changes to this project will be documented in this file.
   it without cutting
 
 ### Changed
+- Script execution no longer spends most of its time in CADmark's own
+  bookkeeping: a moderately complex part that took over two minutes now
+  builds in about the time build123d itself needs. The provenance
+  instrumentation looks moved copies of a shape up by hash instead of
+  scanning every recorded shape, reads the kernel's history lists without
+  triggering a C++ exception per query, and the exact bounding box is
+  searched only on the faces and edges that can extend it. The execution
+  log now states how long the script and each capture stage took
 - Version numbers follow semantic versioning, starting at 0.1.0 in place of
   the earlier date-derived scheme
 - The top-level Export entries of a multi-part model write the part

@@ -7,6 +7,7 @@
 // measurement, export — runs inside that child. No type crossing the
 // boundary names build123d, OCP, or Python.
 
+mod bounds;
 pub mod execution;
 pub mod export;
 pub mod measurement;

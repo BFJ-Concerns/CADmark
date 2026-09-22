@@ -50,7 +50,11 @@ from OCP.TopAbs import (
     TopAbs_VERTEX as _cadmark_vertex,
 )
 from OCP.TopExp import TopExp as _cadmark_top_exp
-from OCP.TopTools import TopTools_IndexedMapOfShape as _cadmark_indexed_map
+from OCP.TopLoc import TopLoc_Location as _cadmark_location_type
+from OCP.TopTools import (
+    TopTools_IndexedMapOfShape as _cadmark_indexed_map,
+    TopTools_ListOfShape as _cadmark_shape_list,
+)
 from OCP.TopoDS import TopoDS_Shape as _cadmark_shape_type
 from OCP.Standard import Standard_TypeMismatch as _cadmark_ocp_type_mismatch
 
@@ -163,17 +167,40 @@ def _cadmark_unique_candidates(candidates):
     return result
 
 
+# Stripping a shape's location leaves its underlying shape alone, so two
+# shapes are partners (`IsPartner`) exactly when their location-stripped
+# forms are the same key in an indexed map.
+_cadmark_no_location = _cadmark_location_type()
+
+
+def _cadmark_partner_key(shape):
+    return shape.Located(_cadmark_no_location)
+
+
 class _CadmarkShapeTable:
-    """Values keyed by shape identity (TShape and location, orientation ignored)."""
+    """Values keyed by shape identity (TShape and location, orientation ignored).
+
+    A second index groups the entries by partner identity — the same
+    underlying shape at any location — so a partner lookup is a hash probe
+    rather than a scan of every entry.
+    """
 
     def __init__(self):
         self.index = _cadmark_indexed_map()
         self.values = []
+        self.partners = _cadmark_indexed_map()
+        # One list per partner key: the positions of its entries, in
+        # insertion order.
+        self.partner_positions = []
 
     def slot(self, shape, factory):
         position = self.index.Add(shape)
         if position > len(self.values):
             self.values.append(factory())
+            partner = self.partners.Add(_cadmark_partner_key(shape))
+            if partner > len(self.partner_positions):
+                self.partner_positions.append([])
+            self.partner_positions[partner - 1].append(position)
         return self.values[position - 1]
 
     def get(self, shape):
@@ -181,6 +208,14 @@ class _CadmarkShapeTable:
         if position == 0:
             return None
         return self.values[position - 1]
+
+    def partner_values(self, shape):
+        """The values of every entry sharing this shape's underlying shape,
+        the exact entry included, in insertion order."""
+        partner = self.partners.FindIndex(_cadmark_partner_key(shape))
+        if partner == 0:
+            return []
+        return [self.values[position - 1] for position in self.partner_positions[partner - 1]]
 
     def __len__(self):
         return len(self.values)
@@ -301,8 +336,8 @@ class _CadmarkSession:
         record = self.registry.get(shape)
         candidates = list(record["candidates"]) if record else []
         if not candidates and partner_fallback:
-            for record in self.registry.values:
-                if record["allow_partner"] and shape.IsPartner(record["shape"]):
+            for record in self.registry.partner_values(shape):
+                if record["allow_partner"]:
                     candidates.extend(record["candidates"])
         return _cadmark_unique_candidates(candidates)
 
@@ -379,10 +414,8 @@ class _CadmarkSession:
         if direct:
             return set(direct)
         found = set()
-        for position in range(1, self.sketch_registry.index.Extent() + 1):
-            candidate = self.sketch_registry.index.FindKey(position)
-            if shape.IsPartner(candidate):
-                found |= self.sketch_registry.values[position - 1]
+        for labels in self.sketch_registry.partner_values(shape):
+            found |= labels
         return found
 
     def register_sketch_ancestry(self, shape, sketch_ids):
@@ -403,12 +436,9 @@ class _CadmarkSession:
         direct = self.sketch_barriers.get(shape)
         if direct and direct[0] is not None:
             return direct[0]
-        for position in range(1, self.sketch_barriers.index.Extent() + 1):
-            candidate = self.sketch_barriers.index.FindKey(position)
-            if shape.IsPartner(candidate):
-                existing = self.sketch_barriers.values[position - 1]
-                if existing[0] is not None:
-                    return existing[0]
+        for existing in self.sketch_barriers.partner_values(shape):
+            if existing[0] is not None:
+                return existing[0]
         return None
 
     @staticmethod
@@ -519,18 +549,42 @@ class _CadmarkSession:
         return None
 
     @staticmethod
-    def history_results(builder, method, shape):
+    def shape_list(shapes):
+        """An OCCT shape list as a Python list.
+
+        Iterating the binding's list ends every pass with a C++ exception
+        whose unwinding costs more than the maker query itself; draining a
+        copy through First/RemoveFirst never raises. The maker's own list
+        is left untouched.
+        """
+        if not isinstance(shapes, _cadmark_shape_list):
+            return list(shapes)
+        size = shapes.Size()
+        if size == 0:
+            return []
+        if size == 1:
+            return [shapes.First()]
+        drained = _cadmark_shape_list()
+        drained.Assign(shapes)
+        result = []
+        while not drained.IsEmpty():
+            result.append(drained.First())
+            drained.RemoveFirst()
+        return result
+
+    @classmethod
+    def history_results(cls, builder, method, shape):
         # A maker that answers only for one kind of input (the 2D fillet
         # builder speaks of edges alone) raises an OCCT type mismatch for
         # the others; that is "no history for this input", not a fault.
         try:
             result = getattr(builder, method)(shape)
-            return list(result)
+            return cls.shape_list(result)
         except (AttributeError, TypeError, RuntimeError, _cadmark_ocp_type_mismatch):
             try:
                 history = builder.History()
                 result = getattr(history, method)(shape)
-                return list(result)
+                return cls.shape_list(result)
             except (AttributeError, TypeError, RuntimeError, _cadmark_ocp_type_mismatch):
                 return []
 

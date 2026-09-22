@@ -30,15 +30,11 @@ pub(crate) fn prepare_display_tessellation(
     py: Python<'_>,
     namespace: &Bound<'_, PyDict>,
 ) -> Result<(), TessellationError> {
+    crate::bounds::define_exact_bounds(py, namespace).map_err(TessellationError::Python)?;
     py.run(
         c"
-from OCP.Bnd import Bnd_Box
-from OCP.BRepBndLib import BRepBndLib
-
-
 def _cadmark_display_deflection(shape):
-    box = Bnd_Box()
-    BRepBndLib.AddOptimal_s(shape, box, False, False)
+    box = _cadmark_exact_bounds(shape)
     if box.IsVoid():
         return 1e-7, 0.1
     bounds = box.Get()

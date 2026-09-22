@@ -15,10 +15,8 @@ use crate::protocol::ModelFile;
 /// Measures every face, edge and vertex in the final topology maps, in the
 /// same order the provenance ledger and picking IDs use.
 const MEASUREMENT_SOURCE: &std::ffi::CStr = c"
-from OCP.Bnd import Bnd_Box
 from OCP.BRep import BRep_Tool
 from OCP.BRepAdaptor import BRepAdaptor_Curve, BRepAdaptor_Surface
-from OCP.BRepBndLib import BRepBndLib
 from OCP.BRepCheck import BRepCheck_Analyzer
 from OCP.BRepExtrema import BRepExtrema_DistShapeShape
 from OCP.BRepGProp import BRepGProp, BRepGProp_Face
@@ -146,9 +144,7 @@ def measure_model(shape, face_count, edge_count, vertex_count):
     BRepGProp.VolumeProperties_s(shape, props)
     # Measured from the exact surfaces: the triangulation route pads the box
     # by the mesh tolerance, which shows up as a 60.05 mm plate.
-    box = Bnd_Box()
-    BRepBndLib.AddOptimal_s(shape, box, False, False)
-    x_min, y_min, z_min, x_max, y_max, z_max = box.Get()
+    x_min, y_min, z_min, x_max, y_max, z_max = _cadmark_exact_bounds(shape).Get()
     return {
         'volume': props.Mass(),
         'bounds_min': [x_min, y_min, z_min],
@@ -239,6 +235,7 @@ pub(crate) fn measure(
     session: &Bound<'_, PyAny>,
 ) -> PyResult<(GeometryDescriptors, ModelSummary)> {
     let namespace = PyDict::new(py);
+    crate::bounds::define_exact_bounds(py, &namespace)?;
     py.run(MEASUREMENT_SOURCE, Some(&namespace), None)?;
     let measure = namespace
         .get_item("measure")?
