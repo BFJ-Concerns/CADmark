@@ -77,7 +77,7 @@ Open Settings (the gear button, or `Ctrl+,`) and fill in:
 - **Model** — the model your endpoint serves.
 - **Credential** — the API key. It is stored in a separate file with restricted permissions, never inside the settings file.
 
-Tick "The model reads images" if the model supports vision — this lets the AI render and inspect the model it builds, and sends any PNG or JPEG reference images from the project's `references/` folder.
+Tick "The model reads images" if the model supports vision — this lets the AI render and inspect the model it builds, read the images you attach to messages, and keep a reference library for the project.
 
 Save, and the toolbar shows the model name where "AI off" was.
 

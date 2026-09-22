@@ -53,14 +53,7 @@ pub enum BackendError {
     Cancelled,
 }
 
-/// An image the model reads, already encoded.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImageData {
-    /// `image/png` or `image/jpeg`.
-    pub media_type: String,
-    /// The encoded bytes.
-    pub bytes: Vec<u8>,
-}
+pub use cadmark_core::message::ImageData;
 
 /// One item of the conversation the model is shown, in order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

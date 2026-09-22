@@ -42,6 +42,48 @@ pub struct ToolActivity {
     pub finished: Option<DateTime<Utc>>,
 }
 
+/// An image the model reads, already encoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageData {
+    /// `image/png` or `image/jpeg`.
+    pub media_type: String,
+    /// The encoded bytes.
+    pub bytes: Vec<u8>,
+}
+
+/// Images reserve a conservative fixed budget each, since providers do not
+/// share one way of pricing an image into the context window.
+pub const IMAGE_TOKENS: usize = 765;
+
+/// An image the user attached to a message. The conversation file records
+/// the file's name in the project's attachment store, never its bytes; the
+/// bytes are loaded from the store when the project opens and travel with
+/// the message in memory, so the model sees the image again whenever the
+/// message is replayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    /// The file name in the attachment store.
+    pub file: String,
+    /// The name the user knows it by: the original file name, or a label
+    /// for a pasted image.
+    pub name: String,
+    /// `image/png` or `image/jpeg`.
+    pub media_type: String,
+    /// The encoded bytes; empty when the store no longer has the file.
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
+}
+
+impl ImageAttachment {
+    /// The image as the model reads it, when the bytes are present.
+    pub fn image(&self) -> Option<ImageData> {
+        (!self.bytes.is_empty()).then(|| ImageData {
+            media_type: self.media_type.clone(),
+            bytes: self.bytes.clone(),
+        })
+    }
+}
+
 /// The kind of message — determines visual treatment in the chat pane.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MessageKind {
@@ -79,6 +121,9 @@ pub struct Message {
     pub kind: MessageKind,
     pub text: String,
     pub timestamp: DateTime<Utc>,
+    /// Images the user attached to a chat message or spatial comment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ImageAttachment>,
 }
 
 impl Message {
@@ -88,11 +133,27 @@ impl Message {
             kind,
             text: text.into(),
             timestamp: Utc::now(),
+            attachments: Vec::new(),
         }
     }
 
     pub fn user_chat(text: impl Into<String>) -> Self {
         Self::new(MessageKind::UserChat, text)
+    }
+
+    /// The message with these images attached.
+    pub fn with_attachments(mut self, attachments: Vec<ImageAttachment>) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    /// The attached images the model can read: those whose bytes are
+    /// present.
+    pub fn images(&self) -> Vec<ImageData> {
+        self.attachments
+            .iter()
+            .filter_map(ImageAttachment::image)
+            .collect()
     }
 
     pub fn spatial_comment(text: impl Into<String>, anchors: Vec<GeometryContext>) -> Self {
@@ -171,6 +232,10 @@ impl Conversation {
         &self.messages
     }
 
+    pub fn messages_mut(&mut self) -> &mut [Message] {
+        &mut self.messages
+    }
+
     pub fn message_mut(&mut self, id: MessageId) -> Option<&mut Message> {
         self.messages.iter_mut().find(|message| message.id == id)
     }
@@ -231,6 +296,7 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 impl Message {
     fn estimated_tokens(&self) -> usize {
+        let image_tokens = self.attachments.len() * IMAGE_TOKENS;
         let mut characters = self.text.chars().count();
         if let MessageKind::ToolCalls(activities) = &self.kind {
             for activity in activities {
@@ -244,18 +310,21 @@ impl Message {
                     .unwrap_or_default();
             }
         }
-        characters.div_ceil(4)
+        characters.div_ceil(4) + image_tokens
     }
 }
 
 /// The portion of a provider context window the next request will occupy,
-/// as it is assembled: the saved conversation, the reference images, and
-/// everything else a request carries — the instructions, the tool
-/// definitions, the current script, the examples, and the words being sent.
+/// as it is assembled: the saved conversation with the images attached to
+/// it, the images going with this request, and everything else a request
+/// carries — the instructions, the tool definitions, the current script,
+/// the examples, and the words being sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextUsage {
     pub conversation_tokens: usize,
-    pub reference_image_tokens: usize,
+    /// The images attached to the request being sent, at the fixed
+    /// per-image reservation.
+    pub image_tokens: usize,
     /// What the request carries besides the conversation. Condensing the
     /// conversation does not reduce this.
     pub request_tokens: usize,
@@ -264,7 +333,7 @@ pub struct ContextUsage {
 
 impl ContextUsage {
     pub fn used_tokens(self) -> usize {
-        self.conversation_tokens + self.reference_image_tokens + self.request_tokens
+        self.conversation_tokens + self.image_tokens + self.request_tokens
     }
 
     pub fn percent(self) -> usize {
@@ -293,10 +362,7 @@ impl ContextUsage {
     /// script, instructions and images alone are at the threshold. The user
     /// needs to know, because no amount of condensing helps.
     pub fn request_alone_is_over_budget(self) -> bool {
-        Self::over_three_quarters(
-            self.request_tokens + self.reference_image_tokens,
-            self.window_tokens,
-        )
+        Self::over_three_quarters(self.request_tokens + self.image_tokens, self.window_tokens)
     }
 }
 
@@ -404,6 +470,36 @@ mod tests {
     }
 
     #[test]
+    fn attachments_are_saved_by_file_name_and_weigh_as_images() {
+        let attachment = ImageAttachment {
+            file: "20260922-101500-flange.png".into(),
+            name: "Flange".into(),
+            media_type: "image/png".into(),
+            bytes: vec![1, 2, 3],
+        };
+        let message = Message::user_chat("match this").with_attachments(vec![attachment.clone()]);
+        assert_eq!(message.images(), [attachment.image().unwrap()]);
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains("20260922-101500-flange.png"));
+        assert!(!json.contains("bytes"));
+        let reloaded: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(reloaded.attachments[0].file, attachment.file);
+        assert!(reloaded.attachments[0].bytes.is_empty());
+        assert!(reloaded.images().is_empty());
+
+        let plain = Message::user_chat("match this");
+        assert!(
+            !serde_json::to_string(&plain)
+                .unwrap()
+                .contains("attachments")
+        );
+        assert_eq!(
+            message.estimated_tokens(),
+            plain.estimated_tokens() + IMAGE_TOKENS
+        );
+    }
+
+    #[test]
     fn condensing_keeps_the_active_request_after_replacing_old_history() {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("Use a 5 mm wall."));
@@ -428,7 +524,7 @@ mod tests {
     fn condensing_is_asked_for_only_when_shortening_the_conversation_can_help() {
         let usage = |conversation_tokens, request_tokens| ContextUsage {
             conversation_tokens,
-            reference_image_tokens: 0,
+            image_tokens: 0,
             request_tokens,
             window_tokens: 1_000,
         };
