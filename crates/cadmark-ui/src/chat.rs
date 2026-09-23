@@ -539,55 +539,56 @@ impl ChatPane {
 }
 
 /// How much of the context window the next request occupies, with the
-/// breakdown on hover, and a warning when the request would be too large
-/// with no conversation at all — which no amount of condensing helps.
+/// breakdown on hover; under it, the provider's own count for the last
+/// request, and a warning when the request would be too large with no
+/// conversation at all — which no amount of condensing helps. Each sits
+/// on its own row and wraps, so the figures stay readable at the chat
+/// pane's narrowest width.
 fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage, measured: Option<ProviderUsage>) {
-    ui.horizontal(|ui| {
-        let over = context.request_alone_is_over_budget();
-        let colour = if over {
-            theme::WARNING
-        } else {
-            theme::TEXT_MUTED
-        };
+    let over = context.request_alone_is_over_budget();
+    let colour = if over {
+        theme::WARNING
+    } else {
+        theme::TEXT_MUTED
+    };
+    ui.label(
+        egui::RichText::new(format!(
+            "Context: {} / {} tokens ({}%)",
+            context.used_tokens(),
+            context.window_tokens,
+            context.percent()
+        ))
+        .small()
+        .color(colour),
+    )
+    .on_hover_text(context_breakdown(context));
+    if let Some(usage) = measured {
         ui.label(
-            egui::RichText::new(format!(
-                "Context: {} / {} tokens ({}%)",
-                context.used_tokens(),
-                context.window_tokens,
-                context.percent()
-            ))
-            .small()
-            .color(colour),
-        )
-        .on_hover_text(context_breakdown(context));
-        if let Some(usage) = measured {
-            ui.label(
-                egui::RichText::new(measured_usage_line(usage))
-                    .small()
-                    .color(theme::TEXT_MUTED),
-            )
-            .on_hover_text(
-                "What the provider reported for the last request of a turn: the tokens it \
-                 read, how many of those its cache served, and what the model wrote, \
-                 reasoning included. The estimate before it is CADmark's own.",
-            );
-        }
-        if over {
-            ui.label(
-                egui::RichText::new(
-                    "The script, instructions and images alone nearly fill the window; \
-                     condensing the conversation cannot make room. Raise the context \
-                     window in Settings or shorten the script.",
-                )
+            egui::RichText::new(measured_usage_line(usage))
                 .small()
-                .color(theme::WARNING),
-            );
-        }
-    });
+                .color(theme::TEXT_MUTED),
+        )
+        .on_hover_text(
+            "What the provider reported for the last request of a turn: the tokens it \
+             read, how many of those its cache served, and what the model wrote, \
+             reasoning included. The estimate above it is CADmark's own.",
+        );
+    }
+    if over {
+        ui.label(
+            egui::RichText::new(
+                "The script, instructions and images alone nearly fill the window; \
+                 condensing the conversation cannot make room. Raise the context \
+                 window in Settings or shorten the script.",
+            )
+            .small()
+            .color(theme::WARNING),
+        );
+    }
     ui.add_space(4.0);
 }
 
-/// The provider's own count for the last request, beside the estimate.
+/// The provider's own count for the last request, under the estimate.
 fn measured_usage_line(usage: ProviderUsage) -> String {
     format!(
         "Last request: {} read ({} cached) · {} written ({} reasoning)",
