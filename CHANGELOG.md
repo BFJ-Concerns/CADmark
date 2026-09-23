@@ -26,12 +26,17 @@ All notable changes to this project will be documented in this file.
   quiet stream, and a turn that ends during one records how long it was
 
 ### Changed
-- Each turn's request extends the previous turn's byte for byte: the
-  conversation keeps the item sequence the model last answered, and the
-  next request begins with it and renders only the chat messages added
-  since, so a provider's prompt cache serves the history rather than the
-  whole conversation being re-sent as new text. The renders the model
-  asked for stay in that sequence, so it sees them again
+- Model sessions preserve provider output in order, including encrypted
+  reasoning, assistant message metadata, original tool arguments and renders.
+  Tool results follow the complete response; later turns append context to the
+  saved history, including after reopening, permitting prompt-cache reuse
+- Turn-scoped skill instructions are appended without changing the system
+  instructions or the existing conversation prefix
+- Output-limited replies can continue from complete encrypted reasoning even
+  without visible text; missing usage details read "not reported" rather than zero
+- Changing the endpoint, model or image capability rebuilds history from chat
+  instead of sending opaque reasoning to a different backend; interrupted tool
+  calls receive a result before the model session is saved
 - The AI is asked to work in small steps — one change, one run, one look
   at the result — rather than one response that rewrites everything
 - The AI says what it is about to do before each tool call, or each run

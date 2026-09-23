@@ -226,6 +226,9 @@ impl Project {
         }
 
         let mut conversation = load_conversation(&dir);
+        if let Ok(services) = &ai {
+            conversation = conversation.for_model(services.model.session_identity().as_deref());
+        }
         if conversation.is_empty() {
             conversation.push(Message::notice(format!(
                 "Describe what you'd like to build, or click a face, edge or vertex of the \
@@ -866,6 +869,47 @@ mod tests {
             measurements_in_flight: 0,
         };
         (project, cmd_rx)
+    }
+
+    #[test]
+    fn reopening_with_a_different_model_discards_opaque_context_before_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut project, _commands) = project_for_test(dir.path().to_path_buf());
+        project
+            .conversation
+            .push(Message::user_chat("Keep the design"));
+        project.conversation.record_session_for(
+            vec![cadmark_core::model_session::ModelItem::ProviderOutput(
+                serde_json::json!({
+                    "type": "reasoning", "encrypted_content": "x".repeat(4000)
+                }),
+            )],
+            Some("another backend".into()),
+        );
+        project.save_conversation().unwrap();
+        drop(project);
+        let services = cadmark_bridge::build_ai_services(
+            cadmark_bridge::config::AiConfiguration {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "new-model".into(),
+                accepts_images: false,
+                allow_insecure_http: true,
+                reasoning_effort: None,
+            },
+            None,
+        )
+        .unwrap();
+        let mut reopened = Project::open(
+            dir.path().to_path_buf(),
+            None,
+            Ok(services),
+            ExecutionLimits::default(),
+            Box::new(crate::turn::NoRender),
+        );
+        assert!(reopened.conversation.session().items.is_empty());
+        assert_eq!(reopened.conversation.messages()[0].text, "Keep the design");
+        assert!(reopened.conversation.estimated_tokens() < 1000);
+        reopened.shut_down();
     }
 
     #[test]

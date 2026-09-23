@@ -2,11 +2,9 @@
 // last request carried and the reply it drew, kept so the next request
 // extends that sequence instead of rendering the chat afresh.
 //
-// Providers cache a request by its prefix. A turn whose request begins
-// with the previous request's bytes pays for the new items only; a turn
-// that rebuilds the history from the chat messages diverges where the
-// previous turn's own blocks sat and pays for the whole conversation
-// again. The chat messages stay the human record; this is the model's.
+// Keeping an unchanged prefix permits provider cache reuse while an entry
+// remains available. The chat messages are the human record; this is the
+// model's, including opaque continuation data.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +13,11 @@ use crate::message::{IMAGE_TOKENS, ImageData, MessageId, estimate_tokens};
 /// One item of the conversation the model is shown, in order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ModelItem {
+    /// A provider output item, retained unchanged for continuation, including
+    /// encrypted reasoning, message metadata and tool argument spelling.
+    ProviderOutput(serde_json::Value),
+    /// Instructions scoped to a turn, appended without changing the prefix.
+    Developer { text: String },
     /// What the user said, with any images attached.
     User {
         text: String,
@@ -34,7 +37,8 @@ impl ModelItem {
     pub fn estimated_tokens(&self) -> usize {
         match self {
             ModelItem::User { text, images } => estimate_tokens(text) + images.len() * IMAGE_TOKENS,
-            ModelItem::Assistant { text } => estimate_tokens(text),
+            ModelItem::Assistant { text } | ModelItem::Developer { text } => estimate_tokens(text),
+            ModelItem::ProviderOutput(item) => estimate_tokens(&item.to_string()),
             ModelItem::ToolCall(call) => {
                 estimate_tokens(&call.name) + estimate_tokens(&call.arguments.to_string())
             }
@@ -60,6 +64,9 @@ pub struct ToolCall {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelSession {
     pub items: Vec<ModelItem>,
+    /// Endpoint and model that issued opaque provider output. Old sessions have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     /// The last chat message the items account for; `None` when no turn
     /// has recorded a session.
     pub covers: Option<MessageId>,
@@ -84,16 +91,36 @@ pub struct ProviderUsage {
     pub input_tokens: usize,
     /// The part of `input_tokens` the provider served from its prompt
     /// cache.
-    pub cached_input_tokens: usize,
+    pub cached_input_tokens: Option<usize>,
     pub output_tokens: usize,
     /// The part of `output_tokens` the model spent reasoning before it
     /// wrote anything visible.
-    pub reasoning_tokens: usize,
+    pub reasoning_tokens: Option<usize>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opaque_reasoning_is_persisted_and_scoped_to_its_provider() {
+        use crate::message::{Conversation, Message};
+        let item = ModelItem::ProviderOutput(serde_json::json!({"type":"reasoning",
+            "summary":[],"encrypted_content":"opaque state"}));
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("Keep this history"));
+        conversation.record_session_for(vec![item.clone()], Some("endpoint-a|model-a".into()));
+        let json = serde_json::to_string(&conversation).unwrap();
+        let restored: Conversation = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.for_model(Some("endpoint-a|model-a")).replay().0,
+            [item]
+        );
+        let changed = restored.for_model(Some("endpoint-a|model-b"));
+        assert!(changed.replay().0.is_empty());
+        assert_eq!(changed.replay().1[0].text, "Keep this history");
+        assert!(restored.estimated_tokens() > 0);
+    }
 
     #[test]
     fn an_item_weighs_its_text_and_a_fixed_reservation_per_image() {
@@ -111,6 +138,7 @@ mod tests {
     #[test]
     fn a_session_round_trips_through_json_with_its_images() {
         let session = ModelSession {
+            identity: None,
             items: vec![
                 ModelItem::User {
                     text: "look".to_string(),
