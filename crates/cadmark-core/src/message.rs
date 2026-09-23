@@ -132,7 +132,7 @@ pub enum MessageKind {
     /// The model's reasoning before one reply: how long it took, and
     /// whatever of it the provider shares (nothing, from a provider that
     /// keeps its reasoning private). Shown so a long silence reads as work;
-    /// never replayed to the model.
+    /// the display record is not replayed as assistant text.
     Thinking {
         /// When the reasoning ended; `None` while it is still going.
         finished: Option<DateTime<Utc>>,
@@ -356,10 +356,25 @@ impl Conversation {
     /// request extends. It accounts for every message now in the
     /// conversation, this turn's own included.
     pub fn record_session(&mut self, items: Vec<ModelItem>) {
+        self.record_session_for(items, None);
+    }
+
+    pub fn record_session_for(&mut self, items: Vec<ModelItem>, identity: Option<String>) {
         self.session = ModelSession {
             items,
+            identity,
             covers: self.messages.last().map(|message| message.id),
         };
+    }
+
+    /// Reconstruct the human history when changing provider or model: opaque
+    /// reasoning is meaningful only to the backend that issued it.
+    pub fn for_model(&self, identity: Option<&str>) -> Self {
+        let mut conversation = self.clone();
+        if self.session.identity.as_deref() != identity {
+            conversation.session = ModelSession::default();
+        }
+        conversation
     }
 
     pub fn session(&self) -> &ModelSession {
@@ -391,7 +406,8 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 impl Message {
     fn estimated_tokens(&self) -> usize {
-        // Reasoning is never sent back to the model, so it occupies nothing.
+        // Provider reasoning is counted in the saved model session, not twice
+        // through its separate display record.
         if let MessageKind::Thinking { .. } = &self.kind {
             return 0;
         }

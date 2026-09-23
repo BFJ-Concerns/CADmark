@@ -188,9 +188,9 @@ mod tests {
             "completed",
             Some(ProviderUsage {
                 input_tokens: 10,
-                cached_input_tokens: 4,
+                cached_input_tokens: Some(4),
                 output_tokens: 2,
-                reasoning_tokens: 1,
+                reasoning_tokens: Some(1),
             }),
         );
 

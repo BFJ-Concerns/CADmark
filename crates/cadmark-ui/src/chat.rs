@@ -591,7 +591,16 @@ fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage, measured: Option
 fn measured_usage_line(usage: ProviderUsage) -> String {
     format!(
         "Last request: {} read ({} cached) · {} written ({} reasoning)",
-        usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, usage.reasoning_tokens
+        usage.input_tokens,
+        usage
+            .cached_input_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "not reported".into()),
+        usage.output_tokens,
+        usage
+            .reasoning_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "not reported".into())
     )
 }
 
@@ -1210,6 +1219,25 @@ mod tests {
             operation_id: u64::from(line),
             relation: ProvenanceRelation::Generated,
         }
+    }
+
+    #[test]
+    fn omitted_usage_details_are_not_displayed_as_measured_zeroes() {
+        let missing = measured_usage_line(ProviderUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Default::default()
+        });
+        assert!(missing.contains("not reported cached"));
+        assert!(missing.contains("not reported reasoning"));
+        let zero = measured_usage_line(ProviderUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cached_input_tokens: Some(0),
+            reasoning_tokens: Some(0),
+        });
+        assert!(zero.contains("0 cached"));
+        assert!(zero.contains("0 reasoning"));
     }
 
     #[test]

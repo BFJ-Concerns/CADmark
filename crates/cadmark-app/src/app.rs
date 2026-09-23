@@ -233,7 +233,7 @@ struct TurnRecord {
     history_len: usize,
     /// The item sequence the turn ended with, recorded on the
     /// conversation once its messages are settled.
-    model_context: Option<Vec<ModelItem>>,
+    model_context: Option<(Vec<ModelItem>, Option<String>)>,
 }
 
 /// Top-level application state.
@@ -743,7 +743,9 @@ impl CadmarkApp {
                 project.last_usage = Some(usage);
                 project.note_turn_event(None);
             }
-            TurnEvent::ModelContext { items } => turn.model_context = Some(items),
+            TurnEvent::ModelContext { items, identity } => {
+                turn.model_context = Some((items, identity))
+            }
             TurnEvent::Phase(phase) => {
                 project.note_turn_event(Some(phase));
             }
@@ -882,10 +884,10 @@ impl CadmarkApp {
             }
         }
         // The messages are settled; the session reaches the last of them.
-        if let Some(items) = turn.model_context.take()
+        if let Some((items, identity)) = turn.model_context.take()
             && let Some(project) = self.project.as_mut()
         {
-            project.conversation.record_session(items);
+            project.conversation.record_session_for(items, identity);
         }
         if let Some((model, source)) = show {
             self.show_model(*model, source);
@@ -3111,6 +3113,7 @@ mod tests {
             model_context: None,
         });
         app.apply_turn_event(TurnEvent::ModelContext {
+            identity: None,
             items: items.clone(),
         });
 
