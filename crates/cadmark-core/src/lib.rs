@@ -12,6 +12,7 @@ pub mod ledger;
 pub mod limits;
 pub mod mesh;
 pub mod message;
+pub mod model_session;
 pub mod pending_comment;
 pub mod sketch;
 pub mod sketch_lineage;
