@@ -61,7 +61,7 @@ The chat pane is where you talk to the AI. Messages are distinguished by positio
 
 - Your messages lean right.
 - Spatial comments carry accent-tinted chips naming each anchor's element and source line.
-- The AI's replies stream in as the turn progresses.
+- The AI's replies stream in as the turn progresses, and it says what it is about to do before each tool call or run of calls, so the text between the tool lines reads as a running commentary.
 - Tool calls appear one line each while the turn runs, so you can watch them arrive; each line is collapsed and expands to the call's input and result.
 - The AI's thinking shows too: "thinking…" while it reasons before a reply, then "thought for 2m 05s" once it goes on to speak or call a tool. Where the provider shares the reasoning text, the line opens to it; where it keeps the reasoning private, the line stands alone, and the phase line under the messages still counts the reasoning as activity rather than showing the stream as quiet.
 - When the turn ends, each run of calls and thinking folds into a single collapsed line such as "8 tool calls: ran the script ×6, looked up docs ×2 · thought for 4m 10s", which opens to the same lines. What the AI wrote between the steps stays shown.
