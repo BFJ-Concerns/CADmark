@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use cadmark_bridge::AiServices;
-use cadmark_bridge::backend::TurnModel;
+use cadmark_bridge::backend::{ProviderUsage, TurnModel};
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
@@ -169,6 +169,9 @@ pub struct Project {
     /// which takes precedence over the manual setting; absent when the
     /// endpoint advertised none.
     pub detected_context_window: Option<usize>,
+    /// What the provider reported the last request of a turn cost; the
+    /// one measured figure the occupancy estimate is shown against.
+    pub last_usage: Option<ProviderUsage>,
     pub busy: Option<Busy>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: ProvenanceLedger,
@@ -266,6 +269,7 @@ impl Project {
             conversation,
             ai_model,
             detected_context_window: None,
+            last_usage: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
@@ -845,6 +849,7 @@ mod tests {
             conversation: Conversation::new(),
             ai_model: None,
             detected_context_window: None,
+            last_usage: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),

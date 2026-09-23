@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use cadmark_bridge::backend::ModelItem;
 use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
@@ -230,6 +231,9 @@ struct TurnRecord {
     parts_before: Vec<PartMeasurements>,
     /// Messages before the active turn, which a condensation event may replace.
     history_len: usize,
+    /// The item sequence the turn ended with, recorded on the
+    /// conversation once its messages are settled.
+    model_context: Option<Vec<ModelItem>>,
 }
 
 /// Top-level application state.
@@ -447,10 +451,12 @@ impl CadmarkApp {
         if let Some(previous) = self.project.as_mut() {
             previous.shut_down();
         }
+        let recording = request_log_dir(&project_dir);
         let project = Project::open(
             project_dir,
             None,
-            ai_services(&self.settings, self.settings_store.as_ref()),
+            ai_services(&self.settings, self.settings_store.as_ref())
+                .map(|services| services.recording_to(recording)),
             self.settings.limits,
             render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
@@ -676,6 +682,7 @@ impl CadmarkApp {
                     comment_ids,
                     parts_before,
                     history_len,
+                    model_context: None,
                 });
                 true
             }
@@ -732,6 +739,11 @@ impl CadmarkApp {
                 conversation.condense_before(turn.history_len, summary);
                 turn.history_len = 1;
             }
+            TurnEvent::Usage(usage) => {
+                project.last_usage = Some(usage);
+                project.note_turn_event(None);
+            }
+            TurnEvent::ModelContext { items } => turn.model_context = Some(items),
             TurnEvent::Phase(phase) => {
                 project.note_turn_event(Some(phase));
             }
@@ -868,6 +880,12 @@ impl CadmarkApp {
                 conversation.push(Message::notice("Turn cancelled; the model is as it was."));
                 rebuild = true;
             }
+        }
+        // The messages are settled; the session reaches the last of them.
+        if let Some(items) = turn.model_context.take()
+            && let Some(project) = self.project.as_mut()
+        {
+            project.conversation.record_session(items);
         }
         if let Some((model, source)) = show {
             self.show_model(*model, source);
@@ -1470,6 +1488,7 @@ impl CadmarkApp {
     fn open_settings(&mut self) {
         let store = self.settings_store.as_ref();
         let ai = self.settings.ai.clone().unwrap_or(AiConfiguration {
+            reasoning_effort: None,
             base_url: String::new(),
             model: String::new(),
             accepts_images: false,
@@ -1480,6 +1499,7 @@ impl CadmarkApp {
             model: ai.model,
             accepts_images: ai.accepts_images,
             allow_insecure_http: ai.allow_insecure_http,
+            reasoning_effort: ai.reasoning_effort.unwrap_or_default(),
             credential: String::new(),
             has_stored_credential: store.is_some_and(SettingsStore::has_stored_credential),
             credential_from_environment: std::env::var_os(CREDENTIAL_ENV).is_some(),
@@ -1508,6 +1528,10 @@ impl CadmarkApp {
             model: form.model.trim().to_string(),
             accepts_images: form.accepts_images,
             allow_insecure_http: form.allow_insecure_http,
+            reasoning_effort: {
+                let effort = form.reasoning_effort.trim();
+                (!effort.is_empty()).then(|| effort.to_string())
+            },
         };
         let mut candidate = self.settings.clone();
         candidate.ai = (!ai.base_url.is_empty() || !ai.model.is_empty()).then_some(ai);
@@ -1917,7 +1941,7 @@ impl CadmarkApp {
                     .usage(self.settings.context_window_tokens);
                 chat_action = self
                     .chat
-                    .show(ui, &waiting, usage, &mut self.pending_comments);
+                    .show(ui, &waiting, usage, None, &mut self.pending_comments);
             });
         if let ChatAction::Send(text) = chat_action {
             self.pending_first_message = Some(text);
@@ -2063,9 +2087,13 @@ impl CadmarkApp {
                     project.ai_accepts_images,
                 )
                 .usage(self.context_window_tokens());
-                action =
-                    self.chat
-                        .show(ui, &project.conversation, usage, &mut self.pending_comments);
+                action = self.chat.show(
+                    ui,
+                    &project.conversation,
+                    usage,
+                    project.last_usage,
+                    &mut self.pending_comments,
+                );
             });
         if new_conversation {
             self.start_new_conversation();
@@ -2619,6 +2647,11 @@ fn ai_services(
     cadmark_bridge::build_ai_services(ai, credential).map_err(|error| error.to_string())
 }
 
+/// Where a project's AI requests are recorded.
+fn request_log_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join(".cadmark").join("requests")
+}
+
 impl eframe::App for CadmarkApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll_results(ctx);
@@ -2819,6 +2852,7 @@ mod tests {
     fn settings_for(base_url: String, model: &str) -> UserSettings {
         UserSettings {
             ai: Some(cadmark_bridge::config::AiConfiguration {
+                reasoning_effort: None,
                 base_url,
                 model: model.to_string(),
                 accepts_images: false,
@@ -2838,6 +2872,7 @@ mod tests {
             .model
             .respond(
                 ModelRequest {
+                    purpose: cadmark_bridge::backend::RequestPurpose::Turn,
                     instructions: "test instructions".to_string(),
                     items: vec![ModelItem::User {
                         text: "test request".to_string(),
@@ -2902,6 +2937,7 @@ mod tests {
                 comment_ids: vec![],
                 parts_before: Vec::new(),
                 history_len: 1,
+                model_context: None,
             }),
         }
     }
@@ -3053,6 +3089,47 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_turn_records_the_model_context_reaching_its_closing_notice() {
+        let (_dir, mut app) = two_part_project();
+        let response = app
+            .project_mut()
+            .unwrap()
+            .conversation
+            .push(Message::ai_response(""));
+        let items = vec![ModelItem::User {
+            text: "what the model saw".into(),
+            images: Vec::new(),
+        }];
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            steps: Vec::new(),
+            thinking: None,
+            comment_ids: vec![],
+            parts_before: Vec::new(),
+            history_len: 1,
+            model_context: None,
+        });
+        app.apply_turn_event(TurnEvent::ModelContext {
+            items: items.clone(),
+        });
+
+        app.finish_turn(TurnOutcome::Failed {
+            error: "the provider gave up".into(),
+        });
+
+        let conversation = &app.project().unwrap().conversation;
+        let session = conversation.session();
+        assert_eq!(session.items, items);
+        assert_eq!(
+            session.covers,
+            conversation.messages().last().map(|message| message.id),
+            "the session reaches the notice the failure posted, so nothing is rendered twice"
+        );
+        assert!(conversation.replay().1.is_empty());
+    }
+
+    #[test]
     fn a_completed_turn_records_its_design_step_against_the_open_part() {
         let (dir, mut app) = two_part_project();
         let response = app
@@ -3068,6 +3145,7 @@ mod tests {
             comment_ids: vec![],
             parts_before: Vec::new(),
             history_len: 1,
+            model_context: None,
         });
         std::fs::write(dir.path().join("bracket.py"), "width = 120\ndepth = 40\n").unwrap();
 
@@ -3247,6 +3325,7 @@ mod tests {
             comment_ids: vec![],
             parts_before: app.project().unwrap().part_measurements(),
             history_len: 1,
+            model_context: None,
         });
         app.finish_turn(TurnOutcome::Completed {
             summary: "Thicken the lid".to_string(),
@@ -3593,6 +3672,7 @@ mod tests {
         let store = SettingsStore::at(configuration_dir.path().join("cadmark"));
         let settings = UserSettings {
             ai: Some(cadmark_bridge::config::AiConfiguration {
+                reasoning_effort: None,
                 base_url: "https://hosted.example/v1".to_string(),
                 model: "hosted-cad-model".to_string(),
                 accepts_images: true,
