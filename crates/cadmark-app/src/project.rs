@@ -13,7 +13,7 @@ use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryDescriptors, ModelSummary, PartMeasurements, SolidValidity, TopologyElement,
+    GeometryDescriptors, ModelSummary, PartId, PartMeasurements, SolidValidity, TopologyElement,
 };
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::limits::ExecutionLimits;
@@ -573,18 +573,36 @@ impl Project {
         self.model_parts.iter().find(|part| part.id == id)
     }
 
-    /// Ask the retained worker model for the closest separation of two picked elements.
-    pub fn request_minimum_distance(
-        &mut self,
-        first: TopologyElement,
-        second: TopologyElement,
-    ) -> Result<(), String> {
+    /// The retained BREP two picked elements are measured on: the part
+    /// they are numbered within, since every part numbers its own
+    /// elements, or the whole solid where the picks name no part.
+    pub fn measurement_model(&self, part: Option<PartId>) -> Result<ModelFile, String> {
         let model = self.model.as_ref().ok_or("no model to measure")?;
         let solid = model
             .solid()
             .ok_or("a sketch has no solid to measure between")?;
+        match part {
+            Some(PartId(id)) => self
+                .model_parts
+                .iter()
+                .find(|part| part.id == id)
+                .map(|part| part.model.clone())
+                .ok_or_else(|| "the measured part is no longer loaded".to_string()),
+            None => Ok(solid.file.clone()),
+        }
+    }
+
+    /// Ask the retained worker model for the closest separation of two
+    /// picked elements, both numbered within `part`.
+    pub fn request_minimum_distance(
+        &mut self,
+        part: Option<PartId>,
+        first: TopologyElement,
+        second: TopologyElement,
+    ) -> Result<(), String> {
+        let model = self.measurement_model(part)?;
         self.send(OrchestratorCommand::MinimumDistance {
-            model: solid.file.clone(),
+            model,
             first,
             second,
         })?;
