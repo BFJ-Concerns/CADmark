@@ -23,6 +23,14 @@ All notable changes to this project will be documented in this file.
   script
 - What a script prints comes back to the AI with the run result, and with
   the traceback when the script fails
+- Images attach to chat messages: the Attach… button, Ctrl+V with an image
+  on the clipboard, or files dropped on the window stage removable
+  thumbnails above the input, and a message may be an image alone. Each
+  image is stored once under `.cadmark/attachments/` and rides with its
+  message whenever the AI reads the history, so a picture from an earlier
+  turn stays in front of the model. The project's `references/` folder is
+  an AI-maintained library for pictures worth keeping beyond one
+  conversation, catalogued in `references/INDEX.md`
 
 ### Changed
 - While a turn runs, each tool call shows as its own collapsed line in the
