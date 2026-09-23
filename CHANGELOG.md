@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-23
+
 ### Added
 - Continuous integration on Forgejo Actions runs `just verify` on every pull
   request and lane push; `CADMARK_TEST_RUNNER=nextest` selects cargo-nextest's
@@ -96,8 +98,8 @@ All notable changes to this project will be documented in this file.
   triggering a C++ exception per query, and the exact bounding box is
   searched only on the faces and edges that can extend it. The execution
   log now states how long the script and each capture stage took
-- Version numbers follow semantic versioning, starting at 0.1.0 in place of
-  the earlier date-derived scheme
+- Version numbers follow semantic versioning in place of the earlier
+  date-derived scheme
 - The top-level Export entries of a multi-part model write the part
   currently selected and name it in the menu, rather than the last part
   the script bound
@@ -137,8 +139,6 @@ All notable changes to this project will be documented in this file.
   the navigation controls
 - In-app readouts for a selected face's area, edge length or diameter, and
   the minimum distance between two selected elements
-
-### Changed
 - The AI names the sketch-or-solid route before it edits: when a change
   could be made to a sketch profile or to the solid, the reply says which
   one it is taking before the script runs, and what it said stays in the
