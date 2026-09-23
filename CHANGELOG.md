@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Each part of a multi-part model is drawn in its own colour, from a fixed
+  palette by the part's position in the script; a single-part model keeps
+  its grey
+- A Parts tab in the left panel, beside Parameters: every part with its
+  colour swatch, name and measurements, the active one highlighted; clicking
+  a name selects the whole part, and a tick box hides or shows it in the
+  viewport. A hidden part is neither drawn nor clickable, and stays hidden by
+  name through rebuilds
 - Every AI request is recorded in the project folder under
   `.cadmark/requests/`, one file per model call: the request as sent
   (images summarised), each streamed event with its offset, and the outcome
@@ -26,6 +34,11 @@ All notable changes to this project will be documented in this file.
   quiet stream, and a turn that ends during one records how long it was
 
 ### Changed
+- Clicking any part of a multi-part model selects that part's face, edge or
+  vertex; before, only the part the script bound last answered a click, and
+  the others needed "Pick part" first
+- Two comment anchors on different parts are no longer offered as a
+  distance measurement, since each part numbers its elements on its own
 - Model sessions preserve provider output in order, including encrypted
   reasoning, assistant message metadata, original tool arguments and renders.
   Tool results follow the complete response; later turns append context to the
@@ -43,6 +56,11 @@ All notable changes to this project will be documented in this file.
   of related calls, and what a result changed when it matters, so the
   text between the tool lines reads as a running commentary rather than
   a single line per reply
+
+### Fixed
+- Exporting one part from the toolbar's per-part menu wrote nothing and
+  reported the part as no longer existing: the menu named parts by their
+  picking ID where the export looked them up by ordinal
 
 ## [0.2.0] - 2026-09-23
 

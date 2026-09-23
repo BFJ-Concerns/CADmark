@@ -2,7 +2,9 @@
 // topological element as a unique colour.
 //
 // Faces, edges, and vertices occupy distinct ID ranges so the type
-// and index can be recovered from a single pixel readback.
+// and index can be recovered from a single pixel readback. Those ranges
+// number elements within one part; the part itself sits in the ID's
+// high bits, so a scene of several parts reads back as one pixel too.
 
 use cadmark_core::geometry::{
     EdgeId, FaceId, PartId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
@@ -18,10 +20,13 @@ use cadmark_core::geometry::{
 /// Sketch corner IDs: SKETCH_CORNER_OFFSET..SKETCH_REGION_OFFSET-1
 /// Sketch region IDs: SKETCH_REGION_OFFSET..
 ///
-/// ID 0 = background (no element).
+/// ID 0 = background (no element). Every range ends below bit
+/// `PART_SHIFT`, where the part ordinal begins.
 const EDGE_OFFSET: u32 = 100_000;
 const VERTEX_OFFSET: u32 = 200_000;
-const PART_OFFSET: u32 = 300_000;
+/// Start of the whole-part range: the shaders derive a part's ordinal from
+/// the part ID its vertices carry by subtracting this and one.
+pub const PART_OFFSET: u32 = 300_000;
 const SKETCH_CURVE_OFFSET: u32 = 400_000;
 const SKETCH_CORNER_OFFSET: u32 = 500_000;
 const SKETCH_REGION_OFFSET: u32 = 600_000;
@@ -65,10 +70,10 @@ impl SelectionFilter {
     /// Whether a readback may resolve to this pick, of either kind. A
     /// sketch's regions, curves and corners follow the face, edge and
     /// vertex toggles: they are the same three shapes of target.
-    pub fn allows_pick(&self, picked: &PickedElement) -> bool {
+    pub fn allows_pick(&self, picked: &Pick) -> bool {
         match picked {
-            PickedElement::Solid(element) => self.allows(element),
-            PickedElement::Sketch(SketchElement { kind, .. }) => match kind {
+            Pick::Solid { element, .. } => self.allows(element),
+            Pick::Sketch(SketchElement { kind, .. }) => match kind {
                 SketchElementKind::Region => self.faces,
                 SketchElementKind::Curve => self.edges,
                 SketchElementKind::Corner => self.vertices,
@@ -77,7 +82,54 @@ impl SelectionFilter {
     }
 }
 
-/// Encode a topology element as a picking ID for the colour buffer.
+/// Bit position of the part ordinal within a solid pick ID. The element
+/// ranges above stay below this bit, so the low bits of an ID name an
+/// element within a part and the high bits name the part.
+pub const PART_SHIFT: u32 = 20;
+const ELEMENT_MASK: u32 = (1 << PART_SHIFT) - 1;
+
+/// Anything a pixel of the ID texture can name: an element of one part,
+/// numbered within that part, or a sketch element, which belongs to no
+/// part. Face, edge and vertex IDs restart in every part, so a solid pick
+/// is only meaningful with the part it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pick {
+    Solid {
+        part: PartId,
+        element: TopologyElement,
+    },
+    Sketch(SketchElement),
+}
+
+impl Pick {
+    /// The whole of one part.
+    pub fn part(part: PartId) -> Self {
+        Self::Solid {
+            part,
+            element: TopologyElement::Part(part),
+        }
+    }
+
+    /// The element this pick names, without its part.
+    pub fn element(&self) -> PickedElement {
+        match self {
+            Self::Solid { element, .. } => PickedElement::Solid(element.clone()),
+            Self::Sketch(element) => PickedElement::Sketch(*element),
+        }
+    }
+
+    /// The part a solid pick is numbered within; a sketch pick has none.
+    pub fn part_id(&self) -> Option<PartId> {
+        match self {
+            Self::Solid { part, .. } => Some(*part),
+            Self::Sketch(_) => None,
+        }
+    }
+}
+
+/// Encode a topology element as a picking ID within its own part: the
+/// low bits, before the part ordinal is added. This is what the vertex
+/// buffers carry; the shaders add the part.
 pub fn encode_picking_id(element: &TopologyElement) -> u32 {
     match element {
         TopologyElement::Part(PartId(id)) => PART_OFFSET + *id + 1,
@@ -87,7 +139,7 @@ pub fn encode_picking_id(element: &TopologyElement) -> u32 {
     }
 }
 
-/// Decode a pixel value from the picking buffer into a topology element.
+/// Decode the within-part bits of a pick ID into a topology element.
 /// Returns None for background (0) or out-of-range values.
 pub fn decode_picking_id(id: u32) -> Option<TopologyElement> {
     if id == 0 {
@@ -107,12 +159,13 @@ pub fn decode_picking_id(id: u32) -> Option<TopologyElement> {
     }
 }
 
-/// Encode anything the user can click — solid topology or a drawn sketch
-/// element — as a picking ID.
-pub fn encode_pick(element: &PickedElement) -> u32 {
-    match element {
-        PickedElement::Solid(element) => encode_picking_id(element),
-        PickedElement::Sketch(SketchElement { kind, index }) => match kind {
+/// Encode anything the user can click as the ID the colour buffer holds
+/// and the highlight uniforms compare against: a solid element within
+/// its part, or a drawn sketch element.
+pub fn encode_pick(pick: &Pick) -> u32 {
+    match pick {
+        Pick::Solid { part, element } => encode_picking_id(element) | (part.0 << PART_SHIFT),
+        Pick::Sketch(SketchElement { kind, index }) => match kind {
             SketchElementKind::Curve => SKETCH_CURVE_OFFSET + *index + 1,
             SketchElementKind::Corner => SKETCH_CORNER_OFFSET + *index + 1,
             SketchElementKind::Region => SKETCH_REGION_OFFSET + *index + 1,
@@ -120,24 +173,27 @@ pub fn encode_pick(element: &PickedElement) -> u32 {
     }
 }
 
-/// Decode any pickable element, including sketch IDs outside the solid
-/// topology ranges.
-pub fn decode_pick(id: u32) -> Option<PickedElement> {
-    if let Some(element) = decode_picking_id(id) {
-        return Some(PickedElement::Solid(element));
+/// Decode a pixel's ID into what it names, or None for the background.
+pub fn decode_pick(id: u32) -> Option<Pick> {
+    let element = id & ELEMENT_MASK;
+    if let Some(element) = decode_picking_id(element) {
+        return Some(Pick::Solid {
+            part: PartId(id >> PART_SHIFT),
+            element,
+        });
     }
-    let (kind, offset) = if id > SKETCH_REGION_OFFSET {
+    let (kind, offset) = if element > SKETCH_REGION_OFFSET {
         (SketchElementKind::Region, SKETCH_REGION_OFFSET)
-    } else if id > SKETCH_CORNER_OFFSET {
+    } else if element > SKETCH_CORNER_OFFSET {
         (SketchElementKind::Corner, SKETCH_CORNER_OFFSET)
-    } else if id > SKETCH_CURVE_OFFSET {
+    } else if element > SKETCH_CURVE_OFFSET {
         (SketchElementKind::Curve, SKETCH_CURVE_OFFSET)
     } else {
         return None;
     };
-    Some(PickedElement::Sketch(SketchElement {
+    Some(Pick::Sketch(SketchElement {
         kind,
-        index: id - offset - 1,
+        index: element - offset - 1,
     }))
 }
 
@@ -325,8 +381,8 @@ mod tests {
             SketchElementKind::Region,
         ] {
             for index in [0, 1, 99_998] {
-                let element = PickedElement::Sketch(SketchElement { kind, index });
-                assert_eq!(decode_pick(encode_pick(&element)), Some(element));
+                let pick = Pick::Sketch(SketchElement { kind, index });
+                assert_eq!(decode_pick(encode_pick(&pick)), Some(pick));
             }
         }
     }
@@ -340,20 +396,76 @@ mod tests {
             TopologyElement::Part(PartId(3)),
         ];
         for element in solid {
-            let id = encode_picking_id(&element);
+            let part = PartId(3);
+            let id = encode_pick(&Pick::Solid {
+                part,
+                element: element.clone(),
+            });
             assert_eq!(
                 decode_pick(id),
-                Some(PickedElement::Solid(element.clone())),
+                Some(Pick::Solid { part, element }),
                 "solid IDs still decode as solid topology",
             );
         }
         // A sketch pixel is not a very high part index: the solid-only
         // decoder must decline it.
-        let sketch = encode_pick(&PickedElement::Sketch(SketchElement {
+        let sketch = encode_pick(&Pick::Sketch(SketchElement {
             kind: SketchElementKind::Curve,
             index: 0,
         }));
         assert_eq!(decode_picking_id(sketch), None);
+        assert_eq!(decode_pick(sketch).and_then(|pick| pick.part_id()), None);
+    }
+
+    #[test]
+    fn a_solid_pick_carries_its_part_and_survives_the_round_trip() {
+        // Face, edge and vertex numbering restarts in every part, so the
+        // same local element in two parts must give two different IDs, and
+        // each must decode back to the part it was drawn for.
+        let elements = [
+            TopologyElement::Face(FaceId(7)),
+            TopologyElement::Edge(EdgeId(7)),
+            TopologyElement::Vertex(VertexId(7)),
+        ];
+        for part in [0, 1, 2, 4095] {
+            for element in &elements {
+                let pick = Pick::Solid {
+                    part: PartId(part),
+                    element: element.clone(),
+                };
+                let id = encode_pick(&pick);
+                assert_eq!(decode_pick(id), Some(pick), "part {part} {element:?}");
+                let elsewhere = encode_pick(&Pick::Solid {
+                    part: PartId(part + 1),
+                    element: element.clone(),
+                });
+                assert_ne!(id, elsewhere, "{element:?} reads the same in two parts");
+            }
+        }
+    }
+
+    #[test]
+    fn a_whole_part_pick_names_the_part_in_both_halves_of_the_id() {
+        let pick = Pick::part(PartId(5));
+        let id = encode_pick(&pick);
+        assert_eq!(id & ELEMENT_MASK, PART_OFFSET + 6);
+        assert_eq!(id >> PART_SHIFT, 5);
+        assert_eq!(decode_pick(id), Some(pick));
+    }
+
+    #[test]
+    fn the_first_parts_ids_are_the_within_part_ids() {
+        // Vertex buffers carry the within-part ID; the shaders add the
+        // part. For part zero the two agree, which is what lets a scene of
+        // one part keep the IDs it always had.
+        let face = TopologyElement::Face(FaceId(9));
+        assert_eq!(
+            encode_pick(&Pick::Solid {
+                part: PartId(0),
+                element: face.clone()
+            }),
+            encode_picking_id(&face)
+        );
     }
 
     #[test]

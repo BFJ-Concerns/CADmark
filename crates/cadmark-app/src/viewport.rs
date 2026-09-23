@@ -11,7 +11,7 @@ use cadmark_core::geometry::PartId;
 use cadmark_core::sketch::SketchProfile;
 use cadmark_kernel::protocol::ExecutedPart;
 use cadmark_renderer::mesh::{GpuMesh, GpuSketch};
-use cadmark_renderer::picking::{PickingPass, SelectionFilter};
+use cadmark_renderer::picking::{Pick, PickingPass, SelectionFilter};
 use cadmark_renderer::pipeline::{
     MeshUniforms, RenderPipelines, SimpleUniforms, ViewportMarker, upload_mesh, upload_sketch,
 };
@@ -25,9 +25,8 @@ use cadmark_ui::toolbar::{SelectionKind, SelectionKinds};
 pub struct ViewportResources {
     pipelines: RenderPipelines,
     picking: PickingPass,
+    /// Every part of the model, each pickable and drawn unless hidden.
     meshes: Vec<GpuMesh>,
-    /// Part whose local face and edge IDs topology picking reads.
-    active_part: Option<usize>,
     /// The sketch profile on screen, when the design has reached only a
     /// sketch. Its regions, curves and corners are pick targets drawn
     /// over the solid's in the picking pass.
@@ -60,7 +59,6 @@ impl ViewportResources {
             pipelines: RenderPipelines::new(device, format, w, h),
             picking: PickingPass::new(device, w, h),
             meshes: Vec::new(),
-            active_part: None,
             pick_attempt: None,
             submission_marker_source: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("pick_submission_marker_source"),
@@ -83,8 +81,9 @@ impl ViewportResources {
         }
     }
 
-    /// Replace every independently rendered part on the GPU.
-    pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[ExecutedPart]) {
+    /// Replace every independently rendered part on the GPU. `hidden` names
+    /// the parts that start out not drawn.
+    pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[ExecutedPart], hidden: &[u32]) {
         self.meshes = parts
             .iter()
             .map(|part| {
@@ -96,14 +95,19 @@ impl ViewportResources {
                     .iter()
                     .map(|vertex| vertex.position.map(|axis| axis as f32))
                     .collect();
-                upload_mesh(device, &part.mesh, PartId(part.id), &vertex_positions)
+                let mut mesh = upload_mesh(device, &part.mesh, PartId(part.id), &vertex_positions);
+                mesh.visible = !hidden.contains(&part.id);
+                mesh
             })
             .collect();
-        self.active_part = parts.len().checked_sub(1);
     }
 
-    pub fn set_active_part(&mut self, id: u32) {
-        self.active_part = self.meshes.get(id as usize).map(|_| id as usize);
+    /// Show or hide one part. A hidden part is neither drawn nor pickable,
+    /// and no longer occludes what is behind it.
+    pub fn set_part_visible(&mut self, id: u32, visible: bool) {
+        if let Some(mesh) = self.meshes.iter_mut().find(|mesh| mesh.part.0 == id) {
+            mesh.visible = visible;
+        }
     }
 
     /// Replace the sketch profile on the GPU.
@@ -131,7 +135,7 @@ impl ViewportResources {
 }
 
 pub enum CompletedPick {
-    Hit(cadmark_core::geometry::PickedElement),
+    Hit(Pick),
     Background,
     ReadbackFailed,
 }
@@ -260,7 +264,7 @@ fn next_pick_request(
 #[derive(Debug, PartialEq)]
 pub enum PickTransition {
     Waiting,
-    Hit(cadmark_core::geometry::PickedElement, (f32, f32)),
+    Hit(Pick, (f32, f32)),
     Background,
     ReadbackFailed,
 }
@@ -454,11 +458,6 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
             } else {
                 &res.meshes
             };
-            let topology_meshes = res
-                .active_part
-                .and_then(|id| pickable_meshes.get(id))
-                .map(std::slice::from_ref)
-                .unwrap_or(pickable_meshes);
             if self.pick_request.is_some() || self.part_pick_request.is_some() {
                 res.retry_pick = None;
             }
@@ -488,7 +487,6 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                         &res.pipelines,
                         &res.picking,
                         pickable_meshes,
-                        topology_meshes,
                         res.sketch.as_ref(),
                         self.selection_filter,
                     );
@@ -535,7 +533,6 @@ impl eframe::egui_wgpu::CallbackTrait for ViewportCallback {
                     &res.pipelines,
                     &res.picking,
                     pickable_meshes,
-                    topology_meshes,
                     res.sketch.as_ref(),
                     self.selection_filter,
                 );
@@ -604,7 +601,7 @@ pub fn viewport_clear_colour(target_is_srgb: bool) -> wgpu::Color {
 #[cfg(test)]
 mod tests {
     use cadmark_core::geometry::{
-        FaceId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
+        FaceId, PartId, SketchElement, SketchElementKind, TopologyElement,
     };
 
     use super::*;
@@ -660,8 +657,10 @@ mod tests {
 
     #[test]
     fn completed_hit_consumes_and_returns_the_pick_anchor() {
-        let element =
-            cadmark_core::geometry::PickedElement::Solid(TopologyElement::Face(FaceId(3)));
+        let element = Pick::Solid {
+            part: PartId(2),
+            element: TopologyElement::Face(FaceId(3)),
+        };
         let mut in_flight = Some((120.0, 240.0));
         assert_eq!(
             completed_pick_transition(Some(CompletedPick::Hit(element.clone())), &mut in_flight),
@@ -676,7 +675,7 @@ mod tests {
     /// click that asked for it.
     #[test]
     fn a_completed_sketch_hit_consumes_and_returns_the_pick_anchor() {
-        let element = PickedElement::Sketch(SketchElement {
+        let element = Pick::Sketch(SketchElement {
             kind: SketchElementKind::Curve,
             index: 2,
         });
@@ -696,7 +695,7 @@ mod tests {
         let mut in_flight = None;
         assert_eq!(
             completed_pick_transition(
-                Some(CompletedPick::Hit(PickedElement::Sketch(SketchElement {
+                Some(CompletedPick::Hit(Pick::Sketch(SketchElement {
                     kind: SketchElementKind::Region,
                     index: 0,
                 }))),

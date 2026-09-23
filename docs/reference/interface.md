@@ -31,7 +31,7 @@ The world is Z-up, matching build123d's coordinate system.
 
 ## Selecting geometry
 
-Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. To select a whole part in a multi-part model, click "Pick part" in the toolbar first.
+Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. When the script defines several parts, each is drawn in its own colour, and clicking any of them selects that part's face, edge, or vertex; the status bar and the comment overlay then speak in that part's terms. To select a whole part, click its name in the Parts tab of the left panel, or click "Pick part" in the toolbar and then the part in the viewport.
 
 The **Select** menu in the toolbar turns each kind of click target on or off. Three checkboxes — "Faces", "Edges", "Vertices" — start all on. Disabling a kind makes clicks pass through it to whatever is behind. The filter does not affect whole-part picks.
 
@@ -102,11 +102,23 @@ Comments stay as pending cards you can edit or remove before sending. They are s
 
 When a selection could have come from more than one source line, the overlay lists the candidates — ranked by likelihood when possible, and plainly unordered when it cannot tell. Hovering a candidate highlights its line in the code panel and the geometry that line accounts for. Choosing one sends that line alone to the AI; leaving the choice open sends them all.
 
-## Parameters panel
+## Left panel: parameters and parts
 
-The panel beside the viewport lists every module-level numeric name in the current script. Names bound to a literal have a drag-or-type field; names derived from other parameters show their expression.
+The panel beside the viewport has two tabs, Parameters and Parts, with the script's file name at the right of the strip. The Parts tab shows how many parts the script defines.
+
+### Parameters
+
+Lists every module-level numeric name in the current script. Names bound to a literal have a drag-or-type field; names derived from other parameters show their expression.
 
 Changing a value rewrites that one number in the script, rebuilds the model, and records a design step — no AI turn needed.
+
+### Parts
+
+Lists every completed part the script produced, in the order the script binds them: a colour swatch matching the part in the viewport, the part's name, and a tick box for whether it is drawn. The part the current selection belongs to is highlighted. Hovering a name shows its measurements; clicking it selects the whole part. A part that is not a closed solid carries a warning mark.
+
+Unticking a part hides it: it is neither drawn nor clickable, and nothing behind it is hidden by it any more. A hidden part stays hidden by name through rebuilds, so a part you have set aside stays out of the way while the AI works on the others; opening another script or project shows everything again. Hiding the part that holds the current selection puts the selection down.
+
+Parts are coloured from a fixed palette by their position in the script: the first part keeps the grey a single-part model has always had, and later parts take distinct muted hues.
 
 ## Code panel
 

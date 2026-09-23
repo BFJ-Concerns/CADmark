@@ -491,6 +491,7 @@ mod tests {
 
     fn sample_geometry_context() -> GeometryContext {
         GeometryContext {
+            part: None,
             sketch: Default::default(),
             element: PickedElement::Solid(TopologyElement::Face(FaceId(5))),
             provenance: LedgerValue::Resolved(ProvenanceEntry {

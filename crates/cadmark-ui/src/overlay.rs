@@ -6,7 +6,7 @@
 // anchors, so one comment can point at several elements.
 
 use cadmark_core::candidates::order_candidates;
-use cadmark_core::geometry::{GeometryContext, PickedElement, ScreenPosition};
+use cadmark_core::geometry::{GeometryContext, PartId, PickedElement, ScreenPosition};
 use cadmark_core::ledger::{LedgerValue, ProvenanceEntry};
 use cadmark_core::sketch_lineage::NoSketchRoute;
 
@@ -125,6 +125,15 @@ fn sending_note(chosen: Option<&ProvenanceEntry>, count: usize) -> String {
     }
 }
 
+/// A candidate row the pointer is over, with the part its anchor is
+/// numbered within, so the viewport lights that part's geometry rather
+/// than whichever part was clicked last.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoveredCandidate {
+    pub part: Option<PartId>,
+    pub entry: ProvenanceEntry,
+}
+
 /// Offer every candidate source line of each ambiguous anchor, and record
 /// which one the pointer is over and which one the user chose.
 ///
@@ -134,7 +143,7 @@ fn sending_note(chosen: Option<&ProvenanceEntry>, count: usize) -> String {
 fn show_candidate_choices(
     ui: &mut egui::Ui,
     anchors: &mut [GeometryContext],
-    hovered_candidate: &mut Option<ProvenanceEntry>,
+    hovered_candidate: &mut Option<HoveredCandidate>,
 ) {
     *hovered_candidate = None;
     for context in anchors.iter_mut() {
@@ -168,7 +177,10 @@ fn show_candidate_choices(
                 .small(),
             );
             if row.hovered() {
-                *hovered_candidate = Some(candidate.clone());
+                *hovered_candidate = Some(HoveredCandidate {
+                    part: context.part,
+                    entry: candidate.clone(),
+                });
             }
             if row.clicked() {
                 context.chosen_candidate = if is_chosen {
@@ -211,7 +223,7 @@ pub enum OverlayState {
         focused: bool,
         /// The candidate row the pointer is over, recomputed each frame so
         /// the viewport and code panel can show what that line accounts for.
-        hovered_candidate: Option<ProvenanceEntry>,
+        hovered_candidate: Option<HoveredCandidate>,
         /// The sketch-route row the pointer is over, recomputed each frame
         /// so the code panel can show the drawing line it names.
         hovered_sketch_line: Option<u32>,
@@ -247,14 +259,16 @@ impl OverlayState {
     }
 
     /// Add an anchor to the open comment; clicking an element already
-    /// anchored removes it. Returns whether the overlay was open.
+    /// anchored removes it. An element is the same one only within the
+    /// same part, since every part numbers its own elements from zero.
+    /// Returns whether the overlay was open.
     pub fn toggle_anchor(&mut self, context: GeometryContext) -> bool {
         let Self::Active { anchors, .. } = self else {
             return false;
         };
         match anchors
             .iter()
-            .position(|anchor| anchor.element == context.element)
+            .position(|anchor| anchor.part == context.part && anchor.element == context.element)
         {
             Some(index) if anchors.len() > 1 => {
                 anchors.remove(index);
@@ -276,7 +290,7 @@ impl OverlayState {
     /// The candidate line the pointer is resting on, if any. Hovering a
     /// candidate is what shows the user which geometry that line accounts
     /// for; the caller drives the highlights from this.
-    pub fn hovered_candidate(&self) -> Option<&ProvenanceEntry> {
+    pub fn hovered_candidate(&self) -> Option<&HoveredCandidate> {
         match self {
             Self::Active {
                 hovered_candidate, ..
@@ -500,18 +514,19 @@ impl OverlayState {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::{FaceId, GeometryContext, PickedElement, TopologyElement};
+    use cadmark_core::geometry::{FaceId, GeometryContext, PartId, PickedElement, TopologyElement};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
 
-    use super::{OverlayState, context_summary};
+    use super::{HoveredCandidate, OverlayState, context_summary};
 
     #[test]
     fn overlay_summary_reads_as_plain_language() {
         let mut identification = std::collections::HashMap::new();
         identification.insert("surface".to_string(), "plane".to_string());
         let context = GeometryContext {
+            part: None,
             element: PickedElement::Solid(TopologyElement::Face(FaceId(2))),
             provenance: LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
@@ -536,9 +551,40 @@ mod tests {
     }
 
     #[test]
+    fn the_same_element_number_on_two_parts_is_two_anchors() {
+        use cadmark_core::geometry::ScreenPosition;
+        let anchor = |part: u32| GeometryContext {
+            part: Some(PartId(part)),
+            element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
+            provenance: LedgerValue::Untraced,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: vec![],
+            chosen_candidate: None,
+            sketch: Default::default(),
+        };
+        let mut overlay = OverlayState::default();
+        overlay.open(ScreenPosition { x: 0.0, y: 0.0 }, anchor(1));
+        assert!(overlay.toggle_anchor(anchor(2)));
+        assert_eq!(
+            overlay.anchors().len(),
+            2,
+            "face 0 of another part is a new anchor"
+        );
+        assert!(overlay.toggle_anchor(anchor(2)));
+        assert_eq!(
+            overlay.anchors().len(),
+            1,
+            "clicking it again removes only itself"
+        );
+        assert_eq!(overlay.anchors()[0].part, Some(PartId(1)));
+    }
+
+    #[test]
     fn clicking_more_geometry_adds_anchors_and_clicking_again_removes_them() {
         use cadmark_core::geometry::{EdgeId, ScreenPosition};
         let anchor = |element: TopologyElement| GeometryContext {
+            part: None,
             element: PickedElement::Solid(element),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -571,6 +617,7 @@ mod tests {
         let mut identification = std::collections::HashMap::new();
         identification.insert("curve".to_string(), "circle".to_string());
         let context = GeometryContext {
+            part: None,
             element: PickedElement::Sketch(SketchElement {
                 kind: SketchElementKind::Curve,
                 index: 3,
@@ -601,6 +648,7 @@ mod tests {
     fn a_solid_elements_sketch_route_is_offered_and_hoverable() {
         use cadmark_core::sketch_lineage::{SketchLineage, SketchSource};
         let anchor = |sketch: SketchLineage| GeometryContext {
+            part: None,
             element: PickedElement::Solid(TopologyElement::Face(FaceId(5))),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -653,6 +701,7 @@ mod tests {
     #[test]
     fn overlay_summary_admits_an_untraced_source() {
         let context = GeometryContext {
+            part: None,
             element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -671,6 +720,15 @@ mod tests {
         anchors: &mut [GeometryContext],
         pointer: egui::Pos2,
     ) -> Option<ProvenanceEntry> {
+        hovered_at(ctx, anchors, pointer).map(|hovered| hovered.entry)
+    }
+
+    /// As `hover_at`, with the part the hovered row's anchor belongs to.
+    fn hovered_at(
+        ctx: &egui::Context,
+        anchors: &mut [GeometryContext],
+        pointer: egui::Pos2,
+    ) -> Option<HoveredCandidate> {
         let mut hovered = None;
         for _ in 0..2 {
             let mut input = egui::RawInput {
@@ -752,6 +810,7 @@ mod tests {
         ];
         (
             GeometryContext {
+                part: None,
                 element: PickedElement::Solid(TopologyElement::Face(FaceId(2))),
                 provenance: LedgerValue::Ambiguous(candidates.clone()),
                 identification: Default::default(),
@@ -841,6 +900,52 @@ mod tests {
             hover_at(&ctx, &mut anchors, egui::pos2(20.0, 590.0)),
             None,
             "the pointer away from every row must publish no candidate"
+        );
+    }
+
+    #[test]
+    fn a_hovered_candidate_names_the_part_its_anchor_is_on() {
+        // Two anchors on two parts, each ambiguous. Hovering a row under
+        // the second anchor must publish the second part, whichever part
+        // the user clicked last, so the viewport lights the right solid.
+        let ctx = egui::Context::default();
+        let (context, candidates) = ambiguous_anchor();
+        let mut on_first = context.clone();
+        on_first.part = Some(PartId(1));
+        let mut on_second = context;
+        on_second.part = Some(PartId(2));
+        let mut anchors = vec![on_first, on_second];
+
+        let rows: Vec<_> = (0..600)
+            .map(|y| egui::pos2(20.0, y as f32))
+            .filter_map(|pointer| hovered_at(&ctx, &mut anchors, pointer))
+            .fold(Vec::new(), |mut rows: Vec<HoveredCandidate>, hovered| {
+                if rows.last() != Some(&hovered) {
+                    rows.push(hovered);
+                }
+                rows
+            });
+        assert_eq!(
+            rows,
+            vec![
+                HoveredCandidate {
+                    part: Some(PartId(1)),
+                    entry: candidates[0].clone()
+                },
+                HoveredCandidate {
+                    part: Some(PartId(1)),
+                    entry: candidates[1].clone()
+                },
+                HoveredCandidate {
+                    part: Some(PartId(2)),
+                    entry: candidates[0].clone()
+                },
+                HoveredCandidate {
+                    part: Some(PartId(2)),
+                    entry: candidates[1].clone()
+                },
+            ],
+            "each anchor's rows carry that anchor's part"
         );
     }
 
