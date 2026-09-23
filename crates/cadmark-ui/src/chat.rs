@@ -3,17 +3,19 @@
 // The user's chat (right-leaning card), spatial comments (accent-tinted,
 // with a chip per anchor naming the element and its source line), the
 // AI's replies (plain card, growing as the turn streams), the tool calls
-// a turn made (one collapsed group, expandable to each call's input and
-// result), and notices from CADmark itself (quiet, or red when something
-// failed). While a turn runs, the pane shows what step it is on, how long
-// it has been running, when it last did something, and a Cancel button.
+// a turn made (one collapsed line per call while the turn runs, each run
+// of calls folded into one counted line once it ends, every call
+// expandable to its input and result), and notices from CADmark itself
+// (quiet, or red when something failed). While a turn runs, the pane
+// shows what step it is on, how long it has been running, when it last
+// did something, and a Cancel button.
 
 use std::time::Instant;
 
 use cadmark_core::geometry::{GeometryContext, PickedElement};
 use cadmark_core::ledger::LedgerValue;
 use cadmark_core::message::{
-    ContextUsage, Conversation, ImageData, Message, MessageKind, ToolActivity,
+    ContextUsage, Conversation, ImageData, Message, MessageId, MessageKind, ToolActivity,
 };
 use cadmark_core::pending_comment::{
     PendingAnchor, PendingComment, PendingCommentId, PendingComments,
@@ -64,6 +66,9 @@ pub struct TurnStatus {
     pub started: Instant,
     /// When the turn last produced an event; a quiet stream shows as quiet.
     pub last_event: Instant,
+    /// The tool-call groups this turn has made. Each shows call by call
+    /// while the turn runs, and folds into one line once it ends.
+    pub tool_groups: Vec<MessageId>,
 }
 
 /// What the user did in the pane this frame.
@@ -235,8 +240,13 @@ impl ChatPane {
                 ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let width = ui.available_width();
+                let live_groups: &[MessageId] = match &self.activity {
+                    ChatActivity::Turn(status) => &status.tool_groups,
+                    ChatActivity::Idle | ChatActivity::Building => &[],
+                };
                 for message in conversation.messages() {
-                    show_message(ui, message, width, &mut self.sent_textures);
+                    let live = live_groups.contains(&message.id);
+                    show_message(ui, message, width, live, &mut self.sent_textures);
                 }
                 // Pending cards follow history so bottom sticking keeps a
                 // newly staged card in view rather than hiding it above it.
@@ -712,10 +722,12 @@ fn activity_row(ui: &mut egui::Ui, text: &str) {
     });
 }
 
+/// Show one message. `live` marks a tool-call group of the running turn.
 fn show_message(
     ui: &mut egui::Ui,
     message: &Message,
     width: f32,
+    live: bool,
     textures: &mut std::collections::HashMap<String, egui::TextureHandle>,
 ) {
     // A card's content must leave room for its own margins and border, or
@@ -805,7 +817,9 @@ fn show_message(
                 ui.add(egui::Label::new(&message.text).wrap());
             });
         }
-        MessageKind::ToolCalls(activities) => show_tool_calls(ui, message, activities, width),
+        MessageKind::ToolCalls(activities) => {
+            show_tool_calls(ui, message, activities, width, live);
+        }
         MessageKind::Notice { is_error } => show_notice(ui, &message.text, *is_error, width),
         MessageKind::DesignChange => show_notice(ui, &message.text, false, width),
     }
@@ -842,45 +856,77 @@ fn show_notice(ui: &mut egui::Ui, text: &str, is_error: bool, width: f32) {
     });
 }
 
-/// A run of tool calls: one collapsed line naming what was done, opening
-/// to each call's input and result.
-fn show_tool_calls(ui: &mut egui::Ui, message: &Message, activities: &[ToolActivity], width: f32) {
+/// A run of tool calls. While its turn runs (`live`), each call is its own
+/// collapsed line, so the calls can be watched as they arrive; once the
+/// turn ends the run folds into one collapsed line counting them, which
+/// opens to the same per-call lines.
+fn show_tool_calls(
+    ui: &mut egui::Ui,
+    message: &Message,
+    activities: &[ToolActivity],
+    width: f32,
+    live: bool,
+) {
+    if live {
+        for activity in activities {
+            show_tool_call(ui, message, activity, width, true);
+        }
+        return;
+    }
     let header = tool_group_label(activities);
     egui::CollapsingHeader::new(egui::RichText::new(header).small().color(theme::TEXT_MUTED))
         .id_salt(message.id.0)
         .default_open(false)
         .show(ui, |ui| {
-            ui.set_max_width(width);
             for activity in activities {
-                let tint = if activity.failed {
-                    theme::WARNING
-                } else {
-                    theme::TEXT_MUTED
-                };
-                egui::CollapsingHeader::new(
-                    egui::RichText::new(tool_call_label(activity))
-                        .small()
-                        .color(tint),
-                )
-                .id_salt((message.id.0, &activity.call_id))
-                .show(ui, |ui| {
-                    ui.label(
-                        egui::RichText::new("Input")
-                            .small()
-                            .strong()
-                            .color(theme::TEXT_MUTED),
-                    );
-                    code_block(ui, &tool_input_text(activity));
-                    ui.label(
-                        egui::RichText::new("Result")
-                            .small()
-                            .strong()
-                            .color(theme::TEXT_MUTED),
-                    );
-                    code_block(ui, activity.output.as_deref().unwrap_or("(still running)"));
-                });
+                show_tool_call(ui, message, activity, width, false);
             }
         });
+}
+
+/// One tool call: a collapsed line saying what it did and how it went,
+/// opening to its input and result.
+fn show_tool_call(
+    ui: &mut egui::Ui,
+    message: &Message,
+    activity: &ToolActivity,
+    width: f32,
+    live: bool,
+) {
+    let tint = if activity.failed {
+        theme::WARNING
+    } else {
+        theme::TEXT_MUTED
+    };
+    egui::CollapsingHeader::new(
+        egui::RichText::new(tool_call_label(activity, live))
+            .small()
+            .color(tint),
+    )
+    .id_salt((message.id.0, &activity.call_id))
+    .default_open(false)
+    .show(ui, |ui| {
+        ui.set_max_width(width);
+        ui.label(
+            egui::RichText::new("Input")
+                .small()
+                .strong()
+                .color(theme::TEXT_MUTED),
+        );
+        code_block(ui, &tool_input_text(activity));
+        ui.label(
+            egui::RichText::new("Result")
+                .small()
+                .strong()
+                .color(theme::TEXT_MUTED),
+        );
+        let pending = if live {
+            "(still running)"
+        } else {
+            "(the turn ended before this call finished)"
+        };
+        code_block(ui, activity.output.as_deref().unwrap_or(pending));
+    });
 }
 
 fn code_block(ui: &mut egui::Ui, text: &str) {
@@ -895,7 +941,7 @@ fn code_block(ui: &mut egui::Ui, text: &str) {
         });
 }
 
-/// "3 steps: looked up docs, ran the script ×2".
+/// "3 tool calls: looked up docs, ran the script ×2".
 fn tool_group_label(activities: &[ToolActivity]) -> String {
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for activity in activities {
@@ -915,17 +961,22 @@ fn tool_group_label(activities: &[ToolActivity]) -> String {
             }
         })
         .collect();
-    let steps = activities.len();
+    let calls = activities.len();
     format!(
-        "{steps} step{}: {}",
-        if steps == 1 { "" } else { "s" },
+        "{calls} tool call{}: {}",
+        if calls == 1 { "" } else { "s" },
         parts.join(", ")
     )
 }
 
-fn tool_call_label(activity: &ToolActivity) -> String {
+/// "ran the script — ok in 1.5 s"; a call with no result yet reads as
+/// under way while its turn runs (`live`), and as unfinished after.
+fn tool_call_label(activity: &ToolActivity, live: bool) -> String {
+    if activity.output.is_none() && live {
+        return format!("{}\u{2026}", tool_in_progress(&activity.tool));
+    }
     let outcome = match (&activity.output, activity.failed) {
-        (None, _) => "running",
+        (None, _) => "did not finish",
         (Some(_), true) => "failed",
         (Some(_), false) => "ok",
     };
@@ -952,6 +1003,19 @@ fn tool_verb(tool: &str) -> &str {
         "run_script" => "ran the script",
         "lookup_docs" => "looked up docs",
         "render_view" => "looked at the render",
+        "reference_images" => "looked at the reference images",
+        "keep_reference" => "updated the reference library",
+        other => other,
+    }
+}
+
+fn tool_in_progress(tool: &str) -> &str {
+    match tool {
+        "run_script" => "running the script",
+        "lookup_docs" => "looking up docs",
+        "render_view" => "looking at the render",
+        "reference_images" => "looking at the reference images",
+        "keep_reference" => "updating the reference library",
         other => other,
     }
 }
@@ -1135,17 +1199,121 @@ mod tests {
         ];
         assert_eq!(
             tool_group_label(&activities),
-            "3 steps: looked up docs, ran the script \u{00d7}2"
+            "3 tool calls: looked up docs, ran the script \u{00d7}2"
         );
         assert_eq!(
-            tool_call_label(&activities[1]),
+            tool_group_label(&activities[..1]),
+            "1 tool call: looked up docs"
+        );
+        assert_eq!(
+            tool_call_label(&activities[1], true),
             "ran the script \u{2014} failed in 1.5 s"
         );
+        let unfinished = activity("run_script", None, false);
         assert_eq!(
-            tool_call_label(&activity("run_script", None, false)),
-            "ran the script \u{2014} running"
+            tool_call_label(&unfinished, true),
+            "running the script\u{2026}"
+        );
+        assert_eq!(
+            tool_call_label(&unfinished, false),
+            "ran the script \u{2014} did not finish",
+            "a call the turn never finished must not read as still running"
         );
         assert_eq!(tool_input_text(&activities[1]), "X = 1");
+    }
+
+    /// Every piece of text one frame of the pane draws.
+    fn drawn_text(pane: &mut ChatPane, conversation: &Conversation) -> Vec<String> {
+        let context = egui::Context::default();
+        let mut pending = PendingComments::default();
+        let output = context.run(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 900.0),
+                )),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    pane.show(
+                        ui,
+                        conversation,
+                        ContextUsage {
+                            conversation_tokens: 0,
+                            image_tokens: 0,
+                            request_tokens: 0,
+                            window_tokens: 128_000,
+                        },
+                        &mut pending,
+                    );
+                });
+            },
+        );
+        output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some(text.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_running_turn_shows_each_call_and_a_finished_one_folds_them_under_a_count() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("Make a flange"));
+        conversation.push(Message::ai_response("Checking the fillet API first."));
+        let group = conversation.push(Message::tool_calls(vec![
+            activity("lookup_docs", Some("docs"), false),
+            activity("run_script", None, false),
+        ]));
+        conversation.push(Message::ai_response("Running it now."));
+        let mut pane = ChatPane::new();
+
+        let now = Instant::now();
+        pane.activity = ChatActivity::Turn(TurnStatus {
+            phase: "running the script, attempt 1".into(),
+            started: now,
+            last_event: now,
+            tool_groups: vec![group],
+        });
+        let running = drawn_text(&mut pane, &conversation);
+        let shows = |text: &[String], wanted: &str| text.iter().any(|drawn| drawn == wanted);
+        assert!(
+            shows(&running, "looked up docs \u{2014} ok in 1.5 s"),
+            "{running:?}"
+        );
+        assert!(shows(&running, "running the script\u{2026}"), "{running:?}");
+        assert!(
+            !running.iter().any(|drawn| drawn.contains("tool calls")),
+            "a running turn's calls are not folded: {running:?}"
+        );
+        assert!(
+            !shows(&running, "X = 1"),
+            "each call starts collapsed: {running:?}"
+        );
+        assert!(shows(&running, "Checking the fillet API first."));
+        assert!(shows(&running, "Running it now."));
+
+        pane.activity = ChatActivity::Idle;
+        let finished = drawn_text(&mut pane, &conversation);
+        assert!(
+            shows(&finished, "2 tool calls: looked up docs, ran the script"),
+            "{finished:?}"
+        );
+        assert!(
+            !finished
+                .iter()
+                .any(|drawn| drawn.starts_with("looked up docs")),
+            "the calls fold under the count: {finished:?}"
+        );
+        assert!(
+            shows(&finished, "Checking the fillet API first.")
+                && shows(&finished, "Running it now."),
+            "what the AI wrote stays shown: {finished:?}"
+        );
     }
 
     #[test]
@@ -1155,12 +1323,14 @@ mod tests {
             phase: "thinking".into(),
             started: now,
             last_event: now,
+            tool_groups: Vec::new(),
         };
         assert_eq!(turn_status_line(&busy), "thinking · 0s");
         let quiet = TurnStatus {
             phase: "thinking".into(),
             started: now - std::time::Duration::from_secs(75),
             last_event: now - std::time::Duration::from_secs(9),
+            tool_groups: Vec::new(),
         };
         assert_eq!(turn_status_line(&quiet), "thinking · 1m 15s · quiet for 9s");
     }

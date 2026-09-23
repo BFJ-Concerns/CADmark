@@ -101,6 +101,12 @@ impl OpenAiCompatibleClient {
         };
         let mut sink = |_delta: StreamDelta| {};
         let response = self.stream(request, cancel, &mut sink).await?;
+        if response.reached_output_limit {
+            return Err(BackendError::RequestFailed(
+                "the response reached the provider's output limit before it was finished"
+                    .to_string(),
+            ));
+        }
         if response.text.trim().is_empty() {
             return Err(BackendError::ParseError(
                 "response has no assistant output text".to_string(),
@@ -486,14 +492,24 @@ fn find_event_end(buffer: &[u8]) -> Option<(usize, usize)> {
     }
 }
 
+/// The incomplete-response reason a provider gives when the model reached
+/// the output-token limit.
+const OUTPUT_LIMIT_REASON: &str = "max_output_tokens";
+
 /// Builds the response from the event stream.
 #[derive(Default)]
 struct ResponseAssembly {
+    /// The reply text exactly as it was passed to the sink: every message
+    /// item's text in order, a blank line between items.
     text: String,
+    /// Each message item's own text so far, by output index, so a completed
+    /// item can fill in whatever its deltas did not deliver.
+    messages: Vec<(Option<u64>, String)>,
     /// Tool calls by output index, their argument text accumulating.
     calls: Vec<PendingCall>,
     completed: bool,
-    failed: Option<String>,
+    reached_output_limit: bool,
+    failed: Option<BackendError>,
 }
 
 #[derive(Default)]
@@ -511,11 +527,16 @@ impl ResponseAssembly {
         credential: Option<&Credential>,
     ) -> Result<(), BackendError> {
         let kind = event["type"].as_str().unwrap_or_default();
+        let output_index = event["output_index"].as_u64();
         match kind {
             "response.output_text.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
-                    self.text.push_str(delta);
-                    sink(StreamDelta::Text(delta.to_string()));
+                    self.push_text(output_index, delta, sink);
+                }
+            }
+            "response.output_text.done" => {
+                if let Some(text) = event["text"].as_str() {
+                    self.settle_text(output_index, text, sink);
                 }
             }
             "response.output_item.added" => {
@@ -540,65 +561,139 @@ impl ResponseAssembly {
                 // The completed item carries the whole call: authoritative
                 // over any deltas, and the only form some gateways send.
                 let item = &event["item"];
-                if item["type"].as_str() == Some("function_call") {
-                    let id = item["call_id"].as_str().unwrap_or_default();
-                    let arguments = item["arguments"].as_str().unwrap_or_default().to_string();
-                    match self.calls.iter_mut().find(|call| call.id == id) {
-                        Some(call) => call.arguments = arguments,
-                        None => self.calls.push(PendingCall {
-                            id: id.to_string(),
-                            name: item["name"].as_str().unwrap_or_default().to_string(),
-                            arguments,
-                        }),
+                match item["type"].as_str() {
+                    Some("function_call") => {
+                        let id = item["call_id"].as_str().unwrap_or_default();
+                        let arguments = item["arguments"].as_str().unwrap_or_default().to_string();
+                        match self.calls.iter_mut().find(|call| call.id == id) {
+                            Some(call) => call.arguments = arguments,
+                            None => self.calls.push(PendingCall {
+                                id: id.to_string(),
+                                name: item["name"].as_str().unwrap_or_default().to_string(),
+                                arguments,
+                            }),
+                        }
                     }
+                    Some("message") => {
+                        let text: String = item["content"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|part| part["type"].as_str() == Some("output_text"))
+                            .filter_map(|part| part["text"].as_str())
+                            .collect();
+                        self.settle_text(output_index, &text, sink);
+                    }
+                    _ => {}
                 }
             }
             "response.completed" => self.completed = true,
-            "response.failed" | "response.incomplete" => {
-                let error = &event["response"]["error"];
-                self.failed = Some(format_provider_error(
-                    None,
-                    &ProviderError {
-                        kind: error["type"].as_str().map(str::to_string),
-                        code: error["code"].as_str().map(str::to_string),
-                        message: error["message"].as_str().map(str::to_string),
-                    },
+            "response.incomplete" => {
+                let reason = event["response"]["incomplete_details"]["reason"].as_str();
+                if reason == Some(OUTPUT_LIMIT_REASON) {
+                    self.reached_output_limit = true;
+                } else {
+                    self.failed = Some(stream_error(
+                        &ProviderError {
+                            kind: None,
+                            code: reason.map(str::to_string),
+                            message: Some(
+                                "the provider ended the response before it was finished"
+                                    .to_string(),
+                            ),
+                        },
+                        credential,
+                    ));
+                }
+            }
+            "response.failed" => {
+                self.failed = Some(stream_error(
+                    &ProviderError::from_json(&event["response"]["error"]),
                     credential,
                 ));
             }
             "error" => {
-                self.failed = Some(format_provider_error(
-                    None,
-                    &ProviderError {
-                        kind: event["type"].as_str().map(str::to_string),
-                        code: event["code"].as_str().map(str::to_string),
-                        message: event["message"].as_str().map(str::to_string),
-                    },
-                    credential,
-                ));
+                // OpenAI puts the fields on the event itself; a gateway
+                // relaying an upstream error nests them under `error`. On
+                // the event, `type` is the event's own type, not the cause.
+                let error = if event["error"].is_object() {
+                    ProviderError::from_json(&event["error"])
+                } else {
+                    ProviderError {
+                        kind: None,
+                        ..ProviderError::from_json(&event)
+                    }
+                };
+                self.failed = Some(stream_error(&error, credential));
             }
             _ => {}
         }
         Ok(())
     }
 
+    /// Add `piece` to the text of the message item at `index` (the latest
+    /// item when the event names none) and pass it on. The first text of a
+    /// later item is set off from the earlier items' by a blank line.
+    fn push_text(&mut self, index: Option<u64>, piece: &str, sink: DeltaSink<'_>) {
+        if piece.is_empty() {
+            return;
+        }
+        let existing = match index {
+            Some(_) => self.messages.iter().position(|(item, _)| *item == index),
+            None => self.messages.len().checked_sub(1),
+        };
+        let position = existing.unwrap_or_else(|| {
+            self.messages.push((index, String::new()));
+            self.messages.len() - 1
+        });
+        let mut delta = String::new();
+        if self.messages[position].1.is_empty() && !self.text.is_empty() {
+            delta.push_str("\n\n");
+        }
+        delta.push_str(piece);
+        self.messages[position].1.push_str(piece);
+        self.text.push_str(&delta);
+        sink(StreamDelta::Text(delta));
+    }
+
+    /// A message item's whole text, as its completion reports it. Text the
+    /// deltas did not deliver — all of it, from a gateway that sends none —
+    /// is passed on now. Text the deltas did deliver stands as delivered,
+    /// since the user has already read it.
+    fn settle_text(&mut self, index: Option<u64>, whole: &str, sink: DeltaSink<'_>) {
+        let streamed = match index {
+            Some(_) => self.messages.iter().find(|(item, _)| *item == index),
+            None => self.messages.last(),
+        }
+        .map(|(_, text)| text.as_str())
+        .unwrap_or_default();
+        if let Some(rest) = whole.strip_prefix(streamed) {
+            self.push_text(index, rest, sink);
+        }
+    }
+
     fn finish(self) -> Result<ModelResponse, BackendError> {
         if let Some(failure) = self.failed {
-            return Err(BackendError::RequestFailed(failure));
+            return Err(failure);
         }
-        if !self.completed {
+        if !self.completed && !self.reached_output_limit {
             return Err(BackendError::ParseError(
                 "the stream ended before the response completed".to_string(),
             ));
         }
         let mut tool_calls = Vec::with_capacity(self.calls.len());
         for call in self.calls {
-            let arguments = serde_json::from_str(&call.arguments).map_err(|error| {
-                BackendError::ParseError(format!(
-                    "tool call {} carried unreadable arguments: {error}",
-                    call.name
-                ))
-            })?;
+            let arguments = match serde_json::from_str(&call.arguments) {
+                Ok(arguments) => arguments,
+                // The limit fell while this call was being written.
+                Err(_) if self.reached_output_limit => continue,
+                Err(error) => {
+                    return Err(BackendError::ParseError(format!(
+                        "tool call {} carried unreadable arguments: {error}",
+                        call.name
+                    )));
+                }
+            };
             tool_calls.push(ToolCall {
                 id: call.id,
                 name: call.name,
@@ -608,6 +703,7 @@ impl ResponseAssembly {
         Ok(ModelResponse {
             text: self.text,
             tool_calls,
+            reached_output_limit: self.reached_output_limit,
         })
     }
 }
@@ -625,6 +721,29 @@ struct ProviderError {
     kind: Option<String>,
     code: Option<String>,
     message: Option<String>,
+}
+
+impl ProviderError {
+    /// The fields of an error object as a stream event carries it.
+    fn from_json(error: &serde_json::Value) -> Self {
+        let field = |name: &str| error[name].as_str().map(str::to_string);
+        Self {
+            kind: field("type"),
+            code: field("code"),
+            message: field("message"),
+        }
+    }
+}
+
+/// An error the provider reported inside a stream it had accepted: a
+/// refusal by cause where its words name one, as a refusal before the
+/// stream would be.
+fn stream_error(error: &ProviderError, credential: Option<&Credential>) -> BackendError {
+    let detail = format_provider_error(None, error, credential);
+    match refusal_cause(StatusCode::OK, error) {
+        Some(cause) => BackendError::Refused { cause, detail },
+        None => BackendError::RequestFailed(detail),
+    }
 }
 
 fn map_transport_error(error: reqwest::Error) -> BackendError {
@@ -955,6 +1074,168 @@ mod tests {
         assert_eq!(kinds, ["a", "b"]);
     }
 
+    /// Run `events` through a fresh assembly, returning the response and
+    /// the text the sink was handed.
+    fn assemble(
+        events: &[serde_json::Value],
+        credential: Option<&Credential>,
+    ) -> (Result<ModelResponse, BackendError>, String) {
+        let mut assembly = ResponseAssembly::default();
+        let mut streamed = String::new();
+        let mut sink = |delta: StreamDelta| {
+            if let StreamDelta::Text(text) = delta {
+                streamed.push_str(&text);
+            }
+        };
+        for event in events {
+            assembly
+                .apply(event.clone(), &mut sink, credential)
+                .unwrap();
+        }
+        (assembly.finish(), streamed)
+    }
+
+    fn call_done(index: u64, id: &str, arguments: &str) -> serde_json::Value {
+        serde_json::json!({"type": "response.output_item.done", "output_index": index,
+            "item": {"type": "function_call", "call_id": id, "name": "run_script", "arguments": arguments}})
+    }
+
+    #[test]
+    fn a_response_cut_off_at_the_output_limit_keeps_its_text_and_every_whole_call() {
+        let (response, streamed) = assemble(
+            &[
+                serde_json::json!({"type": "response.output_text.delta", "output_index": 0,
+                    "delta": "Building the duct now."}),
+                call_done(1, "call_1", r#"{"code": "x = 1", "summary": "first"}"#),
+                call_done(2, "call_2", r#"{"code": "y = "#),
+                serde_json::json!({"type": "response.incomplete", "response": {"status": "incomplete",
+                    "error": null, "incomplete_details": {"reason": "max_output_tokens"}}}),
+            ],
+            None,
+        );
+        let response = response.unwrap();
+        assert!(response.reached_output_limit);
+        assert_eq!(response.text, "Building the duct now.");
+        assert_eq!(streamed, response.text);
+        let ids: Vec<_> = response.tool_calls.iter().map(|call| &call.id).collect();
+        assert_eq!(ids, ["call_1"], "the call cut off mid-arguments is dropped");
+    }
+
+    #[test]
+    fn a_response_ended_early_for_another_reason_fails_naming_the_reason() {
+        let (response, streamed) = assemble(
+            &[
+                serde_json::json!({"type": "response.output_text.delta", "delta": "Half"}),
+                serde_json::json!({"type": "response.incomplete", "response": {
+                    "incomplete_details": {"reason": "content_filter"}}}),
+            ],
+            None,
+        );
+        let error = response.unwrap_err();
+        assert!(matches!(error, BackendError::RequestFailed(_)), "{error:?}");
+        assert!(error.to_string().contains("content_filter"), "{error}");
+        assert_eq!(streamed, "Half", "what streamed was still passed on");
+    }
+
+    #[test]
+    fn an_error_event_is_read_from_its_nested_error_or_its_own_fields() {
+        let credential = Credential::new("fake-secret".to_string());
+        let (nested, _) = assemble(
+            &[
+                serde_json::json!({"type": "error", "error": {"type": "server_error",
+                "code": "internal_server_error", "message": "upstream fell over near fake-secret"}}),
+            ],
+            Some(&credential),
+        );
+        let nested = nested.unwrap_err().to_string();
+        assert!(nested.contains("type server_error"), "{nested}");
+        assert!(nested.contains("upstream fell over"), "{nested}");
+        assert!(!nested.contains("type error"), "{nested}");
+        assert!(!nested.contains("fake-secret"), "{nested}");
+
+        let (flat, _) = assemble(
+            &[serde_json::json!({"type": "error", "code": "server_error", "message": "try again"})],
+            None,
+        );
+        let flat = flat.unwrap_err().to_string();
+        assert!(flat.contains("code server_error: try again"), "{flat}");
+        assert!(!flat.contains("type error"), "{flat}");
+
+        let (refused, _) = assemble(
+            &[
+                serde_json::json!({"type": "error", "error": {"type": "rate_limit_error",
+                "message": "usage limit reached"}}),
+            ],
+            None,
+        );
+        assert!(matches!(
+            refused.unwrap_err(),
+            BackendError::Refused {
+                cause: RefusalCause::UsageLimit,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn text_the_deltas_did_not_deliver_is_taken_from_the_completed_item() {
+        let message_done = |index: u64, text: &str| {
+            serde_json::json!({"type": "response.output_item.done", "output_index": index,
+                "item": {"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]}})
+        };
+        let completed = serde_json::json!({"type": "response.completed", "response": {}});
+
+        // A gateway that sends no deltas at all.
+        let (response, streamed) =
+            assemble(&[message_done(0, "Whole reply."), completed.clone()], None);
+        assert_eq!(response.unwrap().text, "Whole reply.");
+        assert_eq!(streamed, "Whole reply.");
+
+        // Deltas that stop short, then a second message item: the first is
+        // completed from its item, and the second is set off from it.
+        let (response, streamed) = assemble(
+            &[
+                serde_json::json!({"type": "response.output_text.delta", "output_index": 0,
+                    "delta": "Looking at "}),
+                message_done(0, "Looking at the flange."),
+                call_done(1, "call_1", "{}"),
+                serde_json::json!({"type": "response.output_text.delta", "output_index": 2,
+                    "delta": "Then the bore."}),
+                message_done(2, "Then the bore."),
+                completed,
+            ],
+            None,
+        );
+        let response = response.unwrap();
+        assert_eq!(response.text, "Looking at the flange.\n\nThen the bore.");
+        assert_eq!(
+            streamed, response.text,
+            "the user read what the model is shown"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_text_request_cut_off_at_the_output_limit_is_an_error() {
+        let (base_url, _, server) = recording_server(vec![ScriptedResponse {
+            status: 200,
+            body: events(&[
+                serde_json::json!({"type": "response.output_text.delta", "delta": "partial"}),
+                serde_json::json!({"type": "response.incomplete", "response": {
+                    "incomplete_details": {"reason": "max_output_tokens"}}}),
+            ]),
+            streamed: true,
+            delay: None,
+        }])
+        .await;
+        let error = client(&base_url, None)
+            .request_text("i", "x", CancelFlag::new())
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(error.to_string().contains("output limit"), "{error}");
+    }
+
     #[test]
     fn a_context_window_is_read_under_any_of_the_spellings_endpoints_use() {
         let read = |record: serde_json::Value| advertised_context_window(&record);
@@ -1265,8 +1546,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stream_that_never_completes_is_a_parse_error_and_a_failed_response_is_a_request_error()
-     {
+    async fn a_stream_that_never_completes_is_a_parse_error_and_a_failed_response_is_read_by_cause()
+    {
         let (base_url, _, server) = recording_server(vec![
             ScriptedResponse {
                 status: 200,
@@ -1293,7 +1574,13 @@ mod tests {
             .await
             .unwrap_err();
         server.await.unwrap();
-        assert!(matches!(failed, BackendError::RequestFailed(_)));
+        assert!(matches!(
+            failed,
+            BackendError::Refused {
+                cause: RefusalCause::Overloaded,
+                ..
+            }
+        ));
         assert!(failed.to_string().contains("overloaded"));
     }
 
