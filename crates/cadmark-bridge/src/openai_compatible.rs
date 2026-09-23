@@ -1514,7 +1514,10 @@ mod tests {
         assert_eq!(body["input"][3]["type"], "function_call_output");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "run_script");
-        assert_eq!(body["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            body["tools"].as_array().unwrap().len(),
+            crate::tools::tools_for(true).len()
+        );
     }
 
     #[tokio::test]

@@ -1001,6 +1001,9 @@ fn tool_call_label(activity: &ToolActivity, live: bool) -> String {
 fn tool_verb(tool: &str) -> &str {
     match tool {
         "run_script" => "ran the script",
+        "edit_script" => "edited the script",
+        "read_script" => "read the script",
+        "run_python" => "ran a Python snippet",
         "lookup_docs" => "looked up docs",
         "render_view" => "looked at the render",
         "reference_images" => "looked at the reference images",
@@ -1012,6 +1015,9 @@ fn tool_verb(tool: &str) -> &str {
 fn tool_in_progress(tool: &str) -> &str {
     match tool {
         "run_script" => "running the script",
+        "edit_script" => "editing the script",
+        "read_script" => "reading the script",
+        "run_python" => "running a Python snippet",
         "lookup_docs" => "looking up docs",
         "render_view" => "looking at the render",
         "reference_images" => "looking at the reference images",
@@ -1020,16 +1026,14 @@ fn tool_in_progress(tool: &str) -> &str {
     }
 }
 
-/// The arguments as the user reads them: a script shows as its code, the
-/// rest as pretty JSON.
+/// The arguments as the user reads them: code shows as code, an edit as
+/// the text taken out and the text put in, the rest as pretty JSON.
 fn tool_input_text(activity: &ToolActivity) -> String {
-    match activity
-        .arguments
-        .get("code")
-        .and_then(|code| code.as_str())
-    {
-        Some(code) => code.to_string(),
-        None => serde_json::to_string_pretty(&activity.arguments).unwrap_or_default(),
+    let text = |key: &str| activity.arguments.get(key).and_then(|value| value.as_str());
+    match (text("code"), text("old_text"), text("new_text")) {
+        (Some(code), _, _) => code.to_string(),
+        (None, Some(old), Some(new)) => format!("--- replaced\n{old}\n+++ with\n{new}"),
+        _ => serde_json::to_string_pretty(&activity.arguments).unwrap_or_default(),
     }
 }
 
@@ -1187,6 +1191,7 @@ mod tests {
             failed,
             started,
             finished: output.map(|_| started + chrono::Duration::milliseconds(1500)),
+            executed_source: None,
         }
     }
 

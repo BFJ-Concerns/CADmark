@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- The AI edits the script in place rather than rewriting it: `edit_script`
+  replaces exact text and reports the edited region with line numbers,
+  `read_script` shows lines by number, and `run_script` without `code` runs
+  the file as edited. A whole-file `run_script` remains for a new part or a
+  rewrite. Edits never followed by a successful run are discarded and the
+  turn reported as failed
+- `run_python` runs scratch Python after the current script, in its
+  namespace, inside the confined kernel worker under the script limits, and
+  returns what it printed, the value of its last expression, and any
+  traceback, so the AI can measure and inspect geometry before changing the
+  script
+- What a script prints comes back to the AI with the run result, and with
+  the traceback when the script fails
 - A sketch exports as a drawing: SVG and DXF written flat in the plane the
   sketch was drawn on at true size, or STEP carrying its faces and curves.
   The Export menu offers the formats the result on screen can take
