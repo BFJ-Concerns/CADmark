@@ -1,0 +1,155 @@
+# CI on Forgejo Actions.
+#
+# This workflow runs `just verify` — the same command a dev box runs — in the
+# forge-ci/rust image, which bakes in the Rust toolchain with rustfmt and
+# clippy, cargo-nextest, just, jq, and Mesa's Vulkan drivers. What the gate
+# checks is defined in the justfile, not here, so the two cannot drift apart.
+# Adding a check means editing the justfile; this file only changes when the
+# gate needs a new tool or capability.
+#
+# The kernel embeds Python 3.12 with build123d and OCP, which the image does
+# not carry: the job installs a pinned uv, has it fetch the pinned CPython
+# 3.12 build, and runs `just bootstrap` to create the repository .venv the
+# Cargo build and the kernel tests read. Both are cached across runs.
+#
+# The renderer's tests and the offscreen render draw through wgpu and fall
+# back to a software adapter when no GPU is present; the image's
+# mesa-vulkan-drivers supplies lavapipe for that.
+#
+# CADMARK_TEST_RUNNER=nextest swaps the local `cargo test` for cargo-nextest,
+# whose ci profile retries failures so flaky tests (fail, then pass on retry)
+# surface as a "Flaky Test" label on the PR instead of hiding behind a lucky
+# green. Doctests then run under plain cargo — nextest cannot run them.
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  # Direct pushes to main are allowed past the PR gate, so run the same
+  # job on them as a post-merge tripwire. Structural integration branches
+  # get the same treatment: unit PRs into them are gated pre-merge, but
+  # the branch tip itself (merge commits and direct pushes) otherwise never
+  # runs, letting a red tip hide until the next PR's gate trips over it.
+  push:
+    branches: [main, 'structural/**']
+
+env:
+  CARGO_TERM_COLOR: always
+  UV_VERSION: "0.12.13"
+  PYTHON_VERSION: "3.12.13"
+
+jobs:
+  test:
+    if: forgejo.event_name == 'push' || (forgejo.event.pull_request.draft == false && !startsWith(forgejo.event.pull_request.head.ref, 'structural/'))
+    runs-on: docker
+    # A hang costs one runner slot for this long, not Forgejo's 3 h default.
+    timeout-minutes: 60
+    container:
+      # Built locally on the runner; its default
+      # toolchain is what the workspace builds with, since the repository
+      # pins no rust-toolchain.toml.
+      image: forge-ci/rust:latest
+    steps:
+      # A pull request whose head commit already carries a final verdict from
+      # this workflow is not re-run: the gate is deterministic, so a second run
+      # of the same tree would only repeat the answer. This happens when the
+      # WIP prefix is cleared (an `edited` event) on a head that was already
+      # judged. A prior success ends the job green in seconds; a prior failure
+      # ends it red, so the status this run posts never overwrites a red
+      # verdict with a green one — a new push is what changes the answer.
+      # A cancelled run posts status "failure" with a "Has been cancelled"
+      # description; it carries no verdict and is ignored here.
+      - name: Reuse an existing verdict for this commit
+        id: verdict
+        if: forgejo.event_name == 'pull_request'
+        run: |
+          sha="${{ forgejo.event.pull_request.head.sha }}"
+          api="${{ forgejo.server_url }}/api/v1/repos/${{ forgejo.repository }}"
+          verdict=$(curl -sf -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "$api/statuses/$sha?limit=50" \
+            | jq -r '[.[] | select(.context == "CI / test (pull_request)" and (.status == "success" or .status == "failure") and (.description | startswith("Has been") | not))][0].status // empty')
+          case "$verdict" in
+            success) echo "Commit $sha already passed this gate; reusing that verdict."; echo "reused=success" >> "$FORGEJO_OUTPUT" ;;
+            failure) echo "Commit $sha already failed this gate; push a new commit to re-run it."; exit 1 ;;
+            *) echo "No verdict yet for $sha; running the gate." ;;
+          esac
+
+      - uses: actions/checkout@v4
+        if: steps.verdict.outputs.reused == ''
+
+      - name: Restore cargo cache
+        if: steps.verdict.outputs.reused == ''
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Red runs still warm the cache — matters while the suite is
+          # being stabilised, or every retry rebuilds from cold.
+          cache-on-failure: true
+
+      # The interpreter and the venv are keyed on everything that decides
+      # their contents, so a bumped pin rebuilds them and nothing else does.
+      # Both directories must be cached together: the venv's bin/python is a
+      # symlink into the uv-managed interpreter directory.
+      - name: Restore Python runtime cache
+        id: python-cache
+        if: steps.verdict.outputs.reused == ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            .venv
+            ~/.local/share/uv/python
+          key: python-runtime-${{ env.PYTHON_VERSION }}-uv${{ env.UV_VERSION }}-${{ hashFiles('requirements.txt', 'scripts/bootstrap-python-runtime') }}
+
+      # uv is pinned in the URL so the installer fetches that release, not
+      # whatever is newest; the interpreter pin keeps the exact CPython patch
+      # part of the runtime contract rather than whichever 3.12 uv resolves.
+      - name: Install uv and Python
+        if: steps.verdict.outputs.reused == ''
+        run: |
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh
+          uv python install "${PYTHON_VERSION}"
+
+      - name: Bootstrap Python runtime
+        if: steps.verdict.outputs.reused == ''
+        run: just bootstrap --python "$(uv python find --managed-python "${PYTHON_VERSION}")"
+
+      # A no-op while the image carries rustfmt and clippy; keeps the gate
+      # working should the image be rebuilt without them.
+      - name: Install toolchain components
+        if: steps.verdict.outputs.reused == ''
+        run: rustup component add rustfmt clippy
+
+      # The whole gate, in one command — the same one a dev box runs. Steps
+      # live in the justfile, not here, so CI and local cannot drift apart.
+      - name: Verify
+        if: steps.verdict.outputs.reused == ''
+        run: just verify
+        env:
+          CADMARK_TEST_RUNNER: nextest
+
+      # A flaky test is one nextest saw fail and then pass on retry: the run
+      # is green, but the junit report carries <flakyFailure> elements and the
+      # log above marks the tests FLAKY. Label the PR so label-driven
+      # automation can react (e.g. dispatch a test hunter).
+      - name: Label PR on flaky tests
+        if: always() && github.event_name == 'pull_request' && steps.verdict.outputs.reused == ''
+        run: |
+          junit=target/nextest/ci/junit.xml
+          [ -f "$junit" ] || exit 0
+          n=$(grep -c '<flakyFailure' "$junit") || { echo "No flaky tests."; exit 0; }
+          echo "Detected $n flaky-test retry record(s) — see FLAKY lines in the nextest step."
+          api="${{ github.server_url }}/api/v1"
+          repo="${{ github.repository }}"
+          pr="${{ github.event.pull_request.number }}"
+          label_id=$(curl -sf -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "$api/repos/$repo/labels?limit=100" \
+            | jq '[.[] | select(.name == "Flaky Test")][0].id')
+          if [ -z "$label_id" ] || [ "$label_id" = "null" ]; then
+            echo "::warning::'Flaky Test' label not found on $repo — create it in repo settings"
+            exit 0
+          fi
+          curl -sf -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"labels\":[$label_id]}" \
+            "$api/repos/$repo/issues/$pr/labels" >/dev/null
+          echo "Applied 'Flaky Test' label to PR #$pr"
