@@ -38,9 +38,20 @@ fmt-check:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# Run the whole test suite. Extra arguments reach cargo test.
+# Run the whole test suite. Extra arguments reach the test runner.
+# CADMARK_TEST_RUNNER=nextest (what CI sets) runs cargo-nextest's ci profile,
+# which retries so a flaky test is reported rather than failing the run, then
+# the doctests under plain cargo, which nextest cannot run.
 test *ARGS: require-venv
-    cargo test --workspace {{ ARGS }}
+    #!/bin/sh
+    set -eu
+    case "${CADMARK_TEST_RUNNER:-cargo}" in
+        cargo) cargo test --workspace {{ ARGS }} ;;
+        nextest)
+            cargo nextest run --workspace --profile ci {{ ARGS }}
+            cargo test --workspace --doc ;;
+        *) echo "unknown CADMARK_TEST_RUNNER '$CADMARK_TEST_RUNNER' (cargo or nextest)" >&2; exit 2 ;;
+    esac
 
 # Run the tests of one crate, e.g. `just test-crate cadmark-kernel`.
 test-crate CRATE *ARGS: require-venv
