@@ -31,6 +31,11 @@ just run [dir]       # Run with a project directory (defaults to cwd)
 just install         # Build release and install as a desktop application
 ```
 
+CI (`.forgejo/workflows/ci.yml`) runs `just verify` on every pull request
+and lane push with `CADMARK_TEST_RUNNER=nextest`, which swaps `cargo test`
+for cargo-nextest's retrying `ci` profile plus the doctests. Checks belong
+in the justfile, not the workflow, so the two cannot drift.
+
 Requires Python 3.12 (cadquery-ocp). The `.cargo/config.toml` points PyO3
 at the uv-managed Python 3.12 installation. `cadmark-app` embeds an rpath
 to that runtime's `lib/` directory, and `cadmark-kernel` sets `PYTHONHOME`

@@ -931,20 +931,19 @@ fn a_grazing_surface_does_not_reveal_hidden_markers(gpu: &Gpu) {
 
 type Check = (&'static str, fn(&Gpu));
 
-/// Runs every check against one software device and reports them the way
+/// Runs the checks against one software device and reports them the way
 /// libtest would, so a failure is as visible in the gate's output as any
 /// other test's.
+///
+/// The harness answers the libtest command line that both `cargo test`
+/// and cargo-nextest drive it with: `--list --format terse` prints one
+/// `name: test` line per check (and nothing under `--ignored`, since none
+/// is), positional names select checks by substring or, with `--exact`,
+/// by whole name, and `--nocapture` is accepted and ignored because the
+/// output is never captured. Nextest lists the binary once and then runs
+/// each check in its own process, so every check still starts from a
+/// single-threaded `main` that has set the loader up first.
 fn main() {
-    // Sound only while the process is single-threaded, which is why this
-    // is `main` and not a lazily-initialised helper inside a check.
-    unsafe { prefer_software_loader() };
-
-    let gpu = software_adapter();
-    println!(
-        "\nrunning 13 tests on software adapter: {}",
-        gpu.adapter_name
-    );
-
     let checks: [Check; 13] = [
         (
             "a_sketch_region_curve_and_corner_each_answer_a_click",
@@ -1000,8 +999,60 @@ fn main() {
         ),
     ];
 
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let flag = |name: &str| args.iter().any(|arg| arg == name);
+    let ignored_only = flag("--ignored");
+
+    if flag("--list") {
+        if !ignored_only {
+            for (name, _) in checks {
+                println!("{name}: test");
+            }
+        }
+        return;
+    }
+
+    let filters: Vec<&str> = args
+        .iter()
+        .filter(|arg| !arg.starts_with("--"))
+        .map(String::as_str)
+        .collect();
+    let exact = flag("--exact");
+    let selected: Vec<Check> = if ignored_only {
+        Vec::new()
+    } else {
+        checks
+            .into_iter()
+            .filter(|(name, _)| {
+                filters.is_empty()
+                    || filters.iter().any(|filter| {
+                        if exact {
+                            name == filter
+                        } else {
+                            name.contains(filter)
+                        }
+                    })
+            })
+            .collect()
+    };
+    if selected.is_empty() {
+        println!("\nrunning 0 tests\n\ntest result: ok. 0 passed; 0 failed\n");
+        return;
+    }
+
+    // Sound only while the process is single-threaded, which is why this
+    // is `main` and not a lazily-initialised helper inside a check.
+    unsafe { prefer_software_loader() };
+
+    let gpu = software_adapter();
+    println!(
+        "\nrunning {} tests on software adapter: {}",
+        selected.len(),
+        gpu.adapter_name
+    );
+
     let mut failed = 0;
-    for (name, check) in checks {
+    for (name, check) in &selected {
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(&gpu)));
         if outcome.is_ok() {
             println!("test {name} ... ok");
@@ -1014,7 +1065,7 @@ fn main() {
     let verdict = if failed == 0 { "ok" } else { "FAILED" };
     println!(
         "\ntest result: {verdict}. {} passed; {failed} failed\n",
-        checks.len() - failed
+        selected.len() - failed
     );
     if failed > 0 {
         std::process::exit(1);
