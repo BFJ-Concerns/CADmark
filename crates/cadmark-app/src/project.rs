@@ -3,6 +3,7 @@
 // and the model currently on screen. Everything here is replaced when
 // another folder is opened; nothing here touches egui or the GPU.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -201,6 +202,11 @@ pub struct Project {
     pub exports_in_flight: usize,
     /// Distance requests waiting on the retained worker model.
     pub measurements_in_flight: usize,
+    /// Parts of the open script the user has hidden from the viewport, by
+    /// script binding name: the one identity a part keeps across rebuilds,
+    /// so a part stays hidden while the AI works on the others. The set
+    /// belongs to the script on screen and is emptied when another opens.
+    pub hidden_parts: HashSet<String>,
 }
 
 impl Project {
@@ -287,6 +293,7 @@ impl Project {
             script_modified_on_disk: false,
             exports_in_flight: 0,
             measurements_in_flight: 0,
+            hidden_parts: HashSet::new(),
         };
         project.request_reload();
         project
@@ -328,6 +335,7 @@ impl Project {
         self.script_source = None;
         self.has_script = false;
         self.script_modified_on_disk = false;
+        self.hidden_parts.clear();
         let file_name = self.part.file_name().to_string();
         if self.send(OrchestratorCommand::SetScript(file_name)).is_ok() {
             self.request_reload();
@@ -557,6 +565,13 @@ impl Project {
     pub fn active_model_part(&self) -> Option<&LoadedPart> {
         let id = self.active_model_part_id?;
         self.model_parts.iter().find(|part| part.id == id)
+    }
+
+    /// The ledger a part's elements are numbered in; with no part named,
+    /// the ledger the current selection resolves against.
+    pub fn ledger_of(&self, part: Option<PartId>) -> &ProvenanceLedger {
+        part.and_then(|PartId(id)| self.model_parts.iter().find(|part| part.id == id))
+            .map_or(&self.ledger, |part| &part.ledger)
     }
 
     /// Make one part's ledger, lineage and descriptors the ones later picks
@@ -893,6 +908,7 @@ mod tests {
             script_modified_on_disk: false,
             exports_in_flight: 0,
             measurements_in_flight: 0,
+            hidden_parts: HashSet::new(),
         };
         (project, cmd_rx)
     }

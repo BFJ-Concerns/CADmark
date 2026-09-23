@@ -168,7 +168,7 @@ Source: `crates/cadmark-ui/src/parameters.rs`, `crates/cadmark-app/src/script_pa
 
 One row per `LoadedPart` in binding order: a swatch in the part's palette colour, the name, a visibility tick box, and a warning glyph when the part is not export-ready. The active part's row is raised. Clicking a name selects the whole part (`PartsAction::Select`); the tick box hides or shows it (`PartsAction::SetVisible`).
 
-A hidden part's `GpuMesh::visible` is false, so every renderer pass skips it: it is not shaded, not in the picking texture, and not in the depth prepass. The set of hidden parts is kept on the app by script binding name (`CadmarkApp::hidden_parts`) and reapplied to each freshly executed model by name, since part ordinals are not stable across executions. Hiding the active part clears the selection.
+A hidden part's `GpuMesh::visible` is false, so every renderer pass skips it: it is not shaded, not in the picking texture, and not in the depth prepass. The set of hidden parts is kept on the project by script binding name (`Project::hidden_parts`) and reapplied to each freshly executed model by name, since part ordinals are not stable across executions; it is emptied when another script is opened (`Project::switch_part`), and a new project starts with none. Hiding the active part clears the selection.
 
 Source: `crates/cadmark-ui/src/parts.rs`, `crates/cadmark-app/src/app.rs` (`show_side_panel`, `set_part_visible`, `hidden_part_ids`).
 

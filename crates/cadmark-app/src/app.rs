@@ -281,10 +281,6 @@ pub struct CadmarkApp {
     parameters_panel: ParametersPanel,
     /// Which of the left panel's tabs is showing.
     side_panel_tab: SidePanelTab,
-    /// Parts the user has hidden from the viewport, by script binding
-    /// name: the one identity a part keeps across rebuilds, so a part
-    /// stays hidden while the AI works on the others.
-    hidden_parts: std::collections::HashSet<String>,
     /// The open part's module-level numeric names, re-read whenever the
     /// executed script changes.
     parameters: Vec<Parameter>,
@@ -377,7 +373,6 @@ impl CadmarkApp {
             code_visible: false,
             parameters_panel: ParametersPanel::default(),
             side_panel_tab: SidePanelTab::default(),
-            hidden_parts: std::collections::HashSet::new(),
             parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
@@ -1123,6 +1118,10 @@ impl CadmarkApp {
         // Picking IDs belong to the model they were assigned for.
         self.clear_selection();
         let sketch = model.sketch().cloned();
+        let hidden_names = self
+            .project()
+            .map(|project| project.hidden_parts.clone())
+            .unwrap_or_default();
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
@@ -1134,7 +1133,7 @@ impl CadmarkApp {
                         let parts = model
                             .solid()
                             .map_or(&[][..], |solid| solid.parts.as_slice());
-                        let hidden = hidden_part_ids(parts, &self.hidden_parts);
+                        let hidden = hidden_part_ids(parts, &hidden_names);
                         res.set_parts(&rs.device, parts, &hidden);
                         res.set_sketch(&rs.device, None);
                     }
@@ -1352,12 +1351,14 @@ impl CadmarkApp {
     fn apply_candidate_hover(&mut self, ctx: &egui::Context) {
         let hovered = self.overlay.hovered_candidate().cloned();
         let (line, footprint) = match (&hovered, self.project.as_ref()) {
+            // The candidate belongs to its anchor's part, which need not be
+            // the part clicked last, so it is lit from that part's ledger.
             (Some(candidate), Some(project)) => (
-                Some(candidate.source.line),
+                Some(candidate.entry.source.line),
                 candidate_highlight_ids(
-                    &project.ledger,
-                    candidate.operation_id,
-                    project.active_model_part_id.map(PartId),
+                    project.ledger_of(candidate.part),
+                    candidate.entry.operation_id,
+                    candidate.part,
                 ),
             ),
             // A hovered sketch-route row names a drawing line the ledger
@@ -2305,7 +2306,7 @@ impl CadmarkApp {
                                 id: part.id,
                                 name: &part.name,
                                 colour: part_swatch(PartId(part.id)),
-                                visible: !self.hidden_parts.contains(&part.name),
+                                visible: !project.hidden_parts.contains(&part.name),
                                 printable: export_decision(&part.validity) == ExportDecision::Ready,
                                 summary,
                             })
@@ -2334,7 +2335,7 @@ impl CadmarkApp {
     /// Show or hide one part of the model on screen. The choice is kept by
     /// the part's name, so it survives the rebuilds a turn makes.
     fn set_part_visible(&mut self, id: u32, visible: bool) {
-        let Some(project) = self.project() else {
+        let Some(project) = self.project_mut() else {
             return;
         };
         let Some(part) = project.model_parts.iter().find(|part| part.id == id) else {
@@ -2343,9 +2344,9 @@ impl CadmarkApp {
         let name = part.name.clone();
         let holds_selection = project.active_model_part_id == Some(id);
         if visible {
-            self.hidden_parts.remove(&name);
+            project.hidden_parts.remove(&name);
         } else {
-            self.hidden_parts.insert(name);
+            project.hidden_parts.insert(name);
         }
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
@@ -3093,7 +3094,6 @@ mod tests {
             code_visible: false,
             parameters_panel: ParametersPanel::default(),
             side_panel_tab: cadmark_ui::side_panel::SidePanelTab::default(),
-            hidden_parts: std::collections::HashSet::new(),
             parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
@@ -3153,7 +3153,6 @@ mod tests {
             code_visible: false,
             parameters_panel: ParametersPanel::default(),
             side_panel_tab: cadmark_ui::side_panel::SidePanelTab::default(),
-            hidden_parts: std::collections::HashSet::new(),
             parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
@@ -3729,16 +3728,101 @@ mod tests {
             String::new(),
         );
         app.set_part_visible(2, false);
-        assert!(app.hidden_parts.contains("lid"));
+        assert!(app.project().unwrap().hidden_parts.contains("lid"));
 
         // The next execution binds the lid first, so its ordinal changes.
         let rebuilt = two_part_model(&[("lid", 200.0, 6), ("bracket", 1000.0, 6)]);
         let parts = rebuilt.solid().unwrap().parts.as_slice();
-        assert_eq!(hidden_part_ids(parts, &app.hidden_parts), vec![1]);
+        assert_eq!(
+            hidden_part_ids(parts, &app.project().unwrap().hidden_parts),
+            vec![1]
+        );
 
         app.set_part_visible(2, true);
-        assert!(app.hidden_parts.is_empty());
-        assert!(hidden_part_ids(parts, &app.hidden_parts).is_empty());
+        assert!(app.project().unwrap().hidden_parts.is_empty());
+        assert!(hidden_part_ids(parts, &app.project().unwrap().hidden_parts).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_part_belongs_to_the_script_that_was_open_and_not_the_next_one() {
+        // Hiding `lid` in one script must not hide an unrelated `lid` bound
+        // by another script in the folder, or by another project.
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().install_model(
+            two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]),
+            String::new(),
+        );
+        app.set_part_visible(2, false);
+        assert!(app.project().unwrap().hidden_parts.contains("lid"));
+
+        app.project_mut()
+            .unwrap()
+            .switch_part(crate::parts::OpenPart::Named("part.py".to_string()));
+        assert!(
+            app.project().unwrap().hidden_parts.is_empty(),
+            "opening another script forgets the last one's hidden parts"
+        );
+    }
+
+    #[test]
+    fn hovering_a_candidate_lights_its_anchors_part_from_that_parts_ledger() {
+        // An anchor on part 1 and a later one on part 2 leave part 2
+        // active. Hovering part 1's candidate must light part 1's face,
+        // read from part 1's ledger, not part 2's.
+        use cadmark_core::ledger::{
+            ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+        };
+        use cadmark_ui::overlay::HoveredCandidate;
+        let (_dir, mut app) = two_part_project();
+        let mut model = two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]);
+        let entry = |line: u32, operation_id: u64| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation: SemanticOperation::Box,
+            operation_id,
+            relation: ProvenanceRelation::Generated,
+        };
+        // Operation 1 built face 3 of part 1 and face 5 of part 2; the
+        // two ledgers disagree about what it claims.
+        if let cadmark_kernel::protocol::ModelForm::Solid(solid) = &mut model.form {
+            solid.parts[0]
+                .ledger
+                .record_face(FaceId(3), LedgerValue::Resolved(entry(10, 1)))
+                .unwrap();
+            solid.parts[1]
+                .ledger
+                .record_face(FaceId(5), LedgerValue::Resolved(entry(20, 1)))
+                .unwrap();
+        }
+        app.project_mut()
+            .unwrap()
+            .install_model(model, String::new());
+        assert_eq!(app.project().unwrap().active_model_part_id, Some(2));
+
+        app.overlay = OverlayState::Active {
+            anchor: ScreenPosition { x: 0.0, y: 0.0 },
+            text: String::new(),
+            anchors: Vec::new(),
+            focused: false,
+            hovered_candidate: Some(HoveredCandidate {
+                part: Some(PartId(1)),
+                entry: entry(10, 1),
+            }),
+            hovered_sketch_line: None,
+        };
+        app.apply_candidate_hover(&egui::Context::default());
+
+        assert_eq!(app.candidate_line, Some(10));
+        assert_eq!(
+            app.renderer.highlight_ids,
+            vec![encode_pick(&Pick::Solid {
+                part: PartId(1),
+                element: TopologyElement::Face(FaceId(3)),
+            })],
+            "part 1's own face, qualified by part 1"
+        );
     }
 
     #[test]

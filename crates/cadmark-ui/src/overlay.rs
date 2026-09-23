@@ -6,7 +6,7 @@
 // anchors, so one comment can point at several elements.
 
 use cadmark_core::candidates::order_candidates;
-use cadmark_core::geometry::{GeometryContext, PickedElement, ScreenPosition};
+use cadmark_core::geometry::{GeometryContext, PartId, PickedElement, ScreenPosition};
 use cadmark_core::ledger::{LedgerValue, ProvenanceEntry};
 use cadmark_core::sketch_lineage::NoSketchRoute;
 
@@ -125,6 +125,15 @@ fn sending_note(chosen: Option<&ProvenanceEntry>, count: usize) -> String {
     }
 }
 
+/// A candidate row the pointer is over, with the part its anchor is
+/// numbered within, so the viewport lights that part's geometry rather
+/// than whichever part was clicked last.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HoveredCandidate {
+    pub part: Option<PartId>,
+    pub entry: ProvenanceEntry,
+}
+
 /// Offer every candidate source line of each ambiguous anchor, and record
 /// which one the pointer is over and which one the user chose.
 ///
@@ -134,7 +143,7 @@ fn sending_note(chosen: Option<&ProvenanceEntry>, count: usize) -> String {
 fn show_candidate_choices(
     ui: &mut egui::Ui,
     anchors: &mut [GeometryContext],
-    hovered_candidate: &mut Option<ProvenanceEntry>,
+    hovered_candidate: &mut Option<HoveredCandidate>,
 ) {
     *hovered_candidate = None;
     for context in anchors.iter_mut() {
@@ -168,7 +177,10 @@ fn show_candidate_choices(
                 .small(),
             );
             if row.hovered() {
-                *hovered_candidate = Some(candidate.clone());
+                *hovered_candidate = Some(HoveredCandidate {
+                    part: context.part,
+                    entry: candidate.clone(),
+                });
             }
             if row.clicked() {
                 context.chosen_candidate = if is_chosen {
@@ -211,7 +223,7 @@ pub enum OverlayState {
         focused: bool,
         /// The candidate row the pointer is over, recomputed each frame so
         /// the viewport and code panel can show what that line accounts for.
-        hovered_candidate: Option<ProvenanceEntry>,
+        hovered_candidate: Option<HoveredCandidate>,
         /// The sketch-route row the pointer is over, recomputed each frame
         /// so the code panel can show the drawing line it names.
         hovered_sketch_line: Option<u32>,
@@ -278,7 +290,7 @@ impl OverlayState {
     /// The candidate line the pointer is resting on, if any. Hovering a
     /// candidate is what shows the user which geometry that line accounts
     /// for; the caller drives the highlights from this.
-    pub fn hovered_candidate(&self) -> Option<&ProvenanceEntry> {
+    pub fn hovered_candidate(&self) -> Option<&HoveredCandidate> {
         match self {
             Self::Active {
                 hovered_candidate, ..
@@ -502,12 +514,12 @@ impl OverlayState {
 
 #[cfg(test)]
 mod tests {
-    use cadmark_core::geometry::{FaceId, GeometryContext, PickedElement, TopologyElement};
+    use cadmark_core::geometry::{FaceId, GeometryContext, PartId, PickedElement, TopologyElement};
     use cadmark_core::ledger::{
         LedgerValue, ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
     };
 
-    use super::{OverlayState, context_summary};
+    use super::{HoveredCandidate, OverlayState, context_summary};
 
     #[test]
     fn overlay_summary_reads_as_plain_language() {
@@ -540,7 +552,7 @@ mod tests {
 
     #[test]
     fn the_same_element_number_on_two_parts_is_two_anchors() {
-        use cadmark_core::geometry::{PartId, ScreenPosition};
+        use cadmark_core::geometry::ScreenPosition;
         let anchor = |part: u32| GeometryContext {
             part: Some(PartId(part)),
             element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
@@ -708,6 +720,15 @@ mod tests {
         anchors: &mut [GeometryContext],
         pointer: egui::Pos2,
     ) -> Option<ProvenanceEntry> {
+        hovered_at(ctx, anchors, pointer).map(|hovered| hovered.entry)
+    }
+
+    /// As `hover_at`, with the part the hovered row's anchor belongs to.
+    fn hovered_at(
+        ctx: &egui::Context,
+        anchors: &mut [GeometryContext],
+        pointer: egui::Pos2,
+    ) -> Option<HoveredCandidate> {
         let mut hovered = None;
         for _ in 0..2 {
             let mut input = egui::RawInput {
@@ -879,6 +900,52 @@ mod tests {
             hover_at(&ctx, &mut anchors, egui::pos2(20.0, 590.0)),
             None,
             "the pointer away from every row must publish no candidate"
+        );
+    }
+
+    #[test]
+    fn a_hovered_candidate_names_the_part_its_anchor_is_on() {
+        // Two anchors on two parts, each ambiguous. Hovering a row under
+        // the second anchor must publish the second part, whichever part
+        // the user clicked last, so the viewport lights the right solid.
+        let ctx = egui::Context::default();
+        let (context, candidates) = ambiguous_anchor();
+        let mut on_first = context.clone();
+        on_first.part = Some(PartId(1));
+        let mut on_second = context;
+        on_second.part = Some(PartId(2));
+        let mut anchors = vec![on_first, on_second];
+
+        let rows: Vec<_> = (0..600)
+            .map(|y| egui::pos2(20.0, y as f32))
+            .filter_map(|pointer| hovered_at(&ctx, &mut anchors, pointer))
+            .fold(Vec::new(), |mut rows: Vec<HoveredCandidate>, hovered| {
+                if rows.last() != Some(&hovered) {
+                    rows.push(hovered);
+                }
+                rows
+            });
+        assert_eq!(
+            rows,
+            vec![
+                HoveredCandidate {
+                    part: Some(PartId(1)),
+                    entry: candidates[0].clone()
+                },
+                HoveredCandidate {
+                    part: Some(PartId(1)),
+                    entry: candidates[1].clone()
+                },
+                HoveredCandidate {
+                    part: Some(PartId(2)),
+                    entry: candidates[0].clone()
+                },
+                HoveredCandidate {
+                    part: Some(PartId(2)),
+                    entry: candidates[1].clone()
+                },
+            ],
+            "each anchor's rows carry that anchor's part"
         );
     }
 
