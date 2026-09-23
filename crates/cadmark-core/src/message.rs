@@ -110,6 +110,14 @@ pub enum MessageKind {
     /// A run of consecutive tool calls in one turn, grouped so a long
     /// turn reads as one collapsed entry.
     ToolCalls(Vec<ToolActivity>),
+    /// The model's reasoning before one reply: how long it took, and
+    /// whatever of it the provider shares (nothing, from a provider that
+    /// keeps its reasoning private). Shown so a long silence reads as work;
+    /// never replayed to the model.
+    Thinking {
+        /// When the reasoning ended; `None` while it is still going.
+        finished: Option<DateTime<Utc>>,
+    },
     /// A note from CADmark itself rather than the AI: an execution failure,
     /// a provider error, or AI being unavailable.
     Notice { is_error: bool },
@@ -183,6 +191,12 @@ impl Message {
     /// A group of tool calls; its text is unused.
     pub fn tool_calls(activities: Vec<ToolActivity>) -> Self {
         Self::new(MessageKind::ToolCalls(activities), "")
+    }
+
+    /// The model's reasoning before a reply, begun now; its text grows as
+    /// the provider shares any.
+    pub fn thinking() -> Self {
+        Self::new(MessageKind::Thinking { finished: None }, "")
     }
 
     /// A note from CADmark about the session: shown quietly, not as speech.
@@ -302,6 +316,10 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 impl Message {
     fn estimated_tokens(&self) -> usize {
+        // Reasoning is never sent back to the model, so it occupies nothing.
+        if let MessageKind::Thinking { .. } = &self.kind {
+            return 0;
+        }
         let image_tokens = self.attachments.len() * IMAGE_TOKENS;
         let mut characters = self.text.chars().count();
         if let MessageKind::ToolCalls(activities) = &self.kind {

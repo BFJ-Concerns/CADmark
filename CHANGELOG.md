@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- The AI's thinking shows in the chat while a turn runs: "thinking…" as
+  it reasons before each reply, then "thought for 2m 05s" once it speaks
+  or calls a tool, opening to the reasoning text where the provider shares
+  any. Reasoning counts as activity, so a long think no longer reads as a
+  quiet stream, and a turn that ends during one records how long it was
+
+### Changed
+- The AI says what it is about to do before each tool call, or each run
+  of related calls, and what a result changed when it matters, so the
+  text between the tool lines reads as a running commentary rather than
+  a single line per reply
+
 ## [0.2.0] - 2026-09-23
 
 ### Added
