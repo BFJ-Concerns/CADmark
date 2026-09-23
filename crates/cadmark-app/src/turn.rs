@@ -1,8 +1,8 @@
 // One AI turn as an agentic loop. The model is asked, it answers with text
-// or tool calls, the tools run (write and execute the script; look up
-// documentation; look at the render), their results go back, and the loop
-// continues until the model answers without a tool call or the user
-// cancels. Every step is reported as an event so the chat pane can show
+// or tool calls, the tools run (edit, read and execute the script; run a
+// scratch snippet; look up documentation; look at the render), their
+// results go back, and the loop continues until the model answers without
+// a tool call or the user cancels. Every step is reported as an event so the chat pane can show
 // what is happening and the viewport can rebuild after each execution.
 //
 // The loop is written over traits — the model, the script executor, the
@@ -23,8 +23,9 @@ use cadmark_bridge::backend::{
 use cadmark_bridge::examples;
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
 use cadmark_bridge::tools::{
-    KEEP_REFERENCE, KeepReferenceArgs, KeepReferenceSource, LOOKUP_DOCS, LookupDocsArgs,
-    REFERENCE_IMAGES, RENDER_VIEW, RUN_SCRIPT, ReferenceImagesArgs, RenderView, RenderViewArgs,
+    EDIT_SCRIPT, EditScriptArgs, KEEP_REFERENCE, KeepReferenceArgs, KeepReferenceSource,
+    LOOKUP_DOCS, LookupDocsArgs, READ_SCRIPT, REFERENCE_IMAGES, RENDER_VIEW, RUN_PYTHON,
+    RUN_SCRIPT, ReadScriptArgs, ReferenceImagesArgs, RenderView, RenderViewArgs, RunPythonArgs,
     RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
@@ -33,7 +34,7 @@ use cadmark_core::message::{
     ContextUsage, Conversation, IMAGE_TOKENS, ImageAttachment, MessageKind, estimate_tokens,
 };
 use cadmark_core::skills;
-use cadmark_kernel::protocol::{ExecutedModel, ModelForm};
+use cadmark_kernel::protocol::{ExecutedModel, ModelForm, SnippetOutcome};
 use cadmark_kernel::worker::WorkerError;
 
 use crate::script_parameters;
@@ -78,11 +79,13 @@ pub enum TurnEvent {
         tool: String,
         arguments: serde_json::Value,
     },
-    /// A tool call ended with this output.
+    /// A tool call ended with this output. `executed` is the script text
+    /// a successful `run_script` ran, for the conversation's record.
     ToolFinished {
         call_id: String,
         output: String,
         failed: bool,
+        executed: Option<String>,
     },
     /// A script executed successfully mid-turn; the viewport shows it.
     ModelBuilt {
@@ -122,6 +125,15 @@ pub trait ScriptExecutor: Send {
         script_path: &Path,
         cancel: &CancelFlag,
     ) -> Result<ExecutedModel, WorkerError>;
+
+    /// Run a scratch snippet under the execution ceilings: after the
+    /// script at `script_path` when one is given, alone otherwise.
+    fn run_snippet(
+        &mut self,
+        script_path: Option<&Path>,
+        code: &str,
+        cancel: &CancelFlag,
+    ) -> Result<SnippetOutcome, WorkerError>;
 }
 
 /// Answers the documentation tool.
@@ -334,6 +346,7 @@ impl<
                     arguments: call.arguments.clone(),
                 });
                 let mut rendered = None;
+                let mut executed = None;
                 let (output, failed) = match self
                     .run_tool(&call, &mut attempt, &attachments, &mut emit)
                     .await
@@ -361,6 +374,7 @@ impl<
                             source: code.clone(),
                         });
                         let output = describe_model(&model);
+                        executed = Some(code.clone());
                         last_good = Some((code, model, summary));
                         last_failure = None;
                         (output, false)
@@ -376,6 +390,7 @@ impl<
                     call_id: call.id.clone(),
                     output: output.clone(),
                     failed,
+                    executed,
                 });
                 items.push(ModelItem::ToolCall(call.clone()));
                 items.push(ModelItem::ToolResult {
@@ -418,6 +433,15 @@ impl<
             }
             None => match last_failure {
                 Some(error) => self.abort(original.as_deref(), TurnOutcome::Failed { error }),
+                // Edits with no successful run behind them are not a
+                // result: the file goes back to how the turn found it.
+                None if std::fs::read_to_string(&self.script_path).ok() != original => self.abort(
+                    original.as_deref(),
+                    TurnOutcome::Failed {
+                        error: "The AI edited the script but never ran it successfully."
+                            .to_string(),
+                    },
+                ),
                 None => TurnOutcome::Answered,
             },
         }
@@ -466,19 +490,114 @@ impl<
                 emit(TurnEvent::Phase(format!(
                     "running the script, attempt {attempt}"
                 )));
-                if let Err(error) = std::fs::write(&self.script_path, &args.code) {
-                    return ToolRun::Abort(TurnOutcome::Failed {
-                        error: format!("could not write the script: {error}"),
-                    });
-                }
+                let code = match args.code {
+                    Some(code) => {
+                        if let Err(error) = std::fs::write(&self.script_path, &code) {
+                            return ToolRun::Abort(TurnOutcome::Failed {
+                                error: format!("could not write the script: {error}"),
+                            });
+                        }
+                        code
+                    }
+                    None => match std::fs::read_to_string(&self.script_path) {
+                        Ok(code) => code,
+                        Err(_) => {
+                            return ToolRun::Output {
+                                output: "There is no script to run yet: pass the complete \
+                                         file in `code`."
+                                    .to_string(),
+                                failed: true,
+                            };
+                        }
+                    },
+                };
                 match self.executor.execute(&self.script_path, &self.cancel) {
                     Ok(model) => ToolRun::Built {
-                        code: args.code,
+                        code,
                         model: Box::new(model),
                         summary: args.summary,
                     },
                     Err(error) if error.is_script_fault() => ToolRun::Output {
                         output: format!("The script failed:\n{error}"),
+                        failed: true,
+                    },
+                    Err(WorkerError::Cancelled) => ToolRun::Abort(TurnOutcome::Cancelled),
+                    Err(error) => ToolRun::Abort(TurnOutcome::Failed {
+                        error: error.to_string(),
+                    }),
+                }
+            }
+            EDIT_SCRIPT => {
+                let args: EditScriptArgs = match serde_json::from_value(call.arguments.clone()) {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                emit(TurnEvent::Phase("editing the script".to_string()));
+                let Ok(source) = std::fs::read_to_string(&self.script_path) else {
+                    return ToolRun::Output {
+                        output: "There is no script to edit yet: create it with `run_script` \
+                                 and the complete file in `code`."
+                            .to_string(),
+                        failed: true,
+                    };
+                };
+                match apply_edit(&source, &args.old_text, &args.new_text, args.replace_all) {
+                    Ok(edit) => {
+                        if let Err(error) = std::fs::write(&self.script_path, &edit.source) {
+                            return ToolRun::Abort(TurnOutcome::Failed {
+                                error: format!("could not write the script: {error}"),
+                            });
+                        }
+                        ToolRun::Output {
+                            output: edit.report,
+                            failed: false,
+                        }
+                    }
+                    Err(reason) => ToolRun::Output {
+                        output: reason,
+                        failed: true,
+                    },
+                }
+            }
+            READ_SCRIPT => {
+                let args: ReadScriptArgs = match serde_json::from_value(call.arguments.clone()) {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                emit(TurnEvent::Phase("reading the script".to_string()));
+                match std::fs::read_to_string(&self.script_path) {
+                    Ok(source) => ToolRun::Output {
+                        output: numbered_lines(&source, args.start_line, args.end_line),
+                        failed: false,
+                    },
+                    Err(_) => ToolRun::Output {
+                        output: "There is no script yet.".to_string(),
+                        failed: true,
+                    },
+                }
+            }
+            RUN_PYTHON => {
+                let args: RunPythonArgs = match serde_json::from_value(call.arguments.clone()) {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                emit(TurnEvent::Phase("running a Python snippet".to_string()));
+                let script = (!args.standalone).then_some(self.script_path.as_path());
+                if script.is_some_and(|path| !path.exists()) {
+                    return ToolRun::Output {
+                        output: "There is no script yet for the snippet to run after: set \
+                                 `standalone`, or create the script with `run_script` first."
+                            .to_string(),
+                        failed: true,
+                    };
+                }
+                match self.executor.run_snippet(script, &args.code, &self.cancel) {
+                    Ok(outcome) => ToolRun::Output {
+                        failed: outcome.error.is_some(),
+                        output: describe_snippet(&outcome),
+                    },
+                    Err(error) if error.is_script_fault() => ToolRun::Output {
+                        output: format!("The snippet was stopped:\n{error}"),
                         failed: true,
                     },
                     Err(WorkerError::Cancelled) => ToolRun::Abort(TurnOutcome::Cancelled),
@@ -668,6 +787,131 @@ impl ToolRun {
     }
 }
 
+/// An `edit_script` applied: the new source, and the report the model
+/// reads — each edited region with line numbers.
+#[derive(Debug)]
+struct AppliedEdit {
+    source: String,
+    report: String,
+}
+
+/// Lines of context shown either side of an edited region.
+const EDIT_CONTEXT_LINES: usize = 2;
+/// How many edited regions a `replace_all` report shows in full.
+const EDIT_REGIONS_SHOWN: usize = 5;
+
+/// Replace `old_text` in `source` with `new_text`. Exactly one occurrence
+/// is required unless `replace_all`; the refusals say what to do instead,
+/// since the model reads them.
+fn apply_edit(
+    source: &str,
+    old_text: &str,
+    new_text: &str,
+    replace_all: bool,
+) -> Result<AppliedEdit, String> {
+    if old_text.is_empty() {
+        return Err("`old_text` is empty: give the exact text to replace.".to_string());
+    }
+    let count = source.matches(old_text).count();
+    if count == 0 {
+        return Err(
+            "`old_text` was not found in the script. Copy it exactly from the \
+                    <current_script> block, whitespace included; `read_script` shows the \
+                    file with line numbers."
+                .to_string(),
+        );
+    }
+    if count > 1 && !replace_all {
+        return Err(format!(
+            "`old_text` occurs {count} times; include more surrounding lines to make it \
+             unique, or set `replace_all` to change every occurrence."
+        ));
+    }
+    let mut edited = String::with_capacity(source.len());
+    let mut starts = Vec::with_capacity(count);
+    let mut rest = source;
+    while let Some(at) = rest.find(old_text) {
+        edited.push_str(&rest[..at]);
+        starts.push(edited.len());
+        edited.push_str(new_text);
+        rest = &rest[at + old_text.len()..];
+    }
+    edited.push_str(rest);
+
+    let total = edited.lines().count();
+    let mut report = format!(
+        "Replaced {count} occurrence{}. The script is now {total} line{}.",
+        if count == 1 { "" } else { "s" },
+        if total == 1 { "" } else { "s" },
+    );
+    let new_lines = new_text.matches('\n').count();
+    for start in starts.iter().take(EDIT_REGIONS_SHOWN) {
+        let first = edited[..*start].matches('\n').count() + 1;
+        let last = first + new_lines;
+        report.push('\n');
+        report.push_str(&numbered_lines(
+            &edited,
+            Some(first.saturating_sub(EDIT_CONTEXT_LINES).max(1) as u32),
+            Some((last + EDIT_CONTEXT_LINES) as u32),
+        ));
+    }
+    if count > EDIT_REGIONS_SHOWN {
+        report.push_str(&format!("\n… and {} more.", count - EDIT_REGIONS_SHOWN));
+    }
+    Ok(AppliedEdit {
+        source: edited,
+        report,
+    })
+}
+
+/// `source` between two 1-based line numbers, inclusive, each line
+/// prefixed with its number as a traceback names it. Either bound absent
+/// means that end of the file; a range past the end says how long the
+/// file is instead.
+fn numbered_lines(source: &str, start_line: Option<u32>, end_line: Option<u32>) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    if lines.is_empty() {
+        return "The script is empty.".to_string();
+    }
+    let first = start_line.unwrap_or(1).max(1) as usize;
+    let last = (end_line.map_or(lines.len(), |end| end as usize)).min(lines.len());
+    if first > last {
+        return format!(
+            "The script has {} line{}; nothing to show from line {first}.",
+            lines.len(),
+            if lines.len() == 1 { "" } else { "s" }
+        );
+    }
+    let width = last.to_string().len();
+    lines[first - 1..last]
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| format!("{:>width$} | {line}", first + offset))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What the model reads after a snippet: what it printed, the value of
+/// its final expression, and the traceback if it raised, each only when
+/// present.
+fn describe_snippet(outcome: &SnippetOutcome) -> String {
+    let mut parts = Vec::new();
+    if !outcome.printed.trim().is_empty() {
+        parts.push(format!("Printed:\n{}", outcome.printed.trim_end()));
+    }
+    if let Some(value) = &outcome.value {
+        parts.push(format!("Value: {value}"));
+    }
+    if let Some(error) = &outcome.error {
+        parts.push(format!("Raised:\n{error}"));
+    }
+    if parts.is_empty() {
+        "Ran with no output: nothing printed and no final expression.".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
 /// The turn's opening message: chat text and every comment with its
 /// anchors, naming the images attached.
 fn render_input(input: &TurnInput) -> String {
@@ -727,10 +971,15 @@ fn last_successful_run(conversation: &Conversation) -> Option<&str> {
             MessageKind::ToolCalls(activities) => activities.iter().rev().find_map(|activity| {
                 (activity.tool == RUN_SCRIPT && !activity.failed && activity.output.is_some())
                     .then(|| {
-                        activity
-                            .arguments
-                            .get("code")
-                            .and_then(serde_json::Value::as_str)
+                        // The record of what ran; conversations saved
+                        // before it was kept carry the whole file in the
+                        // call's arguments instead.
+                        activity.executed_source.as_deref().or_else(|| {
+                            activity
+                                .arguments
+                                .get("code")
+                                .and_then(serde_json::Value::as_str)
+                        })
                     })
                     .flatten()
             }),
@@ -744,7 +993,8 @@ fn last_successful_run(conversation: &Conversation) -> Option<&str> {
 /// the panel is kept rather than overwritten from memory.
 fn current_script_block(on_disk: Option<&str>, last_run: Option<&str>) -> String {
     let Some(script) = on_disk else {
-        return "There is no script yet: the part is empty, and the first `run_script` creates it."
+        return "There is no script yet: the part is empty, and `run_script` with the complete \
+                file in `code` creates it."
             .to_string();
     };
     let mut out = String::from("The current script, as it stands on disk. ");
@@ -1005,12 +1255,18 @@ fn describe_model(model: &ExecutedModel) -> String {
             " {untraced} elements came from operations CADmark cannot trace."
         ));
     }
+    if !model.printed.trim().is_empty() {
+        text.push_str(&format!("\nPrinted:\n{}", model.printed.trim_end()));
+    }
     text
 }
 
 fn describe_tool(name: &str) -> &str {
     match name {
         RUN_SCRIPT => "run the script",
+        EDIT_SCRIPT => "edit the script",
+        READ_SCRIPT => "read the script",
+        RUN_PYTHON => "run a Python snippet",
         LOOKUP_DOCS => "look up the docs",
         RENDER_VIEW => "look at the render",
         REFERENCE_IMAGES => "look at the reference images",
@@ -1190,6 +1446,40 @@ mod tests {
         })
     }
 
+    fn edit(id: &str, old_text: &str, new_text: &str) -> Result<ModelResponse, BackendError> {
+        Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                name: EDIT_SCRIPT.to_string(),
+                arguments: serde_json::json!({"old_text": old_text, "new_text": new_text}),
+            }],
+        })
+    }
+
+    /// A `run_script` without `code`: run the file as the edits left it.
+    fn rerun(id: &str, summary: &str) -> Result<ModelResponse, BackendError> {
+        Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                name: RUN_SCRIPT.to_string(),
+                arguments: serde_json::json!({"summary": summary}),
+            }],
+        })
+    }
+
+    fn python(id: &str, code: &str, standalone: bool) -> Result<ModelResponse, BackendError> {
+        Ok(ModelResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                name: RUN_PYTHON.to_string(),
+                arguments: serde_json::json!({"code": code, "standalone": standalone}),
+            }],
+        })
+    }
+
     fn lookup(id: &str, query: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
             text: String::new(),
@@ -1203,10 +1493,17 @@ mod tests {
 
     /// An executor whose outcomes are scripted and whose executed code is
     /// recorded.
+    /// One snippet the fake executor was asked to run: the script it was
+    /// to run after, and the code.
+    type SnippetRun = (Option<PathBuf>, String);
+
     #[derive(Clone)]
     struct FakeExecutor {
         outcomes: Arc<Mutex<VecDeque<Result<(), WorkerError>>>>,
         executed: Arc<Mutex<Vec<String>>>,
+        /// Scripted snippet outcomes, and each snippet run.
+        snippets: Arc<Mutex<VecDeque<SnippetOutcome>>>,
+        snippets_run: Arc<Mutex<Vec<SnippetRun>>>,
         block_restoration: bool,
     }
 
@@ -1215,8 +1512,19 @@ mod tests {
             Self {
                 outcomes: Arc::new(Mutex::new(outcomes.into_iter().collect())),
                 executed: Arc::new(Mutex::new(Vec::new())),
+                snippets: Arc::new(Mutex::new(VecDeque::new())),
+                snippets_run: Arc::new(Mutex::new(Vec::new())),
                 block_restoration: false,
             }
+        }
+
+        fn with_snippets(self, outcomes: impl IntoIterator<Item = SnippetOutcome>) -> Self {
+            *self.snippets.lock().unwrap() = outcomes.into_iter().collect();
+            self
+        }
+
+        fn snippets_run(&self) -> Vec<SnippetRun> {
+            self.snippets_run.lock().unwrap().clone()
         }
 
         fn blocking_restoration(
@@ -1238,6 +1546,7 @@ mod tests {
             ledger: ProvenanceLedger::new(),
             sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
+            printed: String::new(),
             form: ModelForm::Sketch(cadmark_kernel::protocol::SketchResult {
                 profile: cadmark_core::sketch::SketchProfile {
                     plane: cadmark_core::sketch::SketchPlane {
@@ -1323,6 +1632,7 @@ mod tests {
             ledger: ProvenanceLedger::new(),
             sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
+            printed: String::new(),
             form: ModelForm::Solid(cadmark_kernel::protocol::SolidResult {
                 summary: ModelSummary {
                     volume: 1000.0,
@@ -1357,6 +1667,24 @@ mod tests {
             }
             outcome.map(|()| sample_model())
         }
+
+        fn run_snippet(
+            &mut self,
+            script_path: Option<&Path>,
+            code: &str,
+            _cancel: &CancelFlag,
+        ) -> Result<SnippetOutcome, WorkerError> {
+            self.snippets_run
+                .lock()
+                .unwrap()
+                .push((script_path.map(Path::to_path_buf), code.to_string()));
+            Ok(self
+                .snippets
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_default())
+        }
     }
 
     struct FakeRender;
@@ -1384,6 +1712,15 @@ mod tests {
                 mesh: cube_mesh(),
                 ..sample_model()
             })
+        }
+
+        fn run_snippet(
+            &mut self,
+            _script_path: Option<&Path>,
+            _code: &str,
+            _cancel: &CancelFlag,
+        ) -> Result<SnippetOutcome, WorkerError> {
+            Ok(SnippetOutcome::default())
         }
     }
 
@@ -1881,6 +2218,7 @@ mod tests {
                     call_id,
                     output,
                     failed,
+                    ..
                 } = event
                 {
                     finished.push((call_id, output, failed));
@@ -2059,7 +2397,7 @@ mod tests {
         );
         assert!(harness.events.iter().any(|event| matches!(
             event,
-            TurnEvent::ToolFinished { call_id, output, failed: true } if call_id == "c2" && output.contains("NameError")
+            TurnEvent::ToolFinished { call_id, output, failed: true, .. } if call_id == "c2" && output.contains("NameError")
         )));
         assert_eq!(
             harness
@@ -2087,7 +2425,15 @@ mod tests {
             item,
             ModelItem::ToolResult { call_id, output } if call_id == "c3" && output.contains("closed and valid")
         )));
-        assert_eq!(last.tools.len(), 2, "no render tool for a text-only model");
+        assert_eq!(
+            last.tools.len(),
+            tools_for(false).len(),
+            "the text-only tool set, without the image tools"
+        );
+        assert!(
+            !last.tools.iter().any(|tool| tool.name == RENDER_VIEW),
+            "no render tool for a text-only model"
+        );
     }
 
     #[tokio::test]
@@ -2246,6 +2592,7 @@ mod tests {
             failed: false,
             started: chrono::Utc::now(),
             finished: Some(chrono::Utc::now()),
+            executed_source: None,
         }])
     }
 
@@ -2359,6 +2706,7 @@ mod tests {
             failed: true,
             started: chrono::Utc::now(),
             finished: Some(chrono::Utc::now()),
+            executed_source: None,
         }]));
         let model = ScriptedModel::new([text("Same as before.")]);
         let mut harness = Harness::with_script(Some(good), FakeExecutor::new([]));
@@ -2781,6 +3129,7 @@ mod tests {
             failed: false,
             started: chrono::Utc::now(),
             finished: None,
+            executed_source: None,
         }]));
         conversation.push(Message::ai_response("Made a box."));
         conversation.push(Message::error_notice("not for the model"));
@@ -2798,5 +3147,346 @@ mod tests {
             &items[4],
             ModelItem::User { text, .. } if text == "Note from CADmark: Set width to 90 in the parameters panel."
         ));
+    }
+
+    // ── Editing, reading, and scratch snippets ────────────────────────
+
+    /// Every tool result the turn reported, as (call, output, failed, executed).
+    fn tool_results(harness: &Harness) -> Vec<(String, String, bool, Option<String>)> {
+        harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEvent::ToolFinished {
+                    call_id,
+                    output,
+                    failed,
+                    executed,
+                } => Some((call_id.clone(), output.clone(), *failed, executed.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_edit_then_a_run_without_code_executes_the_edited_file_and_keeps_it() {
+        let original = "x = 1\ny = 2\n";
+        let model = ScriptedModel::new([
+            edit("c1", "x = 1", "x = 10"),
+            rerun("c2", "Ten"),
+            text("Done."),
+        ]);
+        let mut harness = Harness::with_script(Some(original), FakeExecutor::new([Ok(())]));
+
+        let outcome = harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        assert!(
+            matches!(&outcome, TurnOutcome::Completed { summary, source, .. }
+                if summary == "Ten" && source == "x = 10\ny = 2\n"),
+            "{outcome:?}"
+        );
+        assert_eq!(harness.executor.executed(), vec!["x = 10\ny = 2\n"]);
+        assert_eq!(
+            std::fs::read_to_string(&harness.script).unwrap(),
+            "x = 10\ny = 2\n"
+        );
+        let results = tool_results(&harness);
+        assert_eq!(results[0].0, "c1");
+        assert!(!results[0].2);
+        assert!(results[0].1.contains("1 | x = 10"), "{}", results[0].1);
+        assert_eq!(results[0].3, None, "an edit executes nothing");
+        assert_eq!(results[1].0, "c2");
+        assert_eq!(
+            results[1].3.as_deref(),
+            Some("x = 10\ny = 2\n"),
+            "the run's event carries what ran"
+        );
+        assert!(harness.events.iter().any(|event| matches!(
+            event,
+            TurnEvent::Phase(phase) if phase == "editing the script"
+        )));
+        // The second request showed the model the edit result paired to
+        // its call, before the run was asked for.
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].items.iter().any(|item| matches!(
+            item,
+            ModelItem::ToolResult { call_id, output }
+                if call_id == "c1" && output.starts_with("Replaced 1 occurrence")
+        )));
+    }
+
+    #[tokio::test]
+    async fn an_edit_never_run_is_discarded_and_the_turn_says_so() {
+        let original = "x = 1\n";
+        let model = ScriptedModel::new([edit("c1", "x = 1", "x = 10"), text("Changed x.")]);
+        let mut harness = Harness::with_script(Some(original), FakeExecutor::new([]));
+
+        let outcome = harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        assert!(
+            matches!(&outcome, TurnOutcome::Failed { error } if error.contains("never ran")),
+            "{outcome:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&harness.script).unwrap(), original);
+        assert!(harness.executor.executed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_matches_nowhere_is_refused_and_the_file_is_untouched() {
+        let original = "x = 1\n";
+        let model = ScriptedModel::new([edit("c1", "z = 9", "z = 10"), text("Hm.")]);
+        let mut harness = Harness::with_script(Some(original), FakeExecutor::new([]));
+
+        let outcome = harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        assert_eq!(outcome, TurnOutcome::Answered);
+        let results = tool_results(&harness);
+        assert!(results[0].2);
+        assert!(results[0].1.contains("was not found"), "{}", results[0].1);
+        assert_eq!(std::fs::read_to_string(&harness.script).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn a_run_without_code_and_without_a_script_asks_for_the_file() {
+        let model = ScriptedModel::new([rerun("c1", "Go"), text("Nothing to run.")]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([]));
+
+        let outcome = harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        assert!(
+            matches!(&outcome, TurnOutcome::Failed { error } if error.contains("no script to run yet")),
+            "{outcome:?}"
+        );
+        assert!(!harness.script.exists());
+        assert!(harness.executor.executed().is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_script_shows_the_requested_lines_numbered() {
+        let original = "a = 1\nb = 2\nc = 3\n";
+        let model = ScriptedModel::new([
+            Ok(ModelResponse {
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: READ_SCRIPT.into(),
+                    arguments: serde_json::json!({"start_line": 2, "end_line": 3}),
+                }],
+            }),
+            text("Read it."),
+        ]);
+        let mut harness = Harness::with_script(Some(original), FakeExecutor::new([]));
+
+        let outcome = harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        assert_eq!(outcome, TurnOutcome::Answered);
+        assert_eq!(tool_results(&harness)[0].1, "2 | b = 2\n3 | c = 3");
+    }
+
+    #[tokio::test]
+    async fn run_python_runs_after_the_script_by_default_and_alone_when_standalone() {
+        let model = ScriptedModel::new([
+            python("c1", "part.part.volume", false),
+            python("c2", "2 + 3", true),
+            text("Checked."),
+        ]);
+        let executor = FakeExecutor::new([]).with_snippets([
+            SnippetOutcome {
+                printed: "faces 6\n".into(),
+                value: Some("1000.0".into()),
+                error: None,
+            },
+            SnippetOutcome {
+                printed: String::new(),
+                value: Some("5".into()),
+                error: None,
+            },
+        ]);
+        let mut harness = Harness::with_script(Some("x = 1\n"), executor);
+
+        let outcome = harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        assert_eq!(outcome, TurnOutcome::Answered);
+        assert_eq!(
+            harness.executor.snippets_run(),
+            vec![
+                (Some(harness.script.clone()), "part.part.volume".to_string()),
+                (None, "2 + 3".to_string()),
+            ]
+        );
+        let results = tool_results(&harness);
+        assert_eq!(results[0].1, "Printed:\nfaces 6\nValue: 1000.0");
+        assert!(!results[0].2);
+        assert_eq!(results[1].1, "Value: 5");
+        assert!(
+            harness.executor.executed().is_empty(),
+            "a snippet keeps no model"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snippet_traceback_is_a_failed_result_the_model_reads() {
+        let model = ScriptedModel::new([python("c1", "boom", false), text("I see.")]);
+        let executor = FakeExecutor::new([]).with_snippets([SnippetOutcome {
+            printed: String::new(),
+            value: None,
+            error: Some("  line 1: boom\nNameError: name 'boom' is not defined".into()),
+        }]);
+        let mut harness = Harness::with_script(Some("x = 1\n"), executor);
+
+        harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        let results = tool_results(&harness);
+        assert!(results[0].2);
+        assert!(
+            results[0].1.starts_with("Raised:\n  line 1: boom"),
+            "{}",
+            results[0].1
+        );
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].items.iter().any(|item| matches!(
+            item,
+            ModelItem::ToolResult { call_id, output } if call_id == "c1" && output.contains("NameError")
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_snippet_before_any_script_needs_standalone() {
+        let model = ScriptedModel::new([python("c1", "1 + 1", false), text("Ok.")]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([]));
+
+        harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        let results = tool_results(&harness);
+        assert!(results[0].2);
+        assert!(
+            results[0].1.contains("set `standalone`"),
+            "{}",
+            results[0].1
+        );
+        assert!(harness.executor.snippets_run().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_script_block_trusts_the_executed_source_of_a_run_that_carried_no_code() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("make x two"));
+        conversation.push(Message::tool_calls(vec![ToolActivity {
+            call_id: "c1".into(),
+            tool: RUN_SCRIPT.into(),
+            arguments: serde_json::json!({"summary": "Two"}),
+            output: Some("ran".into()),
+            failed: false,
+            started: chrono::Utc::now(),
+            finished: Some(chrono::Utc::now()),
+            executed_source: Some("x = 2\n".into()),
+        }]));
+        let model = ScriptedModel::new([text("Still two.")]);
+        let mut harness = Harness::with_script(Some("x = 2\n"), FakeExecutor::new([]));
+
+        harness
+            .run_with_conversation(
+                &model,
+                &conversation,
+                TurnInput::default(),
+                CancelFlag::new(),
+            )
+            .await;
+
+        let block = current_script_block_shown(&model);
+        assert!(block.contains("unchanged since your last run"), "{block}");
+    }
+
+    #[test]
+    fn an_edit_replaces_the_unique_match_and_reports_the_region_numbered() {
+        let source = "a = 1\nb = 2\nc = 3\nd = 4\ne = 5\nf = 6\ng = 7\n";
+        let edit = apply_edit(source, "c = 3", "c = 30\nc2 = 31", false).unwrap();
+        assert_eq!(
+            edit.source,
+            "a = 1\nb = 2\nc = 30\nc2 = 31\nd = 4\ne = 5\nf = 6\ng = 7\n"
+        );
+        assert_eq!(
+            edit.report,
+            "Replaced 1 occurrence. The script is now 8 lines.\n\
+             1 | a = 1\n2 | b = 2\n3 | c = 30\n4 | c2 = 31\n5 | d = 4\n6 | e = 5"
+        );
+    }
+
+    #[test]
+    fn an_edit_is_refused_when_the_text_is_missing_ambiguous_or_empty() {
+        let source = "x = 1\nx = 1\n";
+        assert!(
+            apply_edit(source, "y", "z", false)
+                .unwrap_err()
+                .contains("not found")
+        );
+        let ambiguous = apply_edit(source, "x = 1", "x = 2", false).unwrap_err();
+        assert!(ambiguous.contains("occurs 2 times"), "{ambiguous}");
+        assert!(
+            apply_edit(source, "", "z", false)
+                .unwrap_err()
+                .contains("empty")
+        );
+        let all = apply_edit(source, "x = 1", "x = 2", true).unwrap();
+        assert_eq!(all.source, "x = 2\nx = 2\n");
+        assert!(
+            all.report.starts_with("Replaced 2 occurrences."),
+            "{}",
+            all.report
+        );
+    }
+
+    #[test]
+    fn numbered_lines_bound_the_range_and_pad_the_numbers() {
+        let source = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        assert_eq!(
+            numbered_lines(source, Some(9), Some(11)),
+            " 9 | i\n10 | j\n11 | k"
+        );
+        assert_eq!(numbered_lines(source, None, Some(2)), "1 | a\n2 | b");
+        assert_eq!(numbered_lines(source, Some(10), None), "10 | j\n11 | k");
+        assert!(numbered_lines(source, Some(50), None).contains("has 11 lines"));
+        assert_eq!(numbered_lines("", None, None), "The script is empty.");
+    }
+
+    #[test]
+    fn a_run_result_carries_what_the_script_printed() {
+        let mut model = sample_model();
+        model.printed = "hole 12.2\n".into();
+        let text = describe_model(&model);
+        assert!(text.ends_with("\nPrinted:\nhole 12.2"), "{text}");
+        assert!(!describe_model(&sample_model()).contains("Printed"));
+    }
+
+    #[test]
+    fn a_snippet_outcome_reads_as_its_parts() {
+        assert_eq!(
+            describe_snippet(&SnippetOutcome::default()),
+            "Ran with no output: nothing printed and no final expression."
+        );
+        assert_eq!(
+            describe_snippet(&SnippetOutcome {
+                printed: "a\n".into(),
+                value: Some("1".into()),
+                error: None,
+            }),
+            "Printed:\na\nValue: 1"
+        );
     }
 }
