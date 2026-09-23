@@ -264,6 +264,7 @@ mod tests {
 
         let mut settings = UserSettings {
             ai: Some(AiConfiguration {
+                reasoning_effort: None,
                 base_url: "https://provider.example/v1".into(),
                 model: "m".into(),
                 accepts_images: true,

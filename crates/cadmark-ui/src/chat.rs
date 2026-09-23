@@ -19,6 +19,7 @@ use cadmark_core::ledger::LedgerValue;
 use cadmark_core::message::{
     ContextUsage, Conversation, ImageData, Message, MessageId, MessageKind, ToolActivity,
 };
+use cadmark_core::model_session::ProviderUsage;
 use cadmark_core::pending_comment::{
     PendingAnchor, PendingComment, PendingCommentId, PendingComments,
 };
@@ -193,6 +194,7 @@ impl ChatPane {
         ui: &mut egui::Ui,
         conversation: &Conversation,
         context: ContextUsage,
+        measured: Option<ProviderUsage>,
         pending: &mut PendingComments,
     ) -> ChatAction {
         // The input sits in a bottom panel so it is laid out first and the
@@ -215,7 +217,7 @@ impl ChatPane {
                 egui::TopBottomPanel::top("chat_context_usage")
                     .frame(egui::Frame::NONE)
                     .show_separator_line(false)
-                    .show_inside(ui, |ui| show_context_usage(ui, context));
+                    .show_inside(ui, |ui| show_context_usage(ui, context, measured));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.show_messages(ui, conversation, pending))
@@ -539,7 +541,7 @@ impl ChatPane {
 /// How much of the context window the next request occupies, with the
 /// breakdown on hover, and a warning when the request would be too large
 /// with no conversation at all — which no amount of condensing helps.
-fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
+fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage, measured: Option<ProviderUsage>) {
     ui.horizontal(|ui| {
         let over = context.request_alone_is_over_budget();
         let colour = if over {
@@ -558,6 +560,18 @@ fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
             .color(colour),
         )
         .on_hover_text(context_breakdown(context));
+        if let Some(usage) = measured {
+            ui.label(
+                egui::RichText::new(measured_usage_line(usage))
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            )
+            .on_hover_text(
+                "What the provider reported for the last request of a turn: the tokens it \
+                 read, how many of those its cache served, and what the model wrote, \
+                 reasoning included. The estimate before it is CADmark's own.",
+            );
+        }
         if over {
             ui.label(
                 egui::RichText::new(
@@ -571,6 +585,14 @@ fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
         }
     });
     ui.add_space(4.0);
+}
+
+/// The provider's own count for the last request, beside the estimate.
+fn measured_usage_line(usage: ProviderUsage) -> String {
+    format!(
+        "Last request: {} read ({} cached) · {} written ({} reasoning)",
+        usage.input_tokens, usage.cached_input_tokens, usage.output_tokens, usage.reasoning_tokens
+    )
 }
 
 /// The occupancy figure's parts, one per line, in estimated tokens.
@@ -1380,6 +1402,7 @@ mod tests {
                             request_tokens: 0,
                             window_tokens: 128_000,
                         },
+                        None,
                         &mut pending,
                     );
                 });
@@ -1569,6 +1592,7 @@ mod tests {
                         request_tokens: 0,
                         window_tokens: 128_000,
                     },
+                    None,
                     &mut pending,
                 );
             });
