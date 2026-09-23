@@ -45,7 +45,7 @@ Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/s
 
 ## Selection
 
-Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
+Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. Every part of a multi-part model is pickable: a picking ID carries the element within its part in the low 20 bits and the part ordinal above (`crates/cadmark-renderer/src/picking.rs`, `Pick`), so one readback names both, and a click on a part other than the active one first makes it active (`Project::select_model_part`, swapping in its ledger, lineage and descriptors) before the element is resolved. A whole part is selected from the Parts tab, or with "Pick part" in the toolbar and a viewport click. Each part is shaded from `PART_PALETTE` by ordinal.
 
 Sketch-only designs display curves, corners and filled regions face-on to the sketch plane in orthographic view, with any existing solid ghosted behind them. Each element carries the kernel's exact measurement (`SketchCurve::{curve_type, length, radius}`, `SketchRegion::area`), which the status bar reads through `SketchProfile::measurement` and the AI receives through `SketchProfile::identification`. The sketch lineage ledger of a sketch result is keyed by the same region, curve and corner IDs the profile draws under (`SketchLineageLedger::lookup_element`), built by `finalise_sketch` from the placed shape the profile was extracted from; build123d's 2D `chamfer` and `offset` report per-edge maker history and keep each curve's drawing line, while `fillet`, `make_face` and `make_hull` rebuild the outline and are recorded as the barrier the route could not cross. The three kinds are pick targets in the colour-ID pass, drawn after the solid passes with depth ignored (as the visible profile is): regions through the face vertex stage, curves as edge-width quads, corners as vertex-marker discs (`render_sketch_picking` in `crates/cadmark-renderer/src/viewport.rs`, `sketch_*_pick_vertices` in `pipeline.rs`). Their IDs occupy the sketch ranges of `picking.rs` and decode to `PickedElement::Sketch`. The filter maps Faces/Edges/Vertices to regions/curves/corners (`SelectionFilter::allows_pick`). The ghosted solid behind a sketch is excluded from the picking pass, since its ledger belongs to an earlier script. The visible sketch shader tints the selected and hovered element with the same colours the mesh pass uses.
 
@@ -152,13 +152,25 @@ For ambiguous anchors (geometry traceable to multiple source lines), the overlay
 
 Source: `crates/cadmark-ui/src/overlay.rs`, `crates/cadmark-ui/src/chat.rs:60–73`.
 
-## Parameters panel
+## Left panel: parameters and parts
+
+Two tabs behind one strip (`crates/cadmark-ui/src/side_panel.rs`), chosen by `CadmarkApp::side_panel_tab`; the strip also shows the script's file name and the part count.
+
+### Parameters
 
 Lists every module-level numeric name in the open part's script. Names bound to a literal show a drag/type field; names derived from other parameters show their expression and are read-only.
 
 Editing a value rewrites that one number in the script, rebuilds the model, and records a design step. No AI turn is involved.
 
 Source: `crates/cadmark-ui/src/parameters.rs`, `crates/cadmark-app/src/script_parameters.rs:1–53`.
+
+### Parts
+
+One row per `LoadedPart` in binding order: a swatch in the part's palette colour, the name, a visibility tick box, and a warning glyph when the part is not export-ready. The active part's row is raised. Clicking a name selects the whole part (`PartsAction::Select`); the tick box hides or shows it (`PartsAction::SetVisible`).
+
+A hidden part's `GpuMesh::visible` is false, so every renderer pass skips it: it is not shaded, not in the picking texture, and not in the depth prepass. The set of hidden parts is kept on the app by script binding name (`CadmarkApp::hidden_parts`) and reapplied to each freshly executed model by name, since part ordinals are not stable across executions. Hiding the active part clears the selection.
+
+Source: `crates/cadmark-ui/src/parts.rs`, `crates/cadmark-app/src/app.rs` (`show_side_panel`, `set_part_visible`, `hidden_part_ids`).
 
 ## Code panel
 
