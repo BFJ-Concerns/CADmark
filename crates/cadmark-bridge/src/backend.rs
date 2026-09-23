@@ -107,6 +107,11 @@ pub struct ModelRequest {
 pub struct ModelResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    /// The provider stopped the response at its output-token limit before
+    /// the model had finished. `text` is what was written up to that point
+    /// and `tool_calls` holds only the calls written in full; a call cut
+    /// off part-way is dropped, because its arguments cannot be read.
+    pub reached_output_limit: bool,
 }
 
 /// A fragment of the model's work, delivered as it arrives so the user can

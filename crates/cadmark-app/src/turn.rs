@@ -92,7 +92,29 @@ pub enum TurnEvent {
     /// The earlier conversation has been replaced by this model-written
     /// account before the next request could approach its context limit.
     ConversationCondensed { summary: String },
+    /// Something the user should know about how the turn is going, said
+    /// by CADmark rather than the AI.
+    Notice(String),
 }
+
+/// Shown in the chat when the provider cuts a reply off at its output
+/// limit and the turn carries on.
+const OUTPUT_LIMIT_NOTICE: &str = "The AI's reply reached the provider's output limit and was \
+    cut off there; CADmark kept what it had written and asked it to continue.";
+
+/// Told to the model after a reply the provider cut off at its output
+/// limit.
+const CONTINUE_AFTER_OUTPUT_LIMIT: &str = "Your last response reached the provider's output \
+    limit and was cut off. Its text and every tool call you finished writing are above; a tool \
+    call you had not finished writing was dropped and did not run. Continue from where you \
+    stopped, making any dropped call again in full.";
+
+/// The turn's error when a reply is cut off before it holds anything to
+/// continue from.
+const OUTPUT_LIMIT_WITHOUT_PROGRESS: &str = "The AI's reply reached the provider's output limit \
+    (max_output_tokens) before it had written any text or a complete tool call, so there was \
+    nothing to continue from. A higher output limit at the provider or gateway, or a smaller \
+    request, may get through.";
 
 /// How a turn ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -320,7 +342,19 @@ impl<
                     text: response.text.clone(),
                 });
             }
-            if response.tool_calls.is_empty() {
+            // A reply cut off at the output limit is kept, its whole tool
+            // calls run, and the model is asked to go on; one cut off
+            // before it wrote anything would only be cut off again.
+            let cut_off = response.reached_output_limit;
+            if cut_off && response.text.trim().is_empty() && response.tool_calls.is_empty() {
+                return self.abort(
+                    original.as_deref(),
+                    TurnOutcome::Failed {
+                        error: OUTPUT_LIMIT_WITHOUT_PROGRESS.to_string(),
+                    },
+                );
+            }
+            if response.tool_calls.is_empty() && !cut_off {
                 break;
             }
 
@@ -398,6 +432,13 @@ impl<
                     });
                 }
             }
+            if cut_off {
+                emit(TurnEvent::Notice(OUTPUT_LIMIT_NOTICE.to_string()));
+                items.push(ModelItem::User {
+                    text: CONTINUE_AFTER_OUTPUT_LIMIT.to_string(),
+                    images: Vec::new(),
+                });
+            }
         }
 
         match last_good {
@@ -433,6 +474,10 @@ impl<
         };
         let mut sink = |_delta: StreamDelta| {};
         match self.model.respond(request, self.cancel.clone(), &mut sink).await {
+            Ok(response) if response.reached_output_limit => Err(TurnOutcome::Failed {
+                error: "The conversation summary reached the provider's output limit before it was finished; the earlier conversation was kept."
+                    .to_string(),
+            }),
             Ok(response) if !response.tool_calls.is_empty() => Err(TurnOutcome::Failed {
                 error: "The AI tried to use a tool while condensing the conversation; the earlier conversation was kept."
                     .to_string(),
@@ -1174,6 +1219,7 @@ mod tests {
 
     fn text(reply: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            reached_output_limit: false,
             text: reply.to_string(),
             tool_calls: Vec::new(),
         })
@@ -1181,6 +1227,7 @@ mod tests {
 
     fn run_script(id: &str, code: &str, summary: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: id.to_string(),
@@ -1192,6 +1239,7 @@ mod tests {
 
     fn lookup(id: &str, query: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: id.to_string(),
@@ -1807,6 +1855,7 @@ mod tests {
             },
         ));
         let list = Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
@@ -1815,6 +1864,7 @@ mod tests {
             }],
         });
         let read = Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c2".into(),
@@ -1823,6 +1873,7 @@ mod tests {
             }],
         });
         let keep = Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![
                 ToolCall {
@@ -2088,6 +2139,89 @@ mod tests {
             ModelItem::ToolResult { call_id, output } if call_id == "c3" && output.contains("closed and valid")
         )));
         assert_eq!(last.tools.len(), 2, "no render tool for a text-only model");
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_at_the_output_limit_runs_its_whole_calls_and_the_model_continues() {
+        let cut_off = Ok(ModelResponse {
+            text: "Writing the duct.".to_string(),
+            reached_output_limit: true,
+            ..run_script("c1", "DUCT = 1", "Duct").unwrap()
+        });
+        let model = ScriptedModel::new([cut_off, text("The duct is done.")]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([Ok(())]));
+        let outcome = harness
+            .run(&model, chat("section the duct"), CancelFlag::new())
+            .await;
+
+        assert!(
+            matches!(&outcome, TurnOutcome::Completed { source, .. } if source == "DUCT = 1"),
+            "{outcome:?}"
+        );
+        assert_eq!(harness.executor.executed(), ["DUCT = 1"]);
+        let finished = harness
+            .events
+            .iter()
+            .position(
+                |event| matches!(event, TurnEvent::ToolFinished { call_id, .. } if call_id == "c1"),
+            )
+            .expect("the whole call ran");
+        let notice = harness
+            .events
+            .iter()
+            .position(|event| *event == TurnEvent::Notice(OUTPUT_LIMIT_NOTICE.to_string()))
+            .expect("the user is told the reply was cut off");
+        assert!(finished < notice, "{:?}", harness.events);
+
+        // The model is shown what it wrote, what its call did, and why it
+        // is being asked again.
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let items = &requests[1].items;
+        let tail: Vec<_> = items[items.len() - 4..].iter().collect();
+        assert!(
+            matches!(tail[0], ModelItem::Assistant { text } if text == "Writing the duct."),
+            "{tail:?}"
+        );
+        assert!(matches!(tail[1], ModelItem::ToolCall(call) if call.id == "c1"));
+        assert!(matches!(tail[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1"));
+        assert!(
+            matches!(tail[3], ModelItem::User { text, .. } if text == CONTINUE_AFTER_OUTPUT_LIMIT),
+            "{tail:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_at_the_output_limit_with_only_text_is_continued_too() {
+        let cut_off = Ok(ModelResponse {
+            text: "The flange needs".to_string(),
+            tool_calls: Vec::new(),
+            reached_output_limit: true,
+        });
+        let model = ScriptedModel::new([cut_off, text(" a thicker rim.")]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        let outcome = harness
+            .run(&model, chat("what would you change?"), CancelFlag::new())
+            .await;
+        assert_eq!(outcome, TurnOutcome::Answered);
+        assert_eq!(model.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_off_before_it_wrote_anything_fails_the_turn_by_that_cause() {
+        let cut_off = Ok(ModelResponse {
+            reached_output_limit: true,
+            ..ModelResponse::default()
+        });
+        let model = ScriptedModel::new([cut_off]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        let outcome = harness.run(&model, chat("do it"), CancelFlag::new()).await;
+        assert!(
+            matches!(&outcome, TurnOutcome::Failed { error } if error.contains("output limit")),
+            "{outcome:?}"
+        );
+        assert_eq!(model.requests.lock().unwrap().len(), 1, "not asked again");
+        assert_eq!(harness.on_disk().as_deref(), Some("ORIGINAL = 1"));
     }
 
     #[tokio::test]
@@ -2463,6 +2597,7 @@ mod tests {
     #[tokio::test]
     async fn a_render_reaches_the_model_as_an_image_on_the_next_request() {
         let render_call = Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
@@ -2595,6 +2730,7 @@ mod tests {
         let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
 
         let render_call = Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
@@ -2689,6 +2825,7 @@ mod tests {
         let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
 
         let build_and_look = Ok(ModelResponse {
+            reached_output_limit: false,
             text: String::new(),
             tool_calls: vec![
                 ToolCall {
