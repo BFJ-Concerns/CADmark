@@ -122,6 +122,10 @@ pub enum StreamDelta {
     Text(String),
     /// The model has begun a tool call; its arguments follow later.
     ToolCallStarted { name: String },
+    /// The model is reasoning before it answers: a piece of the reasoning
+    /// text where the provider shares it, or empty where the provider
+    /// keeps the reasoning private and sends only the beat of it.
+    Reasoning(String),
 }
 
 /// Receives stream deltas. Called on the requesting task; must not block.

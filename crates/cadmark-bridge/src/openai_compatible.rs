@@ -507,6 +507,9 @@ struct ResponseAssembly {
     messages: Vec<(Option<u64>, String)>,
     /// Tool calls by output index, their argument text accumulating.
     calls: Vec<PendingCall>,
+    /// The current reasoning part's text as delivered so far, so its
+    /// completion can fill in whatever the deltas did not.
+    reasoning_part: String,
     completed: bool,
     reached_output_limit: bool,
     failed: Option<BackendError>,
@@ -539,8 +542,33 @@ impl ResponseAssembly {
                     self.settle_text(output_index, text, sink);
                 }
             }
+            // A provider that keeps its reasoning private sends these
+            // with empty deltas; passed on, they still show the model at
+            // work.
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                self.push_reasoning(event["delta"].as_str().unwrap_or_default(), sink);
+            }
+            "response.reasoning_summary_text.done" | "response.reasoning_text.done" => {
+                if let Some(text) = event["text"].as_str()
+                    && let Some(rest) = text.strip_prefix(self.reasoning_part.as_str())
+                    && !rest.is_empty()
+                {
+                    self.push_reasoning(rest, sink);
+                }
+            }
+            // Each summary part is a paragraph of its own.
+            "response.reasoning_summary_part.added" => {
+                if !self.reasoning_part.is_empty() {
+                    sink(StreamDelta::Reasoning("\n\n".to_string()));
+                }
+                self.reasoning_part.clear();
+            }
             "response.output_item.added" => {
                 let item = &event["item"];
+                if item["type"].as_str() == Some("reasoning") {
+                    self.reasoning_part.clear();
+                    sink(StreamDelta::Reasoning(String::new()));
+                }
                 if item["type"].as_str() == Some("function_call") {
                     let name = item["name"].as_str().unwrap_or_default().to_string();
                     sink(StreamDelta::ToolCallStarted { name: name.clone() });
@@ -629,6 +657,13 @@ impl ResponseAssembly {
             _ => {}
         }
         Ok(())
+    }
+
+    /// Pass on a piece of the model's reasoning, empty pieces included:
+    /// each is a sign of life from a provider that shares no text.
+    fn push_reasoning(&mut self, piece: &str, sink: DeltaSink<'_>) {
+        self.reasoning_part.push_str(piece);
+        sink(StreamDelta::Reasoning(piece.to_string()));
     }
 
     /// Add `piece` to the text of the message item at `index` (the latest
@@ -895,6 +930,46 @@ pub(crate) mod recording {
                 serde_json::json!({"type": "response.output_text.delta", "delta": text}),
                 serde_json::json!({"type": "response.completed", "response": {"status": "completed"}}),
             ]),
+            streamed: true,
+            delay: None,
+        }
+    }
+
+    /// A streamed completed response in which the model reasons before
+    /// it speaks, as a gateway relays Claude's thinking: the reasoning
+    /// item, one empty delta, the text (if any) as deltas, and the part's
+    /// completion carrying `settled` — text the deltas may not have.
+    pub(crate) fn reasoning_then_text(
+        deltas: &[&str],
+        settled: &str,
+        text: &str,
+    ) -> ScriptedResponse {
+        let mut stream = vec![
+            serde_json::json!({"type": "response.output_item.added", "output_index": 0,
+                "item": {"id": "rs_1", "type": "reasoning", "status": "in_progress", "summary": []}}),
+            serde_json::json!({"type": "response.reasoning_summary_part.added", "item_id": "rs_1",
+                "output_index": 0, "summary_index": 0, "part": {"type": "summary_text", "text": ""}}),
+        ];
+        for delta in deltas {
+            stream.push(
+                serde_json::json!({"type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_1", "output_index": 0, "summary_index": 0, "delta": delta}),
+            );
+        }
+        stream.extend([
+            serde_json::json!({"type": "response.reasoning_summary_text.done", "item_id": "rs_1",
+                "output_index": 0, "summary_index": 0, "text": settled}),
+            serde_json::json!({"type": "response.output_item.done", "output_index": 0,
+                "item": {"id": "rs_1", "type": "reasoning", "status": "completed",
+                    "summary": [{"type": "summary_text", "text": settled}]}}),
+            serde_json::json!({"type": "response.output_item.added", "output_index": 1,
+                "item": {"id": "msg_1", "type": "message", "status": "in_progress", "content": [], "role": "assistant"}}),
+            serde_json::json!({"type": "response.output_text.delta", "output_index": 1, "delta": text}),
+            serde_json::json!({"type": "response.completed", "response": {"status": "completed"}}),
+        ]);
+        ScriptedResponse {
+            status: 200,
+            body: events(&stream),
             streamed: true,
             delay: None,
         }
@@ -1425,6 +1500,68 @@ mod tests {
         assert!(!formatted.contains("fake-secret"));
         assert!(formatted.contains("[REDACTED]"));
         assert!(formatted.chars().count() < 600);
+    }
+
+    #[tokio::test]
+    async fn reasoning_reaches_the_sink_as_it_streams_and_stays_out_of_the_reply() {
+        // A provider keeping its reasoning private: the beat arrives as
+        // empty pieces. One sharing it: the text arrives as deltas, and
+        // the part's completion fills in what the deltas left out.
+        let (base_url, _records, server) = recording_server(vec![
+            reasoning_then_text(&["", ""], "", "1517"),
+            reasoning_then_text(
+                &["Weigh the ", "options"],
+                "Weigh the options; pick one.",
+                "Done.",
+            ),
+        ])
+        .await;
+        let client = client(&base_url, Some("fake-token"));
+        let deltas = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = std::sync::Arc::clone(&deltas);
+        let mut sink = move |delta: StreamDelta| recorded.lock().unwrap().push(delta);
+        let request = ModelRequest {
+            instructions: "system content".into(),
+            items: vec![ModelItem::User {
+                text: "user content".into(),
+                images: vec![],
+            }],
+            tools: vec![],
+        };
+
+        let private = client
+            .stream(request.clone(), CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(private.text, "1517");
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            [
+                StreamDelta::Reasoning(String::new()),
+                StreamDelta::Reasoning(String::new()),
+                StreamDelta::Reasoning(String::new()),
+                StreamDelta::Text("1517".into()),
+            ],
+            "every reasoning event is a sign of life, text or not"
+        );
+
+        deltas.lock().unwrap().clear();
+        let shared = client
+            .stream(request, CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(shared.text, "Done.", "reasoning is not part of the reply");
+        let reasoning: String = deltas
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|delta| match delta {
+                StreamDelta::Reasoning(piece) => Some(piece.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, "Weigh the options; pick one.");
     }
 
     #[tokio::test]

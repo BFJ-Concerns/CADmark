@@ -2,10 +2,12 @@
 //
 // The user's chat (right-leaning card), spatial comments (accent-tinted,
 // with a chip per anchor naming the element and its source line), the
-// AI's replies (plain card, growing as the turn streams), the tool calls
-// a turn made (one collapsed line per call while the turn runs, each run
-// of calls folded into one counted line once it ends, every call
-// expandable to its input and result), and notices from CADmark itself
+// AI's replies (plain card, growing as the turn streams), the steps a
+// turn took — its tool calls, one collapsed line each while the turn
+// runs, expandable to input and result, and its thinking, shown as it
+// happens and afterwards by how long it took, with the reasoning text
+// where the provider shares any — each run of steps folded into one
+// counted line once the turn ends, and notices from CADmark itself
 // (quiet, or red when something failed). While a turn runs, the pane
 // shows what step it is on, how long it has been running, when it last
 // did something, and a Cancel button.
@@ -66,9 +68,10 @@ pub struct TurnStatus {
     pub started: Instant,
     /// When the turn last produced an event; a quiet stream shows as quiet.
     pub last_event: Instant,
-    /// The tool-call groups this turn has made. Each shows call by call
-    /// while the turn runs, and folds into one line once it ends.
-    pub tool_groups: Vec<MessageId>,
+    /// The steps this turn has made: its tool-call groups and thinking
+    /// records. Each shows on its own while the turn runs, and every run
+    /// of them folds into one line once it ends.
+    pub steps: Vec<MessageId>,
 }
 
 /// What the user did in the pane this frame.
@@ -240,13 +243,30 @@ impl ChatPane {
                 ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 8.0;
                 let width = ui.available_width();
-                let live_groups: &[MessageId] = match &self.activity {
-                    ChatActivity::Turn(status) => &status.tool_groups,
+                let live_steps: &[MessageId] = match &self.activity {
+                    ChatActivity::Turn(status) => &status.steps,
                     ChatActivity::Idle | ChatActivity::Building => &[],
                 };
-                for message in conversation.messages() {
-                    let live = live_groups.contains(&message.id);
-                    show_message(ui, message, width, live, &mut self.sent_textures);
+                let messages = conversation.messages();
+                let mut index = 0;
+                while index < messages.len() {
+                    let message = &messages[index];
+                    let live = live_steps.contains(&message.id);
+                    if is_step(message) && !live {
+                        // A finished turn's consecutive steps fold into one
+                        // line; a running turn's stay one each.
+                        let start = index;
+                        while index < messages.len()
+                            && is_step(&messages[index])
+                            && !live_steps.contains(&messages[index].id)
+                        {
+                            index += 1;
+                        }
+                        show_step_run(ui, &messages[start..index], width);
+                    } else {
+                        show_message(ui, message, width, live, &mut self.sent_textures);
+                        index += 1;
+                    }
                 }
                 // Pending cards follow history so bottom sticking keeps a
                 // newly staged card in view rather than hiding it above it.
@@ -722,7 +742,16 @@ fn activity_row(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// Show one message. `live` marks a tool-call group of the running turn.
+/// Whether a message is a step of a turn — a tool-call group or a
+/// thinking record — rather than something said.
+fn is_step(message: &Message) -> bool {
+    matches!(
+        message.kind,
+        MessageKind::ToolCalls(_) | MessageKind::Thinking { .. }
+    )
+}
+
+/// Show one message. `live` marks a step of the running turn.
 fn show_message(
     ui: &mut egui::Ui,
     message: &Message,
@@ -818,8 +847,11 @@ fn show_message(
             });
         }
         MessageKind::ToolCalls(activities) => {
-            show_tool_calls(ui, message, activities, width, live);
+            for activity in activities {
+                show_tool_call(ui, message, activity, width, live);
+            }
         }
+        MessageKind::Thinking { finished } => show_thinking(ui, message, *finished, width, live),
         MessageKind::Notice { is_error } => show_notice(ui, &message.text, *is_error, width),
         MessageKind::DesignChange => show_notice(ui, &message.text, false, width),
     }
@@ -856,32 +888,123 @@ fn show_notice(ui: &mut egui::Ui, text: &str, is_error: bool, width: f32) {
     });
 }
 
-/// A run of tool calls. While its turn runs (`live`), each call is its own
-/// collapsed line, so the calls can be watched as they arrive; once the
-/// turn ends the run folds into one collapsed line counting them, which
-/// opens to the same per-call lines.
-fn show_tool_calls(
-    ui: &mut egui::Ui,
-    message: &Message,
-    activities: &[ToolActivity],
-    width: f32,
-    live: bool,
-) {
-    if live {
-        for activity in activities {
-            show_tool_call(ui, message, activity, width, true);
+/// A finished turn's consecutive steps, folded into one collapsed line
+/// counting the calls and totalling the thinking, which opens to the
+/// same per-step lines. A run of thinking alone stands as its own lines.
+fn show_step_run(ui: &mut egui::Ui, run: &[Message], width: f32) {
+    let calls: Vec<&ToolActivity> = run
+        .iter()
+        .filter_map(|message| match &message.kind {
+            MessageKind::ToolCalls(activities) => Some(activities.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if calls.is_empty() {
+        for message in run {
+            if let MessageKind::Thinking { finished } = &message.kind {
+                show_thinking(ui, message, *finished, width, false);
+            }
         }
         return;
     }
-    let header = tool_group_label(activities);
+    let header = step_run_label(run, &calls);
     egui::CollapsingHeader::new(egui::RichText::new(header).small().color(theme::TEXT_MUTED))
+        .id_salt(run[0].id.0)
+        .default_open(false)
+        .show(ui, |ui| {
+            for message in run {
+                match &message.kind {
+                    MessageKind::ToolCalls(activities) => {
+                        for activity in activities {
+                            show_tool_call(ui, message, activity, width, false);
+                        }
+                    }
+                    MessageKind::Thinking { finished } => {
+                        show_thinking(ui, message, *finished, width, false);
+                    }
+                    _ => {}
+                }
+            }
+        });
+}
+
+/// "3 tool calls: looked up docs, ran the script ×2 · thought for 1m 20s".
+fn step_run_label(run: &[Message], calls: &[&ToolActivity]) -> String {
+    let thought: i64 = run
+        .iter()
+        .filter_map(|message| match &message.kind {
+            MessageKind::Thinking {
+                finished: Some(finished),
+            } => Some((*finished - message.timestamp).num_seconds().max(0)),
+            _ => None,
+        })
+        .sum();
+    let mut label = tool_group_label(calls.iter().copied());
+    if thought > 0 {
+        label.push_str(&format!(" \u{b7} thought for {}", duration_label(thought)));
+    }
+    label
+}
+
+/// The model's reasoning: "thinking…" while it goes on, "thought for 42s"
+/// after. Where the provider shares the reasoning text, the line opens to
+/// it; where it does not, the line stands alone.
+fn show_thinking(
+    ui: &mut egui::Ui,
+    message: &Message,
+    finished: Option<chrono::DateTime<chrono::Utc>>,
+    width: f32,
+    live: bool,
+) {
+    let label = egui::RichText::new(thinking_label(message.timestamp, finished, live))
+        .small()
+        .italics()
+        .color(theme::TEXT_MUTED);
+    if message.text.trim().is_empty() {
+        ui.label(label);
+        return;
+    }
+    egui::CollapsingHeader::new(label)
         .id_salt(message.id.0)
         .default_open(false)
         .show(ui, |ui| {
-            for activity in activities {
-                show_tool_call(ui, message, activity, width, false);
-            }
+            ui.set_max_width(width);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(message.text.trim())
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                )
+                .wrap(),
+            );
         });
+}
+
+/// A think with no end reads as under way while its turn runs (`live`),
+/// and as unfinished after.
+fn thinking_label(
+    started: chrono::DateTime<chrono::Utc>,
+    finished: Option<chrono::DateTime<chrono::Utc>>,
+    live: bool,
+) -> String {
+    match finished {
+        None if live => "thinking\u{2026}".to_string(),
+        None => "thought \u{2014} did not finish".to_string(),
+        Some(finished) => format!(
+            "thought for {}",
+            duration_label((finished - started).num_seconds().max(0))
+        ),
+    }
+}
+
+/// "42s", "2m 05s", or "under a second".
+fn duration_label(seconds: i64) -> String {
+    match seconds {
+        0 => "under a second".to_string(),
+        1..60 => format!("{seconds}s"),
+        _ => format!("{}m {:02}s", seconds / 60, seconds % 60),
+    }
 }
 
 /// One tool call: a collapsed line saying what it did and how it went,
@@ -942,9 +1065,11 @@ fn code_block(ui: &mut egui::Ui, text: &str) {
 }
 
 /// "3 tool calls: looked up docs, ran the script ×2".
-fn tool_group_label(activities: &[ToolActivity]) -> String {
+fn tool_group_label<'a>(activities: impl IntoIterator<Item = &'a ToolActivity>) -> String {
     let mut counts: Vec<(&str, usize)> = Vec::new();
+    let mut calls = 0;
     for activity in activities {
+        calls += 1;
         match counts.iter_mut().find(|(tool, _)| *tool == activity.tool) {
             Some((_, count)) => *count += 1,
             None => counts.push((&activity.tool, 1)),
@@ -961,7 +1086,6 @@ fn tool_group_label(activities: &[ToolActivity]) -> String {
             }
         })
         .collect();
-    let calls = activities.len();
     format!(
         "{calls} tool call{}: {}",
         if calls == 1 { "" } else { "s" },
@@ -1265,24 +1389,46 @@ mod tests {
             .collect()
     }
 
+    /// A thinking record that began `seconds_ago` and, unless still going,
+    /// ended now, carrying `text` of the reasoning.
+    fn thinking(text: &str, seconds_ago: i64, finished: bool) -> Message {
+        let mut message = Message::thinking();
+        message.timestamp = chrono::Utc::now() - chrono::Duration::seconds(seconds_ago);
+        message.text = text.to_string();
+        if finished {
+            message.kind = MessageKind::Thinking {
+                finished: Some(chrono::Utc::now()),
+            };
+        }
+        message
+    }
+
     #[test]
-    fn a_running_turn_shows_each_call_and_a_finished_one_folds_them_under_a_count() {
+    fn a_running_turn_shows_each_step_and_a_finished_one_folds_a_run_of_them_under_a_count() {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("Make a flange"));
+        let thought = conversation.push(thinking("", 42, true));
         conversation.push(Message::ai_response("Checking the fillet API first."));
         let group = conversation.push(Message::tool_calls(vec![
             activity("lookup_docs", Some("docs"), false),
             activity("run_script", None, false),
         ]));
+        let shared = conversation.push(thinking("Weigh the options.", 30, true));
+        let second = conversation.push(Message::tool_calls(vec![activity(
+            "run_script",
+            Some("ok"),
+            false,
+        )]));
         conversation.push(Message::ai_response("Running it now."));
+        let thinking_now = conversation.push(thinking("", 3, false));
         let mut pane = ChatPane::new();
 
         let now = Instant::now();
         pane.activity = ChatActivity::Turn(TurnStatus {
-            phase: "running the script, attempt 1".into(),
+            phase: "thinking".into(),
             started: now,
             last_event: now,
-            tool_groups: vec![group],
+            steps: vec![thought, group, shared, second, thinking_now],
         });
         let running = drawn_text(&mut pane, &conversation);
         let shows = |text: &[String], wanted: &str| text.iter().any(|drawn| drawn == wanted);
@@ -1291,13 +1437,19 @@ mod tests {
             "{running:?}"
         );
         assert!(shows(&running, "running the script\u{2026}"), "{running:?}");
+        assert!(shows(&running, "thought for 42s"), "{running:?}");
+        assert!(shows(&running, "thought for 30s"), "{running:?}");
         assert!(
-            !running.iter().any(|drawn| drawn.contains("tool calls")),
-            "a running turn's calls are not folded: {running:?}"
+            shows(&running, "thinking\u{2026}"),
+            "the think under way shows as such: {running:?}"
         );
         assert!(
-            !shows(&running, "X = 1"),
-            "each call starts collapsed: {running:?}"
+            !running.iter().any(|drawn| drawn.contains("tool calls")),
+            "a running turn's steps are not folded: {running:?}"
+        );
+        assert!(
+            !shows(&running, "X = 1") && !shows(&running, "Weigh the options."),
+            "each step starts collapsed: {running:?}"
         );
         assert!(shows(&running, "Checking the fillet API first."));
         assert!(shows(&running, "Running it now."));
@@ -1305,19 +1457,50 @@ mod tests {
         pane.activity = ChatActivity::Idle;
         let finished = drawn_text(&mut pane, &conversation);
         assert!(
-            shows(&finished, "2 tool calls: looked up docs, ran the script"),
-            "{finished:?}"
+            shows(&finished, "thought for 42s"),
+            "a think with no calls beside it stands alone: {finished:?}"
+        );
+        assert!(
+            shows(
+                &finished,
+                "3 tool calls: looked up docs, ran the script \u{00d7}2 \u{b7} thought for 30s"
+            ),
+            "calls and the thinking between them fold as one run: {finished:?}"
         );
         assert!(
             !finished
                 .iter()
-                .any(|drawn| drawn.starts_with("looked up docs")),
-            "the calls fold under the count: {finished:?}"
+                .any(|drawn| drawn.starts_with("looked up docs") || drawn == "thought for 30s"),
+            "the steps fold under the count: {finished:?}"
         );
         assert!(
             shows(&finished, "Checking the fillet API first.")
                 && shows(&finished, "Running it now."),
             "what the AI wrote stays shown: {finished:?}"
+        );
+        assert!(
+            shows(&finished, "thought \u{2014} did not finish"),
+            "a think with no end must not read as still going after the turn: {finished:?}"
+        );
+    }
+
+    #[test]
+    fn thinking_reads_by_how_long_it_took() {
+        let started = chrono::Utc::now();
+        assert_eq!(thinking_label(started, None, true), "thinking\u{2026}");
+        assert_eq!(
+            thinking_label(started, None, false),
+            "thought \u{2014} did not finish"
+        );
+        let after = |seconds: i64| Some(started + chrono::Duration::seconds(seconds));
+        assert_eq!(
+            thinking_label(started, after(0), false),
+            "thought for under a second"
+        );
+        assert_eq!(thinking_label(started, after(42), false), "thought for 42s");
+        assert_eq!(
+            thinking_label(started, after(125), false),
+            "thought for 2m 05s"
         );
     }
 
@@ -1328,14 +1511,14 @@ mod tests {
             phase: "thinking".into(),
             started: now,
             last_event: now,
-            tool_groups: Vec::new(),
+            steps: Vec::new(),
         };
         assert_eq!(turn_status_line(&busy), "thinking · 0s");
         let quiet = TurnStatus {
             phase: "thinking".into(),
             started: now - std::time::Duration::from_secs(75),
             last_event: now - std::time::Duration::from_secs(9),
-            tool_groups: Vec::new(),
+            steps: Vec::new(),
         };
         assert_eq!(turn_status_line(&quiet), "thinking · 1m 15s · quiet for 9s");
     }
