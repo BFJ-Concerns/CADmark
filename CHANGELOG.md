@@ -11,8 +11,8 @@ All notable changes to this project will be documented in this file.
   with the token counts the provider reported. Files are written as the
   stream arrives, so a call still running can be read; the newest sixty are
   kept
-- The chat's context line shows the provider's own figures for the last
-  request beside CADmark's estimate: tokens read, how many the provider's
+- The chat's context figure gains the provider's own counts for the last
+  request, on a line under CADmark's estimate: tokens read, how many the provider's
   cache served, tokens written, and how many of those were reasoning
 - A reasoning-effort setting, sent as the request's `reasoning.effort`
   when filled in; blank leaves the provider's default
