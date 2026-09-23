@@ -157,14 +157,29 @@ fn turn_chat_message(response_message: &str, geometry: TurnGeometry<'_>) -> Stri
 }
 
 /// The pair C21 measures: exactly the two anchors currently held for the
-/// comment the user is composing. Additional anchors remain comments only.
-/// The two must be on the same part: the measurement names elements
-/// within one part's numbering, and elements of two parts would be read
-/// against the wrong one.
-fn measurement_pair(anchors: &[GeometryContext]) -> Option<(TopologyElement, TopologyElement)> {
+/// comment the user is composing, with the part both are numbered within.
+/// Additional anchors remain comments only. The two must be on the same
+/// part: the measurement names elements within one part's numbering, and
+/// elements of two parts would be read against the wrong one.
+fn measurement_pair(anchors: &[GeometryContext]) -> Option<MeasurementPair> {
     (anchors.len() == 2 && anchors[0].part == anchors[1].part)
-        .then(|| Some((anchors[0].solid()?.clone(), anchors[1].solid()?.clone())))
+        .then(|| {
+            Some(MeasurementPair {
+                part: anchors[0].part,
+                first: anchors[0].solid()?.clone(),
+                second: anchors[1].solid()?.clone(),
+            })
+        })
         .flatten()
+}
+
+/// Two picked elements and the part whose retained model they are
+/// measured on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MeasurementPair {
+    part: Option<PartId>,
+    first: TopologyElement,
+    second: TopologyElement,
 }
 
 /// The readout tracks the element currently highlighted by the application;
@@ -1014,13 +1029,19 @@ impl CadmarkApp {
                     });
                 }
                 OrchestratorResult::MinimumDistanceMeasured {
+                    model,
                     first,
                     second,
                     result,
                 } => {
                     project.measurements_in_flight =
                         project.measurements_in_flight.saturating_sub(1);
-                    if measurement_pair(self.overlay.anchors()) == Some((first, second)) {
+                    // A result answers the anchors still held, measured on
+                    // the model those anchors' part retains: the same
+                    // element numbers on another part are a different pair.
+                    let current = measurement_pair(self.overlay.anchors())
+                        .filter(|pair| project.measurement_model(pair.part).as_ref() == Ok(&model));
+                    if current.is_some_and(|pair| pair.first == first && pair.second == second) {
                         self.minimum_distance = match result {
                             Ok(measurement) => Some(measurement),
                             Err(error) => {
@@ -1475,9 +1496,9 @@ impl CadmarkApp {
             );
         }
         self.minimum_distance = None;
-        if let Some((first, second)) = measurement_pair(self.overlay.anchors())
+        if let Some(pair) = measurement_pair(self.overlay.anchors())
             && let Some(project) = self.project_mut()
-            && let Err(error) = project.request_minimum_distance(first, second)
+            && let Err(error) = project.request_minimum_distance(pair.part, pair.first, pair.second)
         {
             self.status = Some(Status::error(format!("Measurement failed: {error}")));
         }
@@ -2905,19 +2926,19 @@ mod tests {
     use cadmark_bridge::backend::{ModelItem, ModelRequest, TurnModel};
     use cadmark_core::geometry::{
         EdgeDescriptor, EdgeId, FaceId, GeometryContext, GeometryDescriptors, ModelSummary,
-        PartMeasurements, PickedElement, SelectionState, TopologyElement,
+        PartMeasurements, PickedElement, ScreenPosition, SelectionState, TopologyElement,
     };
     use cadmark_core::ledger::LedgerValue;
     use cadmark_core::limits::ExecutionLimits;
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, ImagePicker, NoRender, OverlayState,
-        ParametersPanel, PartNameDialog, Project, Renderer, SceneHandle, SettingsDialog,
-        SettingsStore, TurnEvent, TurnGeometry, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, camera_change, candidate_highlight_ids, encode_pick,
-        hidden_part_ids, history_move_note, measurement_pair, measurement_readout, pending_markers,
-        record_tool_start, turn_chat_message,
+        Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, ImagePicker, MeasurementPair,
+        NoRender, OverlayState, ParametersPanel, PartNameDialog, Project, Renderer, SceneHandle,
+        SettingsDialog, SettingsStore, TurnEvent, TurnGeometry, TurnOutcome, TurnRecord,
+        UserSettings, VersionDialog, ai_services, camera_change, candidate_highlight_ids,
+        encode_pick, hidden_part_ids, history_move_note, measurement_pair, measurement_readout,
+        pending_markers, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -3755,17 +3776,66 @@ mod tests {
         assert_eq!(measurement_pair(std::slice::from_ref(&first)), None);
         assert_eq!(
             measurement_pair(&[first.clone(), second.clone()]),
-            Some((
-                TopologyElement::Face(FaceId(1)),
-                TopologyElement::Face(FaceId(4))
-            ))
+            Some(MeasurementPair {
+                part: None,
+                first: TopologyElement::Face(FaceId(1)),
+                second: TopologyElement::Face(FaceId(4)),
+            })
         );
         assert_eq!(measurement_pair(&[first.clone(), second, anchor(7)]), None);
         // Two anchors on different parts are numbered in different tables,
         // so there is no pair to measure between.
         let mut elsewhere = anchor(4);
         elsewhere.part = Some(PartId(1));
-        assert_eq!(measurement_pair(&[first, elsewhere]), None);
+        assert_eq!(measurement_pair(&[first.clone(), elsewhere]), None);
+        // Two anchors on one part carry that part, so the measurement is
+        // taken on that part's own retained model.
+        let mut here = first;
+        here.part = Some(PartId(1));
+        let mut there = anchor(4);
+        there.part = Some(PartId(1));
+        assert_eq!(
+            measurement_pair(&[here, there]).map(|pair| pair.part),
+            Some(Some(PartId(1)))
+        );
+    }
+
+    #[test]
+    fn a_measurement_is_taken_on_the_retained_model_of_the_anchors_part() {
+        // Two picks on the first part name faces in that part's numbering,
+        // so the distance must be measured on that part's BREP, not on the
+        // whole model's, which the kernel builds from the last part.
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().install_model(
+            two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]),
+            String::new(),
+        );
+        let project = app.project().unwrap();
+        let file_of = |part: u32| {
+            project
+                .model_parts
+                .iter()
+                .find(|loaded| loaded.id == part)
+                .unwrap()
+                .model
+                .clone()
+        };
+        assert_ne!(file_of(1), file_of(2));
+        assert_eq!(project.measurement_model(Some(PartId(1))), Ok(file_of(1)));
+        assert_eq!(project.measurement_model(Some(PartId(2))), Ok(file_of(2)));
+        // Anchors that name no part measure the whole solid.
+        assert_eq!(
+            project.measurement_model(None),
+            Ok(project
+                .model
+                .as_ref()
+                .unwrap()
+                .solid()
+                .unwrap()
+                .file
+                .clone())
+        );
+        assert!(project.measurement_model(Some(PartId(9))).is_err());
     }
 
     #[test]
