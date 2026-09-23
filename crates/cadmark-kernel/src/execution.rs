@@ -16,7 +16,8 @@ use pyo3::types::PyDict;
 use thiserror::Error;
 
 use crate::protocol::{
-    ExecutedModel, ExecutedPart, ModelFile, ModelForm, SketchResult, SolidResult,
+    ExecutedModel, ExecutedPart, ModelFile, ModelForm, PRINTED_OUTPUT_LIMIT, SketchResult,
+    SnippetOutcome, SolidResult,
 };
 
 #[derive(Error, Debug)]
@@ -232,13 +233,14 @@ fn execute_script_source_named(
             let builtins = py.import("builtins")?;
             let code = builtins.call_method1("compile", (source, filename, "exec"))?;
             let started = Instant::now();
-            builtins
-                .call_method1("exec", (&code, &globals, &globals))
-                .map_err(|error| {
-                    let message = format_script_error(py, &error, filename);
-                    log::error!("Python execution failed: {message}");
-                    ExecutionError::Script(message)
-                })?;
+            let capture = CapturedStdout::begin(py)?;
+            let ran = builtins.call_method1("exec", (&code, &globals, &globals));
+            let printed = capture.finish()?;
+            ran.map_err(|error| {
+                let message = format_script_error(py, &error, filename);
+                log::error!("Python execution failed: {message}");
+                ExecutionError::Script(with_printed_output(message, &printed))
+            })?;
             log::info!("Script ran in {:.2?}", started.elapsed());
 
             let keys: Vec<String> = globals
@@ -253,7 +255,7 @@ fn execute_script_source_named(
                 keys.join(", "),
             );
 
-            capture_result(py, &globals, &session, source, scratch_dir)
+            capture_result(py, &globals, &session, source, scratch_dir, printed)
         })();
 
         let restoration = crate::provenance::restore(py, &session);
@@ -274,6 +276,7 @@ fn capture_result(
     session: &crate::provenance::InstrumentationSession,
     source: &str,
     scratch_dir: &Path,
+    printed: String,
 ) -> Result<ExecutedModel, ExecutionError> {
     match crate::tessellation::find_result_shape(globals)? {
         crate::tessellation::ScriptResult::Solids(shapes) => {
@@ -325,6 +328,7 @@ fn capture_result(
                     file: whole.file.clone(),
                     parts: parts.clone(),
                 }),
+                printed,
             })
         }
         crate::tessellation::ScriptResult::Sketch(sketch) => {
@@ -345,8 +349,171 @@ fn capture_result(
                     profile: extracted.profile,
                     file,
                 }),
+                printed,
             })
         }
+    }
+}
+
+/// The file name a snippet is compiled under, so its traceback frames can
+/// be told from the script's and from the runner's own.
+const SNIPPET_FILENAME: &str = "<snippet>";
+
+/// How much of a snippet's final value is carried back: a `repr` of a
+/// shape or a list of faces is useful at this length and noise beyond it.
+const VALUE_LIMIT: usize = 4_000;
+
+/// The Python side of a snippet run: executes every statement but a
+/// trailing expression, then evaluates that expression for its value, as a
+/// REPL would. Defined in its own namespace so nothing of it leaks into the
+/// script's.
+const SNIPPET_RUNNER: &std::ffi::CStr = c"
+import ast as _cadmark_ast
+
+def _cadmark_run_snippet(code, namespace):
+    tree = _cadmark_ast.parse(code, '<snippet>', 'exec')
+    value = None
+    if tree.body and isinstance(tree.body[-1], _cadmark_ast.Expr):
+        last = tree.body.pop()
+        exec(compile(tree, '<snippet>', 'exec'), namespace, namespace)
+        expression = _cadmark_ast.Expression(last.value)
+        _cadmark_ast.copy_location(expression, last)
+        value = eval(compile(expression, '<snippet>', 'eval'), namespace, namespace)
+    else:
+        exec(compile(tree, '<snippet>', 'exec'), namespace, namespace)
+    return value
+";
+
+/// Run `code` as a scratch snippet and report what it printed, the value
+/// of its final expression, and any traceback. With `script_path` the
+/// script runs first, uninstrumented and keeping nothing, so the snippet
+/// sees every binding the script made; without it the snippet runs in an
+/// empty namespace. A script or snippet that raises is an outcome, not an
+/// error: the traceback is what the caller asked to read. Only CADmark's
+/// own runtime failing is an `Err`.
+pub fn run_snippet(
+    script_path: Option<&Path>,
+    code: &str,
+) -> Result<SnippetOutcome, ExecutionError> {
+    crate::python_runtime::configure_python_home();
+    let _execution_guard = PYTHON_EXECUTION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let script = match script_path {
+        Some(path) => {
+            if !path.exists() {
+                return Err(ExecutionError::ScriptNotFound(path.display().to_string()));
+            }
+            let source = std::fs::read_to_string(path)
+                .map_err(|error| ExecutionError::ScriptNotFound(error.to_string()))?;
+            Some((source, path.display().to_string()))
+        }
+        None => None,
+    };
+    log::info!(
+        "Running a snippet ({} bytes) {}",
+        code.len(),
+        match &script {
+            Some((_, filename)) => format!("after {filename}"),
+            None => "standalone".to_string(),
+        }
+    );
+
+    Python::with_gil(|py| {
+        let globals = PyDict::new(py);
+        let builtins = py.import("builtins")?;
+        let capture = CapturedStdout::begin(py)?;
+        let ran = (|| -> PyResult<Result<Option<String>, String>> {
+            if let Some((source, filename)) = &script {
+                let compiled = builtins
+                    .call_method1("compile", (source.as_str(), filename.as_str(), "exec"))?;
+                if let Err(error) = builtins.call_method1("exec", (&compiled, &globals, &globals)) {
+                    return Ok(Err(format!(
+                        "The script itself failed before the snippet ran:\n{}",
+                        format_script_error(py, &error, filename)
+                    )));
+                }
+            }
+            let runner_namespace = PyDict::new(py);
+            py.run(SNIPPET_RUNNER, Some(&runner_namespace), None)?;
+            let runner = runner_namespace
+                .get_item("_cadmark_run_snippet")?
+                .expect("the runner defines itself");
+            match runner.call1((code, &globals)) {
+                Ok(value) if value.is_none() => Ok(Ok(None)),
+                Ok(value) => {
+                    let text: String = match value.repr() {
+                        Ok(repr) => repr.extract()?,
+                        Err(error) => format!("<repr failed: {error}>"),
+                    };
+                    Ok(Ok(Some(cut_at(text, VALUE_LIMIT, "value"))))
+                }
+                Err(error) => Ok(Err(format_script_error(py, &error, SNIPPET_FILENAME))),
+            }
+        })();
+        let printed = capture.finish()?;
+        let (value, error) = match ran? {
+            Ok(value) => (value, None),
+            Err(error) => (None, Some(error)),
+        };
+        Ok(SnippetOutcome {
+            printed,
+            value,
+            error,
+        })
+    })
+}
+
+/// `sys.stdout` swapped for a buffer while a script or snippet runs, so
+/// what it prints comes back over the protocol rather than joining the
+/// worker's log. The process's fd 1 stays pointed at stderr; this is the
+/// interpreter-level stream only, put back by `finish`.
+struct CapturedStdout<'py> {
+    sys: Bound<'py, PyModule>,
+    prior: Bound<'py, PyAny>,
+    buffer: Bound<'py, PyAny>,
+}
+
+impl<'py> CapturedStdout<'py> {
+    fn begin(py: Python<'py>) -> PyResult<Self> {
+        let sys = py.import("sys")?;
+        let prior = sys.getattr("stdout")?;
+        let buffer = py.import("io")?.call_method0("StringIO")?;
+        sys.setattr("stdout", &buffer)?;
+        Ok(Self { sys, prior, buffer })
+    }
+
+    /// Restore the real stream and return what was printed, cut at the
+    /// protocol's limit.
+    fn finish(self) -> PyResult<String> {
+        self.sys.setattr("stdout", &self.prior)?;
+        let text: String = self.buffer.call_method0("getvalue")?.extract()?;
+        Ok(cut_at(text, PRINTED_OUTPUT_LIMIT, "output"))
+    }
+}
+
+/// `text` cut to `limit` characters with a line saying so, or unchanged
+/// when it fits.
+fn cut_at(text: String, limit: usize, what: &str) -> String {
+    if text.chars().count() <= limit {
+        return text;
+    }
+    let kept: String = text.chars().take(limit).collect();
+    format!("{kept}\n… {what} cut at {limit} characters")
+}
+
+/// A failure message with what the script printed before it failed, when
+/// it printed anything: the author's own diagnostics are the first thing
+/// they would ask for.
+fn with_printed_output(message: String, printed: &str) -> String {
+    if printed.trim().is_empty() {
+        message
+    } else {
+        format!(
+            "{message}\nPrinted before it failed:\n{}",
+            printed.trim_end()
+        )
     }
 }
 
@@ -596,7 +763,14 @@ _CadmarkSession.capture_history = _cadmark_probe_capture
                         (source, "<cadmark-maker-history-probe>", "exec"),
                     )?;
                     builtins.call_method1("exec", (&code, &globals, &globals))?;
-                    let executed = capture_result(py, &globals, &session, source, scratch.path())?;
+                    let executed = capture_result(
+                        py,
+                        &globals,
+                        &session,
+                        source,
+                        scratch.path(),
+                        String::new(),
+                    )?;
                     let queries = globals
                         .get_item("_cadmark_probe_queries")?
                         .expect("probe query collection exists")

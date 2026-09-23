@@ -6,15 +6,30 @@
 // Adding a tool: a `ToolSpec` constructor here with its argument struct,
 // an arm in the application's tool dispatch, and a paragraph in
 // `system_prompt.md` telling the model when to use it.
+//
+// The file tools follow the shape a CLI coding agent's do — replace the
+// file, edit it by exact text, read it by line — so a change costs the
+// model its lines rather than the whole script, and a scratch run
+// answers a question without touching the file.
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::backend::ToolSpec;
 
-/// The tool that runs a script: the model writes the complete build123d
-/// file, CADmark executes it and returns the outcome.
+/// The tool that executes the script and rebuilds the model. Given the
+/// complete file it replaces the script first; without it the file on
+/// disk runs as `edit_script` left it.
 pub const RUN_SCRIPT: &str = "run_script";
+/// The tool that changes part of the script in place by exact text
+/// replacement, the way a CLI agent's edit tool does. Nothing runs.
+pub const EDIT_SCRIPT: &str = "edit_script";
+/// The tool that shows the script, or a range of it, with line numbers.
+pub const READ_SCRIPT: &str = "read_script";
+/// The tool that runs scratch Python — after the current script, in its
+/// namespace, or alone — for its printed output and last value, changing
+/// nothing.
+pub const RUN_PYTHON: &str = "run_python";
 /// The tool that answers a build123d API question from the documentation.
 pub const LOOKUP_DOCS: &str = "lookup_docs";
 /// The tool that shows the model the current viewport.
@@ -29,10 +44,44 @@ pub const KEEP_REFERENCE: &str = "keep_reference";
 /// Arguments of `run_script`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunScriptArgs {
-    /// The complete script, replacing the file on disk.
-    pub code: String,
+    /// The complete script, replacing the file on disk before the run;
+    /// absent when the file is to run as it stands.
+    #[serde(default)]
+    pub code: Option<String>,
     /// One line saying what changed, for the design step's record.
     pub summary: String,
+}
+
+/// Arguments of `edit_script`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditScriptArgs {
+    /// The exact text to replace, as it appears in the script.
+    pub old_text: String,
+    /// What replaces it.
+    pub new_text: String,
+    /// Replace every occurrence rather than requiring exactly one.
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+/// Arguments of `read_script`: a line range, or the whole file when both
+/// ends are absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReadScriptArgs {
+    #[serde(default)]
+    pub start_line: Option<u32>,
+    #[serde(default)]
+    pub end_line: Option<u32>,
+}
+
+/// Arguments of `run_python`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunPythonArgs {
+    /// The Python to run.
+    pub code: String,
+    /// Run the snippet alone rather than after the current script.
+    #[serde(default)]
+    pub standalone: bool,
 }
 
 /// Arguments of `lookup_docs`.
@@ -97,17 +146,83 @@ pub struct KeepReferenceArgs {
 pub fn run_script_spec() -> ToolSpec {
     ToolSpec {
         name: RUN_SCRIPT.to_string(),
-        description: "Write the complete build123d script and execute it. Returns the model's \
-                      measurements and validity, or the error to fix. The viewport shows the \
-                      result immediately. Call again after fixing an error."
+        description: "Execute the part script and rebuild the model. Pass `code` to replace \
+                      the whole file first (a new part, or a genuine rewrite); omit it to run \
+                      the file as it stands after `edit_script`. Returns the model's \
+                      measurements and validity and anything the script printed, or the \
+                      traceback to fix. The viewport shows the result immediately."
             .to_string(),
         parameters: json!({
             "type": "object",
             "properties": {
-                "code": {"type": "string", "description": "The whole script file."},
+                "code": {"type": "string", "description": "The complete file, when replacing it. Omit to run the file as `edit_script` left it."},
                 "summary": {"type": "string", "description": "One line saying what this version changes."}
             },
-            "required": ["code", "summary"],
+            "required": ["summary"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+pub fn edit_script_spec() -> ToolSpec {
+    ToolSpec {
+        name: EDIT_SCRIPT.to_string(),
+        description: "Change part of the script in place: replace one exact occurrence of \
+                      `old_text` with `new_text`. `old_text` must match the script exactly, \
+                      whitespace included, and must be unique unless `replace_all` is true; \
+                      include enough surrounding lines to make it so. Returns the edited \
+                      region with line numbers. Nothing runs until `run_script`."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "old_text": {"type": "string", "description": "The exact text to replace, copied from the script."},
+                "new_text": {"type": "string", "description": "The replacement text."},
+                "replace_all": {"type": "boolean", "description": "Replace every occurrence instead of requiring exactly one."}
+            },
+            "required": ["old_text", "new_text"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+pub fn read_script_spec() -> ToolSpec {
+    ToolSpec {
+        name: READ_SCRIPT.to_string(),
+        description: "Read the script with line numbers, whole or between two lines. Use it \
+                      to see the lines a traceback names; the full text without numbers is \
+                      already in the <current_script> block."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "start_line": {"type": "integer", "description": "First line to show, 1-based. Omit for the start of the file."},
+                "end_line": {"type": "integer", "description": "Last line to show, inclusive. Omit for the end of the file."}
+            },
+            "additionalProperties": false
+        }),
+    }
+}
+
+pub fn run_python_spec() -> ToolSpec {
+    ToolSpec {
+        name: RUN_PYTHON.to_string(),
+        description: "Run Python for what it prints and the value of its last expression, \
+                      changing neither the script nor the model. By default the current \
+                      script runs first and the snippet sees every name it bound — parts, \
+                      sketches, parameters — so you can measure a face, list the edges a \
+                      selector would pick, check a clearance, or try an API call before \
+                      editing. Set `standalone` to skip the script for arithmetic or API \
+                      probing. A traceback comes back as the result. Runs under the same \
+                      time and memory limits as the script."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "The Python to run. End with an expression to get its value."},
+                "standalone": {"type": "boolean", "description": "Run without the script first; the script's names are then absent."}
+            },
+            "required": ["code"],
             "additionalProperties": false
         }),
     }
@@ -213,7 +328,13 @@ pub fn keep_reference_spec() -> ToolSpec {
 /// text-only model is told so in the instructions rather than handed
 /// tools it cannot use.
 pub fn tools_for(accepts_images: bool) -> Vec<ToolSpec> {
-    let mut tools = vec![run_script_spec(), lookup_docs_spec()];
+    let mut tools = vec![
+        run_script_spec(),
+        edit_script_spec(),
+        read_script_spec(),
+        run_python_spec(),
+        lookup_docs_spec(),
+    ];
     if accepts_images {
         tools.push(render_view_spec());
         tools.push(reference_images_spec());
@@ -251,7 +372,28 @@ mod tests {
     fn tool_arguments_parse_from_the_models_json() {
         let run: RunScriptArgs =
             serde_json::from_value(json!({"code": "x = 1", "summary": "Set x"})).unwrap();
-        assert_eq!(run.code, "x = 1");
+        assert_eq!(run.code.as_deref(), Some("x = 1"));
+        let rerun: RunScriptArgs =
+            serde_json::from_value(json!({"summary": "Run the edited file"})).unwrap();
+        assert_eq!(rerun.code, None);
+        let edit: EditScriptArgs =
+            serde_json::from_value(json!({"old_text": "x = 1", "new_text": "x = 2"})).unwrap();
+        assert!(!edit.replace_all);
+        let edit_all: EditScriptArgs =
+            serde_json::from_value(json!({"old_text": "x", "new_text": "y", "replace_all": true}))
+                .unwrap();
+        assert!(edit_all.replace_all);
+        let whole: ReadScriptArgs = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(whole, ReadScriptArgs::default());
+        let range: ReadScriptArgs =
+            serde_json::from_value(json!({"start_line": 10, "end_line": 20})).unwrap();
+        assert_eq!((range.start_line, range.end_line), (Some(10), Some(20)));
+        let snippet: RunPythonArgs =
+            serde_json::from_value(json!({"code": "part.part.volume"})).unwrap();
+        assert!(!snippet.standalone);
+        let alone: RunPythonArgs =
+            serde_json::from_value(json!({"code": "2 + 2", "standalone": true})).unwrap();
+        assert!(alone.standalone);
         let render: RenderViewArgs = serde_json::from_value(json!({"view": "top"})).unwrap();
         assert_eq!(render.view, RenderView::Top);
         assert!(serde_json::from_value::<RenderViewArgs>(json!({"view": "sideways"})).is_err());
@@ -298,13 +440,25 @@ mod tests {
             names(true),
             [
                 RUN_SCRIPT,
+                EDIT_SCRIPT,
+                READ_SCRIPT,
+                RUN_PYTHON,
                 LOOKUP_DOCS,
                 RENDER_VIEW,
                 REFERENCE_IMAGES,
                 KEEP_REFERENCE
             ]
         );
-        assert_eq!(names(false), [RUN_SCRIPT, LOOKUP_DOCS]);
+        assert_eq!(
+            names(false),
+            [
+                RUN_SCRIPT,
+                EDIT_SCRIPT,
+                READ_SCRIPT,
+                RUN_PYTHON,
+                LOOKUP_DOCS
+            ]
+        );
         let note = unavailable_tools_note(false).unwrap();
         assert!(note.contains(REFERENCE_IMAGES) && note.contains(KEEP_REFERENCE));
     }

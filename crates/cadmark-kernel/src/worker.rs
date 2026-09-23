@@ -29,7 +29,9 @@ use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_core::sketch::SketchPlane;
 use thiserror::Error;
 
-use crate::protocol::{ExecutedModel, ModelFile, WorkerFailure, WorkerReply, WorkerRequest};
+use crate::protocol::{
+    ExecutedModel, ModelFile, SnippetOutcome, WorkerFailure, WorkerReply, WorkerRequest,
+};
 
 /// The worker binary's name, built alongside the application.
 pub const WORKER_BINARY: &str = "cadmark-kernel-worker";
@@ -212,6 +214,27 @@ impl KernelWorker {
         }
     }
 
+    /// Run a scratch snippet, after the script at `script_path` when one
+    /// is given, under the same ceilings as an execution. A traceback in
+    /// the script or the snippet comes back inside the outcome; the `Err`
+    /// side is a ceiling crossed, a cancellation, or the runtime failing.
+    pub fn run_snippet(
+        &mut self,
+        script_path: Option<&Path>,
+        code: &str,
+        limits: ExecutionLimits,
+        cancel: &CancelFlag,
+    ) -> Result<SnippetOutcome, WorkerError> {
+        let request = WorkerRequest::RunSnippet {
+            script_path: script_path.map(Path::to_path_buf),
+            code: code.to_string(),
+        };
+        match self.request(&request, Some(limits), cancel)? {
+            WorkerReply::SnippetRan(outcome) => Ok(outcome),
+            other => Err(unexpected_reply("a snippet run", other)),
+        }
+    }
+
     fn request(
         &mut self,
         request: &WorkerRequest,
@@ -324,6 +347,7 @@ fn unexpected_reply(request: &str, reply: WorkerReply) -> WorkerError {
                 WorkerReply::Executed(_) => "a model",
                 WorkerReply::Exported => "an export",
                 WorkerReply::MinimumDistance(_) => "a minimum-distance measurement",
+                WorkerReply::SnippetRan(_) => "a snippet outcome",
                 WorkerReply::Failed(_) => unreachable!("handled above"),
             }
         )),
@@ -632,6 +656,12 @@ fn serve(request: WorkerRequest, scratch_dir: &Path) -> WorkerReply {
                 message: error.to_string(),
             }),
         },
+        WorkerRequest::RunSnippet { script_path, code } => {
+            match crate::execution::run_snippet(script_path.as_deref(), &code) {
+                Ok(outcome) => WorkerReply::SnippetRan(outcome),
+                Err(error) => WorkerReply::Failed(classify(error)),
+            }
+        }
     }
 }
 
