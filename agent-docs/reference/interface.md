@@ -95,12 +95,14 @@ Conversation with the AI. Message types, distinguished by position and colour:
 
 - User messages (right-leaning card)
 - Spatial comments (accent-tinted, with chips naming each anchor's element and source line)
-- AI replies (plain card, streamed as the turn progresses)
-- Tool-call groups (collapsed by default, expandable to each call's input and result)
+- AI replies (plain card, streamed as the turn progresses). A reply of several message items shows them separated by a blank line; text a provider sends only in a completed item, not as deltas, still appears
+- Tool calls. While the turn runs, each call is its own collapsed line ("running the script…" until its result arrives), expandable to its input and result. Once the turn ends, each run of consecutive calls folds into one collapsed line, "N tool calls: ran the script ×2, looked up docs", which opens to the per-call lines; a call the turn never finished reads "did not finish". The AI speaking, or a CADmark notice, starts a new run
 - Notices from CADmark (quiet, or red on failure; not shown to the AI)
 - Design changes made outside the chat (quiet; sent to the AI as a "Note from CADmark" user item in history order): a parameter set in the panel, a design step undone, redone, or jumped to
 
 While a turn runs: a phase line showing the current step, elapsed time, time since last event, and a Cancel button.
+
+Text the AI wrote stays in the chat when the turn fails or is cancelled, above the notice saying how it ended; only a reply with no text is removed. A reply the provider cuts off at its output-token limit (`response.incomplete` with reason `max_output_tokens`) is kept: its fully written tool calls run, a call cut off mid-arguments is dropped, a notice says the reply was cut off, and the AI is asked to continue. A cut-off reply with no text and no complete tool call fails the turn, naming the output limit. Any other incomplete reason fails the turn naming that reason. An error event inside an accepted stream is reported by cause (usage limit, overloaded, credential, unknown model) as a refused request would be.
 
 Input: multi-line text field. Enter sends, Shift+Enter breaks the line.
 
@@ -110,7 +112,7 @@ Every request carries the script on disk in a `<current_script>` block placed be
 
 A completed turn's reply ends with a change report: face count, volume, and overall size before and after the turn. A single-part model reads as "Model change: …" or "Model unchanged." with both sets of values. A multi-part model reports one line per part under its script binding name, matched to the part of the same name before the turn; a binding no longer produced is "removed", one not produced before is "new". The `run_script` tool result the AI reads carries the same per-part measurements ("Parts: name: …; name: …") when the script completed more than one part.
 
-Source: `crates/cadmark-ui/src/chat.rs:1–9`, `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`, `describe_model`), `crates/cadmark-core/src/geometry.rs` (`describe_model_change`).
+Source: `crates/cadmark-ui/src/chat.rs` (`show_tool_calls`, `tool_group_label`, `tool_call_label`), `crates/cadmark-app/src/app.rs` (`finish_turn`, `record_tool_start`), `crates/cadmark-bridge/src/openai_compatible.rs` (`ResponseAssembly`), `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`, `describe_model`), `crates/cadmark-core/src/geometry.rs` (`describe_model_change`).
 
 The **Skills** menu inserts a built-in command into the draft. Start a message or
 spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
