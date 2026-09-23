@@ -140,6 +140,7 @@ mod tests {
         GroundedComment {
             text: "round this".into(),
             anchors: vec![GeometryContext {
+                part: None,
                 element: PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
                 provenance: LedgerValue::Ambiguous(vec![
                     entry(2, SemanticOperation::Box),
@@ -194,6 +195,7 @@ mod tests {
             text: "round this".into(),
             anchors: vec![
                 GeometryContext {
+                    part: None,
                     sketch: Default::default(),
                     element: PickedElement::Solid(TopologyElement::Face(FaceId(3))),
                     provenance: LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
@@ -203,6 +205,7 @@ mod tests {
                     chosen_candidate: None,
                 },
                 GeometryContext {
+                    part: None,
                     sketch: Default::default(),
                     element: PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
                     provenance: LedgerValue::Ambiguous(vec![
@@ -218,6 +221,7 @@ mod tests {
                     chosen_candidate: None,
                 },
                 GeometryContext {
+                    part: None,
                     sketch: Default::default(),
                     element: PickedElement::Solid(TopologyElement::Edge(EdgeId(9))),
                     provenance: LedgerValue::Untraced,
@@ -248,6 +252,7 @@ mod tests {
     #[test]
     fn an_anchor_carries_its_sketch_route_or_says_there_is_none() {
         let anchor = |sketch: cadmark_core::sketch_lineage::SketchLineage| GeometryContext {
+            part: None,
             sketch,
             element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
             provenance: LedgerValue::Untraced,
@@ -297,6 +302,7 @@ mod tests {
         let text = render_comment(&GroundedComment {
             text: "adjust this".into(),
             anchors: vec![GeometryContext {
+                part: None,
                 sketch: Default::default(),
                 element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
                 provenance: LedgerValue::Untraced,

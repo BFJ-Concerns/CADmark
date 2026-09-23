@@ -132,6 +132,7 @@ pub fn resolve_context(
 
     // Step 3: Package into the stable output format.
     Ok(GeometryContext {
+        part: None,
         element: PickedElement::Solid(element.clone()),
         provenance,
         identification,
@@ -177,6 +178,7 @@ pub fn resolve_sketch_context(
 ) -> GeometryContext {
     let sketch = lineage.lookup_element(&element);
     GeometryContext {
+        part: None,
         element: PickedElement::Sketch(element),
         // Nothing the kernel built claims a sketch element, so its ledger
         // provenance is honestly empty; the sketch route below carries the
@@ -482,6 +484,7 @@ mod tests {
         );
 
         let context = |element| GeometryContext {
+            part: None,
             sketch: SketchLineage::default(),
             element,
             provenance: LedgerValue::Untraced,

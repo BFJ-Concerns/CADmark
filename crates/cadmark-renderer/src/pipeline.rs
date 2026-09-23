@@ -3,7 +3,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use cadmark_core::geometry::{PickedElement, SketchElement, SketchElementKind};
+use cadmark_core::geometry::{SketchElement, SketchElementKind};
 use cadmark_core::sketch::SketchProfile;
 
 use crate::camera::Camera;
@@ -74,11 +74,8 @@ pub struct MeshUniforms {
     /// How far the solid fades towards the background: 0 draws it
     /// normally, 1 leaves only a trace of it behind a sketch profile.
     pub ghost: f32,
-    /// Picking ID of the part owning the selected element, so a face tint
-    /// applies only within its own part — face IDs restart per part.
-    pub selected_part_id: u32,
-    /// Picking ID of the part owning the hovered element.
-    pub hover_part_id: u32,
+    pub _pad4: u32,
+    pub _pad5: u32,
     pub selected_colour: [f32; 4],
     pub hover_colour: [f32; 4],
     pub section_plane: [f32; 4],
@@ -88,6 +85,8 @@ pub struct MeshUniforms {
     pub _pad8: f32,
     /// Visible edge and vertex-marker extents.
     pub marker_size: MarkerExtent,
+    /// The surface colour of each part by ordinal, `PART_PALETTE`.
+    pub part_colours: [[f32; 4]; PART_PALETTE_LEN as usize],
 }
 
 /// Initial length of the highlight storage buffer. It grows to whatever a
@@ -178,7 +177,13 @@ pub struct RenderPipelines {
 /// written once however many shaders bind it.
 const MARKERS_COMMON_WGSL: &str = include_str!("shaders/markers_common.wgsl");
 
-/// A shader's full source: the shared marker snippet, then its own body.
+/// A shader's full source: the constants the Rust side owns, the shared
+/// marker snippet, then its own body.
+///
+/// The picking-ID helpers mirror `picking::encode_pick`: a vertex carries
+/// its element's within-part ID and its part's picking ID, and the shader
+/// composes the two into the ID the colour buffer holds and the highlight
+/// uniforms compare against.
 fn shader_source(body: &str) -> String {
     let reach = |sizing: MarkerSizing| {
         sizing
@@ -187,22 +192,64 @@ fn shader_source(body: &str) -> String {
             .ceil()
     };
     format!(
-        "const VISIBLE_MARKER_REACH: f32 = {:.1};\nconst PICKING_MARKER_REACH: f32 = {:.1};\n{MARKERS_COMMON_WGSL}\n{body}",
+        "const VISIBLE_MARKER_REACH: f32 = {:.1};\n\
+         const PICKING_MARKER_REACH: f32 = {:.1};\n\
+         const PART_OFFSET: u32 = {}u;\n\
+         const PART_SHIFT: u32 = {}u;\n\
+         const PART_PALETTE_LEN: u32 = {}u;\n\
+         // The ordinal of the part whose picking ID this is; zero for a\n\
+         // buffer that carries no part.\n\
+         fn part_ordinal(part_id: u32) -> u32 {{\n\
+             return select(0u, part_id - PART_OFFSET - 1u, part_id > PART_OFFSET);\n\
+         }}\n\
+         // A within-part element ID qualified by its part.\n\
+         fn pick_in_part(element: u32, part_id: u32) -> u32 {{\n\
+             return element | (part_ordinal(part_id) << PART_SHIFT);\n\
+         }}\n\
+         {MARKERS_COMMON_WGSL}\n{body}",
         reach(MarkerSizing::default()),
         reach(MarkerSizing::picking()),
+        crate::picking::PART_OFFSET,
+        crate::picking::PART_SHIFT,
+        PART_PALETTE_LEN,
     )
+}
+
+/// How many distinct part colours there are before they repeat.
+pub const PART_PALETTE_LEN: u32 = 8;
+
+/// The surface colour of each part, linear, by part ordinal modulo the
+/// palette length. The first entry is the machined grey a single-part
+/// model has always had; the rest are muted hues far enough apart to tell
+/// neighbouring parts apart under the same light rig, none close to the
+/// selection blue, so a highlight still reads on every one.
+pub const PART_PALETTE: [[f32; 4]; PART_PALETTE_LEN as usize] = [
+    [0.62, 0.64, 0.67, 1.0], // grey
+    [0.80, 0.52, 0.22, 1.0], // amber
+    [0.22, 0.66, 0.62, 1.0], // teal
+    [0.70, 0.45, 0.78, 1.0], // lilac
+    [0.45, 0.68, 0.30, 1.0], // green
+    [0.85, 0.40, 0.42, 1.0], // coral
+    [0.72, 0.66, 0.40, 1.0], // sand
+    [0.78, 0.36, 0.62, 1.0], // magenta
+];
+
+/// The palette colour a part is drawn in, linear RGBA.
+pub fn part_colour(part: cadmark_core::geometry::PartId) -> [f32; 4] {
+    PART_PALETTE[(part.0 % PART_PALETTE_LEN) as usize]
 }
 
 /// Vertex layout for an edge segment's expanded quad, shared by the
 /// wireframe pass and the edge picking pass so both read one buffer the
 /// same way.
-const EDGE_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
+const EDGE_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
     0 => Float32x3, // position
     1 => Float32,   // edge_id
     2 => Float32x3, // other endpoint
     3 => Float32,   // side
     4 => Float32,   // cap
     5 => Float32,   // end sign
+    6 => Float32,   // part_id
 ];
 
 /// Vertex layout of the shaded mesh, shared by every pass that reads a
@@ -234,10 +281,11 @@ fn edge_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 
 /// Vertex layout for a vertex marker's quad, shared by the visible marker
 /// pass and the marker picking pass.
-const MARKER_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+const MARKER_VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
     0 => Float32x3, // position
     1 => Float32,   // vertex_id
     2 => Float32x2, // corner
+    3 => Float32,   // part_id
 ];
 
 fn marker_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -1135,14 +1183,11 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu:
 pub struct Renderer {
     pub camera: Camera,
     pub selection_style: SelectionStyle,
-    /// Picking ID of the currently selected element (for the glow shader).
+    /// Picking ID of the currently selected element (for the glow shader),
+    /// qualified by its part as `picking::encode_pick` does.
     pub selected_id: u32,
     /// Picking ID of the element under the cursor (for hover highlight).
     pub hover_id: u32,
-    /// Picking ID of the part owning the selected element.
-    pub selected_part_id: u32,
-    /// Picking ID of the part owning the hovered element.
-    pub hover_part_id: u32,
     /// Picking IDs of a secondary highlight — every element the ledger
     /// attributes to one candidate source line. Unbounded: the buffer the
     /// shaders read grows to hold whatever a footprint contains.
@@ -1172,8 +1217,6 @@ impl Renderer {
             selection_style: SelectionStyle::default(),
             selected_id: 0,
             hover_id: 0,
-            selected_part_id: 0,
-            hover_part_id: 0,
             highlight_ids: Vec::new(),
             markers: Vec::new(),
             target_is_srgb: false,
@@ -1220,8 +1263,8 @@ impl Renderer {
             } else {
                 0.0
             },
-            selected_part_id: self.selected_part_id,
-            hover_part_id: self.hover_part_id,
+            _pad4: 0,
+            _pad5: 0,
             selected_colour: self.selection_style.selected_colour,
             hover_colour: self.selection_style.hover_colour,
             section_plane: self.section.equation(),
@@ -1230,6 +1273,7 @@ impl Renderer {
             _pad7: 0.0,
             _pad8: 0.0,
             marker_size: MarkerSizing::default().extent(viewport.0, viewport.1),
+            part_colours: PART_PALETTE,
         }
     }
 
@@ -1292,15 +1336,16 @@ pub fn upload_mesh(
         }
     }
 
+    let part_id =
+        crate::picking::encode_picking_id(&cadmark_core::geometry::TopologyElement::Part(part))
+            as f32;
     for (i, v) in mesh.vertices.iter().enumerate() {
         gpu_vertices.push(GpuVertex {
             position: v.position,
             normal: v.normal,
             face_id: vertex_face_ids[i] as f32,
             _padding: 0.0,
-            part_id: crate::picking::encode_picking_id(
-                &cadmark_core::geometry::TopologyElement::Part(part),
-            ) as f32,
+            part_id,
             _part_padding: [0.0; 3],
         });
     }
@@ -1318,8 +1363,8 @@ pub fn upload_mesh(
     });
 
     // Build edge quads and vertex-marker quads.
-    let edge_vertices = edge_vertices(mesh);
-    let marker_vertices = marker_vertices(vertex_positions);
+    let edge_vertices = edge_vertices(mesh, part_id);
+    let marker_vertices = marker_vertices(vertex_positions, part_id);
 
     let edge_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("edge_vertex_buffer"),
@@ -1334,6 +1379,8 @@ pub fn upload_mesh(
     });
 
     GpuMesh {
+        part,
+        visible: true,
         vertex_buffer,
         index_buffer,
         index_count: mesh.indices.len() as u32,
@@ -1360,7 +1407,7 @@ const QUAD_CORNERS: [(f32, f32); 6] = [
 /// Expand every edge polyline into screen-space quads: two triangles per
 /// segment, each corner carrying the segment's other endpoint so the
 /// shader can widen it along the screen-space normal.
-fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> {
+fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh, part_id: f32) -> Vec<EdgeVertex> {
     let mut edge_vertices = Vec::new();
     for edge in &mesh.edges {
         let edge_id =
@@ -1384,6 +1431,7 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
                     // segment's other endpoint.
                     cap: -1.0,
                     end_sign: -which_end,
+                    part_id,
                 });
             }
         }
@@ -1392,7 +1440,7 @@ fn edge_vertices(mesh: &cadmark_core::mesh::TessellatedMesh) -> Vec<EdgeVertex> 
 }
 
 /// Build one screen-space quad per topological vertex, indexed by ID.
-fn marker_vertices(positions: &[[f32; 3]]) -> Vec<MarkerVertex> {
+fn marker_vertices(positions: &[[f32; 3]], part_id: f32) -> Vec<MarkerVertex> {
     let mut markers = Vec::with_capacity(positions.len() * QUAD_CORNERS.len());
     for (index, position) in positions.iter().enumerate() {
         let vertex_id =
@@ -1404,7 +1452,8 @@ fn marker_vertices(positions: &[[f32; 3]]) -> Vec<MarkerVertex> {
                 position: *position,
                 vertex_id,
                 corner: [x, y],
-                _padding: [0.0, 0.0],
+                part_id,
+                _padding: 0.0,
             });
         }
     }
@@ -1529,7 +1578,7 @@ impl RenderPipelines {
 const CORNER_MARKER_SCALE: f32 = 0.006;
 
 fn sketch_pick_id(kind: SketchElementKind, index: u32) -> f32 {
-    crate::picking::encode_pick(&PickedElement::Sketch(SketchElement { kind, index })) as f32
+    crate::picking::encode_pick(&crate::picking::Pick::Sketch(SketchElement { kind, index })) as f32
 }
 
 /// The profile's curves as a line list: each polyline becomes its
@@ -1573,6 +1622,7 @@ pub fn sketch_curve_pick_vertices(profile: &SketchProfile) -> Vec<EdgeVertex> {
                     side,
                     cap: -1.0,
                     end_sign: -which_end,
+                    part_id: 0.0,
                 });
             }
         }
@@ -1591,7 +1641,8 @@ pub fn sketch_corner_pick_vertices(profile: &SketchProfile) -> Vec<MarkerVertex>
                 position: corner.position,
                 vertex_id,
                 corner: [x, y],
-                _padding: [0.0, 0.0],
+                part_id: 0.0,
+                _padding: 0.0,
             });
         }
     }
@@ -1815,14 +1866,8 @@ mod tests {
                 std::mem::offset_of!(MeshUniforms, marker_count),
             ),
             ("ghost", std::mem::offset_of!(MeshUniforms, ghost)),
-            (
-                "selected_part_id",
-                std::mem::offset_of!(MeshUniforms, selected_part_id),
-            ),
-            (
-                "hover_part_id",
-                std::mem::offset_of!(MeshUniforms, hover_part_id),
-            ),
+            ("_pad4", std::mem::offset_of!(MeshUniforms, _pad4)),
+            ("_pad5", std::mem::offset_of!(MeshUniforms, _pad5)),
             (
                 "selected_colour",
                 std::mem::offset_of!(MeshUniforms, selected_colour),
@@ -1842,6 +1887,10 @@ mod tests {
             (
                 "marker_size",
                 std::mem::offset_of!(MeshUniforms, marker_size),
+            ),
+            (
+                "part_colours",
+                std::mem::offset_of!(MeshUniforms, part_colours),
             ),
         ]
         .into_iter()
@@ -2048,6 +2097,8 @@ mod tests {
         let indices: [u32; 6] = [0, 1, 2, 0, 2, 3];
 
         let mesh = crate::mesh::GpuMesh {
+            part: cadmark_core::geometry::PartId(0),
+            visible: true,
             vertex_buffer: buffer_of(
                 &device,
                 &queue,
@@ -2152,8 +2203,8 @@ mod tests {
     }
 
     /// Render the picking pass and read one pixel back, the way the
-    /// application does when the user clicks. The one part in the scene is
-    /// also the active one, so it appears in both slices the pass takes.
+    /// application does when the user clicks. The scene holds one part, so
+    /// the element alone says what was hit.
     fn read_pick(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -2170,7 +2221,6 @@ mod tests {
             pipelines,
             picking,
             std::slice::from_ref(mesh),
-            std::slice::from_ref(mesh),
             None,
             crate::picking::SelectionFilter::default(),
         );
@@ -2183,7 +2233,8 @@ mod tests {
         let element = crate::viewport::decode_pick_result(
             &slice.get_mapped_range(),
             crate::picking::SelectionFilter::default(),
-        );
+        )
+        .map(|pick| pick.element());
         picking.staging_buffer.unmap();
         element
     }
@@ -2230,6 +2281,8 @@ mod tests {
         let vertices: Vec<_> = quad(3, 0.2).into_iter().chain(quad(5, 0.8)).collect();
         let indices: [u32; 12] = [0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7];
         let mesh = crate::mesh::GpuMesh {
+            part: cadmark_core::geometry::PartId(0),
+            visible: true,
             vertex_buffer: buffer_of(
                 &device,
                 &queue,
@@ -2402,6 +2455,22 @@ mod tests {
     }
 
     #[test]
+    fn edge_and_marker_vertices_carry_the_part_they_belong_to() {
+        // Edge and vertex IDs restart in every part, so a quad corner that
+        // lost its part would tint and pick the same-numbered element of
+        // every part at once.
+        let part = crate::picking::encode_picking_id(
+            &cadmark_core::geometry::TopologyElement::Part(cadmark_core::geometry::PartId(3)),
+        ) as f32;
+        let edges = edge_vertices(&one_edge_mesh(), part);
+        assert!(!edges.is_empty());
+        assert!(edges.iter().all(|vertex| vertex.part_id == part));
+        let markers = marker_vertices(&[[0.0; 3], [1.0; 3]], part);
+        assert!(!markers.is_empty());
+        assert!(markers.iter().all(|vertex| vertex.part_id == part));
+    }
+
+    #[test]
     fn edge_vertices_use_picking_edge_ids() {
         let mesh = one_edge_mesh();
 
@@ -2410,7 +2479,7 @@ mod tests {
         ) as f32;
 
         assert!(
-            edge_vertices(&mesh)
+            edge_vertices(&mesh, 0.0)
                 .iter()
                 .all(|vertex| vertex.edge_id == encoded),
             "every corner of the quad must carry the edge it belongs to"
@@ -2434,7 +2503,7 @@ mod tests {
         // A line list draws one physical pixel, which is neither visible at
         // a distance nor hittable; the segment is widened in screen space
         // instead, so it needs a corner per triangle vertex.
-        let vertices = edge_vertices(&one_edge_mesh());
+        let vertices = edge_vertices(&one_edge_mesh(), 0.0);
         assert_eq!(vertices.len(), 6, "one segment, two triangles");
 
         for vertex in &vertices {
@@ -2467,7 +2536,7 @@ mod tests {
     #[test]
     fn every_vertex_gets_a_marker_quad_under_its_own_picking_id() {
         let positions = [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]];
-        let markers = marker_vertices(&positions);
+        let markers = marker_vertices(&positions, 0.0);
 
         assert_eq!(markers.len(), 12, "six corners per vertex marker");
 
@@ -2495,7 +2564,7 @@ mod tests {
 
     #[test]
     fn a_model_with_no_vertices_has_no_markers() {
-        assert!(marker_vertices(&[]).is_empty());
+        assert!(marker_vertices(&[], 0.0).is_empty());
     }
 
     #[test]
@@ -2549,6 +2618,8 @@ mod tests {
         let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
 
         let mesh = GpuMesh {
+            part: cadmark_core::geometry::PartId(0),
+            visible: true,
             vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("test-mesh-vertices"),
                 contents: bytemuck::cast_slice(&[GpuVertex {
@@ -2569,13 +2640,13 @@ mod tests {
             index_count: 3,
             edge_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("test-edge-vertices"),
-                contents: bytemuck::cast_slice(&edge_vertices(&one_edge_mesh())),
+                contents: bytemuck::cast_slice(&edge_vertices(&one_edge_mesh(), 0.0)),
                 usage: wgpu::BufferUsages::VERTEX,
             }),
             edge_vertex_count: 6,
             marker_vertex_buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("test-marker-vertices"),
-                contents: bytemuck::cast_slice(&marker_vertices(&[[0.0; 3]])),
+                contents: bytemuck::cast_slice(&marker_vertices(&[[0.0; 3]], 0.0)),
                 usage: wgpu::BufferUsages::VERTEX,
             }),
             marker_vertex_count: 6,

@@ -204,15 +204,7 @@ fn pick_at_in(
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-    render_picking(
-        &mut encoder,
-        &pipelines,
-        &picking,
-        &meshes,
-        &meshes,
-        None,
-        filter,
-    );
+    render_picking(&mut encoder, &pipelines, &picking, &meshes, None, filter);
     copy_pick_pixel(
         &mut encoder,
         &picking,
@@ -232,7 +224,7 @@ fn pick_at_in(
     picking.staging_buffer.unmap();
     // The scene is a solid alone, so anything decoding as a sketch
     // element would mean the ID ranges had collided.
-    element.map(|element| match element {
+    element.map(|pick| match pick.element() {
         PickedElement::Solid(element) => element,
         PickedElement::Sketch(element) => panic!("a solid-only scene picked {element:?}"),
     })
@@ -307,7 +299,6 @@ fn pick_sketch_at(
         &pipelines,
         &picking,
         &[],
-        &[],
         Some(&sketch),
         filter,
     );
@@ -325,7 +316,7 @@ fn pick_sketch_at(
     gpu.device.poll(wgpu::Maintain::Wait);
     let element = {
         let data = slice.get_mapped_range();
-        decode_pick_result(&data[..4], filter)
+        decode_pick_result(&data[..4], filter).map(|pick| pick.element())
     };
     picking.staging_buffer.unmap();
     element

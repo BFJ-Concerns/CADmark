@@ -186,8 +186,8 @@ pub struct ToolbarState<'a> {
     /// The name of the part the top-level export writes, when the model
     /// has several and one is selected.
     pub export_target: Option<&'a str>,
-    /// The parts the executed script defines, as picking ID, script binding
-    /// name, and whether the part is a closed valid solid.
+    /// The parts the executed script defines, as part ordinal, script
+    /// binding name, and whether the part is a closed valid solid.
     pub model_parts: &'a [(u32, String, bool)],
     /// Whether the code panel is showing.
     pub code_visible: bool,
