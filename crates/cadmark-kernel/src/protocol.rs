@@ -38,7 +38,35 @@ pub enum WorkerRequest {
         first: TopologyElement,
         second: TopologyElement,
     },
+    /// Run a scratch snippet of Python for its printed output and the
+    /// value of its last expression, without keeping a model. With a
+    /// `script_path` the script runs first and the snippet sees its
+    /// namespace; without one the snippet runs in an empty namespace.
+    RunSnippet {
+        script_path: Option<PathBuf>,
+        code: String,
+    },
 }
+
+/// What a scratch snippet produced. A snippet that raises is still an
+/// outcome — the traceback is what the caller wanted to read — so `error`
+/// is a field rather than a failed reply.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SnippetOutcome {
+    /// Everything the script and the snippet printed to stdout, in order,
+    /// cut at `PRINTED_OUTPUT_LIMIT` characters.
+    pub printed: String,
+    /// The `repr` of the snippet's final expression, when it ended in one
+    /// whose value was not `None`.
+    pub value: Option<String>,
+    /// The formatted traceback when the script or the snippet raised.
+    pub error: Option<String>,
+}
+
+/// How much printed output one execution or snippet keeps. Enough for a
+/// table of measurements or a dump of a namespace; a runaway loop printing
+/// in every iteration is cut rather than carried across the boundary.
+pub const PRINTED_OUTPUT_LIMIT: usize = 20_000;
 
 /// A model the worker kept after a successful execution: a BREP file in
 /// its scratch directory, re-read for export. Cloning shares the file.
@@ -131,6 +159,11 @@ pub struct ExecutedModel {
     pub descriptors: GeometryDescriptors,
     /// The result itself, in the shape its kind actually has.
     pub form: ModelForm,
+    /// What the script printed to stdout while it ran, cut at
+    /// `PRINTED_OUTPUT_LIMIT` characters, so a `print` the author put in
+    /// to check a value reaches them rather than the worker's log.
+    #[serde(default)]
+    pub printed: String,
 }
 
 impl ExecutedModel {
@@ -196,6 +229,7 @@ pub enum WorkerReply {
     Executed(Box<ExecutedModel>),
     Exported,
     MinimumDistance(MinimumDistance),
+    SnippetRan(SnippetOutcome),
     Failed(WorkerFailure),
 }
 
@@ -217,6 +251,24 @@ mod tests {
             request
         );
 
+        let snippet = WorkerRequest::RunSnippet {
+            script_path: Some(PathBuf::from("/project/part.py")),
+            code: "part.part.volume".to_string(),
+        };
+        let line = serde_json::to_string(&snippet).unwrap();
+        assert!(!line.contains('\n'));
+        assert_eq!(
+            serde_json::from_str::<WorkerRequest>(&line).unwrap(),
+            snippet
+        );
+        let ran = WorkerReply::SnippetRan(SnippetOutcome {
+            printed: "checking\n".to_string(),
+            value: Some("1000.0".to_string()),
+            error: None,
+        });
+        let line = serde_json::to_string(&ran).unwrap();
+        assert_eq!(serde_json::from_str::<WorkerReply>(&line).unwrap(), ran);
+
         let mut ledger = ProvenanceLedger::new();
         ledger
             .record_face(FaceId(0), LedgerValue::Untraced)
@@ -226,6 +278,7 @@ mod tests {
             ledger,
             sketch_lineage: SketchLineageLedger::new(),
             descriptors: GeometryDescriptors::default(),
+            printed: String::new(),
             form: ModelForm::Solid(SolidResult {
                 summary: ModelSummary {
                     volume: 1.0,
@@ -281,6 +334,7 @@ mod tests {
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
             descriptors: GeometryDescriptors::default(),
+            printed: String::new(),
             form: ModelForm::Solid(SolidResult {
                 summary: ModelSummary {
                     volume: 0.0,
@@ -317,6 +371,7 @@ mod tests {
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
             descriptors: GeometryDescriptors::default(),
+            printed: String::new(),
             form: ModelForm::Sketch(SketchResult {
                 profile: SketchProfile {
                     plane: SketchPlane::default(),

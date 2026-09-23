@@ -40,6 +40,12 @@ pub struct ToolActivity {
     pub failed: bool,
     pub started: DateTime<Utc>,
     pub finished: Option<DateTime<Utc>>,
+    /// The script text a successful `run_script` executed, kept so the
+    /// next request can say whether the file on disk still matches the
+    /// last run. Not replayed to the model: the call's arguments already
+    /// carry what the model wrote, an edit or a whole file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executed_source: Option<String>,
 }
 
 /// An image the model reads, already encoded.
@@ -463,6 +469,7 @@ mod tests {
             failed: false,
             started: Utc::now(),
             finished: Some(Utc::now()),
+            executed_source: Some("x = 1".into()),
         }]));
         conv.push(Message::error_notice("part.py failed to run"));
         let json = serde_json::to_string(&conv).unwrap();

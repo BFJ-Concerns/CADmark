@@ -694,6 +694,7 @@ impl CadmarkApp {
                     failed: false,
                     started: chrono::Utc::now(),
                     finished: None,
+                    executed_source: None,
                 };
                 let (tools, response) =
                     record_tool_start(conversation, turn.tools, turn.response, activity);
@@ -705,6 +706,7 @@ impl CadmarkApp {
                 call_id,
                 output,
                 failed,
+                executed,
             } => {
                 if let Some(id) = turn.tools
                     && let Some(Message {
@@ -716,6 +718,7 @@ impl CadmarkApp {
                     activity.output = Some(output);
                     activity.failed = failed;
                     activity.finished = Some(chrono::Utc::now());
+                    activity.executed_source = executed;
                 }
                 project.note_turn_event(None);
             }
@@ -3010,6 +3013,7 @@ mod tests {
             ledger: cadmark_core::ledger::ProvenanceLedger::new(),
             sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
+            printed: String::new(),
             form: cadmark_kernel::protocol::ModelForm::Solid(
                 cadmark_kernel::protocol::SolidResult {
                     summary: summary(1000.0, 6),
@@ -3230,6 +3234,7 @@ mod tests {
             ledger: cadmark_core::ledger::ProvenanceLedger::new(),
             sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
+            printed: String::new(),
             form: cadmark_kernel::protocol::ModelForm::Solid(
                 cadmark_kernel::protocol::SolidResult {
                     summary: whole.summary.clone(),
@@ -3588,6 +3593,7 @@ mod tests {
             failed: false,
             started: chrono::Utc::now(),
             finished: None,
+            executed_source: None,
         }
     }
 
