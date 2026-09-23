@@ -6,13 +6,19 @@
 // The record never fails the call it describes: a directory that cannot
 // be created or a line that cannot be written is logged and the request
 // carries on unrecorded.
+//
+// The credential never reaches the file: every line is redacted before it
+// is written, so an endpoint that echoes the bearer token in an error
+// body or a streamed error event leaves "[REDACTED]" in its place.
 
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::backend::{ProviderUsage, RequestPurpose};
+use crate::openai_compatible::Credential;
 
 /// How many call files are kept. The oldest go when a new call begins,
 /// so a busy project's folder stays bounded.
@@ -36,7 +42,14 @@ impl RequestLog {
     }
 
     /// Open the record of one call, its first line the request as sent.
-    pub(crate) fn begin(&self, purpose: RequestPurpose, body: &serde_json::Value) -> CallRecord {
+    /// `credential` is the secret the call authenticates with, redacted
+    /// from every line the record writes.
+    pub(crate) fn begin(
+        &self,
+        purpose: RequestPurpose,
+        body: &serde_json::Value,
+        credential: Option<Arc<Credential>>,
+    ) -> CallRecord {
         let name = format!(
             "{}-{}.jsonl",
             chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
@@ -59,6 +72,7 @@ impl RequestLog {
         let mut record = CallRecord {
             path,
             writer,
+            credential,
             started: Instant::now(),
             events: 0,
         };
@@ -98,8 +112,26 @@ impl RequestLog {
 pub(crate) struct CallRecord {
     path: PathBuf,
     writer: Option<BufWriter<File>>,
+    /// The secret redacted from every line written.
+    credential: Option<Arc<Credential>>,
     started: Instant,
     events: usize,
+}
+
+/// Replace the secret wherever it appears in a string of the value.
+fn redact(value: &mut serde_json::Value, secret: &str) {
+    match value {
+        serde_json::Value::String(text) => {
+            if text.contains(secret) {
+                *text = text.replace(secret, "[REDACTED]");
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|item| redact(item, secret)),
+        serde_json::Value::Object(fields) => {
+            fields.values_mut().for_each(|field| redact(field, secret))
+        }
+        _ => {}
+    }
 }
 
 impl CallRecord {
@@ -112,10 +144,18 @@ impl CallRecord {
         self.started.elapsed().as_millis()
     }
 
-    fn line(&mut self, value: serde_json::Value) {
+    fn line(&mut self, mut value: serde_json::Value) {
         let Some(writer) = self.writer.as_mut() else {
             return;
         };
+        if let Some(secret) = self
+            .credential
+            .as_ref()
+            .map(|credential| credential.value())
+            .filter(|secret| !secret.is_empty())
+        {
+            redact(&mut value, secret);
+        }
         // Flushed per line: the file is read while the call runs.
         let written = serde_json::to_writer(&mut *writer, &value)
             .map_err(std::io::Error::other)
@@ -181,6 +221,7 @@ mod tests {
         let mut record = log.begin(
             RequestPurpose::Turn,
             &serde_json::json!({"model": "m", "input": []}),
+            None,
         );
         record.event(&serde_json::json!({"type": "response.output_text.delta", "delta": "hi"}));
         let path = record.path().to_path_buf();
@@ -220,7 +261,7 @@ mod tests {
     fn a_refused_call_records_the_status_and_body() {
         let dir = tempfile::tempdir().unwrap();
         let log = RequestLog::in_directory(dir.path().to_path_buf());
-        let mut record = log.begin(RequestPurpose::DocLookup, &serde_json::json!({}));
+        let mut record = log.begin(RequestPurpose::DocLookup, &serde_json::json!({}), None);
         record.rejected(429, "cooling down");
         let path = record.path().to_path_buf();
         record.ended("error: refused", None);
@@ -242,7 +283,7 @@ mod tests {
             )
             .unwrap();
         }
-        log.begin(RequestPurpose::Turn, &serde_json::json!({}))
+        log.begin(RequestPurpose::Turn, &serde_json::json!({}), None)
             .ended("completed", None);
         let kept = fs::read_dir(dir.path()).unwrap().count();
         assert_eq!(kept, KEPT_CALLS);
@@ -256,8 +297,44 @@ mod tests {
         let file = dir.path().join("not-a-directory");
         fs::write(&file, "").unwrap();
         let log = RequestLog::in_directory(file.join("requests"));
-        let mut record = log.begin(RequestPurpose::Turn, &serde_json::json!({}));
+        let mut record = log.begin(RequestPurpose::Turn, &serde_json::json!({}), None);
         record.event(&serde_json::json!({}));
         record.ended("completed", None);
+    }
+
+    #[test]
+    fn the_credential_is_redacted_from_a_refusal_body_and_from_streamed_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RequestLog::in_directory(dir.path().to_path_buf());
+        let secret = "fake-provider-secret";
+        let mut record = log.begin(
+            RequestPurpose::Turn,
+            &serde_json::json!({"model": "m"}),
+            Some(Arc::new(Credential::new(secret.to_string()))),
+        );
+        record.rejected(
+            401,
+            &format!("{{\"error\":{{\"message\":\"bad key {secret}\"}}}}"),
+        );
+        record.event(&serde_json::json!({"type": "error",
+            "error": {"message": format!("rejected {secret}"), "headers": [format!("Bearer {secret}")]}}));
+        let path = record.path().to_path_buf();
+        record.ended("error: refused", None);
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(secret), "{text}");
+        let recorded = lines(&path);
+        assert_eq!(
+            recorded[1]["body"],
+            "{\"error\":{\"message\":\"bad key [REDACTED]\"}}"
+        );
+        assert_eq!(
+            recorded[2]["event"]["error"]["message"],
+            "rejected [REDACTED]"
+        );
+        assert_eq!(
+            recorded[2]["event"]["error"]["headers"][0],
+            "Bearer [REDACTED]"
+        );
     }
 }

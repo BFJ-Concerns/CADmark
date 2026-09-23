@@ -36,7 +36,7 @@ impl Credential {
         Self(value)
     }
 
-    fn value(&self) -> &str {
+    pub(crate) fn value(&self) -> &str {
         &self.0
     }
 }
@@ -247,7 +247,7 @@ impl OpenAiCompatibleClient {
         let mut record = self
             .request_log
             .as_ref()
-            .map(|log| log.begin(purpose, &transcript_body(&body)));
+            .map(|log| log.begin(purpose, &transcript_body(&body), self.credential.clone()));
         log::info!(
             "AI request ({}) to {} for {}{}",
             purpose.slug(),
@@ -2233,6 +2233,55 @@ mod tests {
             requests[0].body
         );
         assert_eq!(requests[1].body["reasoning"]["effort"], "medium");
+    }
+
+    #[tokio::test]
+    async fn a_recorded_refusal_and_a_recorded_stream_error_carry_no_credential() {
+        use recording::{ScriptedResponse, events, provider_failure, recording_server};
+        let secret = "fake-provider-secret";
+        let (base_url, _requests, server) = recording_server(vec![
+            provider_failure(
+                401,
+                "authentication_error",
+                "invalid_api_key",
+                &format!("bad key {secret}"),
+            ),
+            ScriptedResponse {
+                status: 200,
+                body: events(&[
+                    serde_json::json!({"type": "error", "error": {"type": "server_error",
+                    "code": "internal", "message": format!("could not forward Bearer {secret}")}}),
+                ]),
+                streamed: true,
+                delay: None,
+            },
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(RequestLog::in_directory(dir.path().to_path_buf()));
+        let client = client(&base_url, Some(secret)).with_request_log(Arc::clone(&log));
+        for _ in 0..2 {
+            client
+                .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
+                .await
+                .unwrap_err();
+        }
+        server.await.unwrap();
+
+        let mut files: Vec<_> = std::fs::read_dir(log.directory())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 2);
+        let refused = std::fs::read_to_string(&files[0]).unwrap();
+        let streamed = std::fs::read_to_string(&files[1]).unwrap();
+        assert!(!refused.contains(secret), "{refused}");
+        assert!(!streamed.contains(secret), "{streamed}");
+        assert!(refused.contains("\"kind\":\"rejected\""), "{refused}");
+        assert!(refused.contains("bad key [REDACTED]"), "{refused}");
+        assert!(streamed.contains("Bearer [REDACTED]"), "{streamed}");
     }
 
     #[tokio::test]
