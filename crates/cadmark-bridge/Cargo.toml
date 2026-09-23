@@ -12,3 +12,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 base64 = "0.22.1"
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

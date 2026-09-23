@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Every AI request is recorded in the project folder under
+  `.cadmark/requests/`, one file per model call: the request as sent
+  (images summarised), each streamed event with its offset, and the outcome
+  with the token counts the provider reported. Files are written as the
+  stream arrives, so a call still running can be read; the newest sixty are
+  kept
+- The chat's context figure gains the provider's own counts for the last
+  request, on a line under CADmark's estimate: tokens read, how many the provider's
+  cache served, tokens written, and how many of those were reasoning
+- A reasoning-effort setting, sent as the request's `reasoning.effort`
+  when filled in; blank leaves the provider's default
+- The installed application writes its log to
+  `~/.local/state/cadmark/cadmark.log` (under `XDG_STATE_HOME` when set),
+  one line per AI request start and end among the rest
 - The AI's thinking shows in the chat while a turn runs: "thinking…" as
   it reasons before each reply, then "thought for 2m 05s" once it speaks
   or calls a tool, opening to the reasoning text where the provider shares
@@ -12,6 +26,19 @@ All notable changes to this project will be documented in this file.
   quiet stream, and a turn that ends during one records how long it was
 
 ### Changed
+- Model sessions preserve provider output in order, including encrypted
+  reasoning, assistant message metadata, original tool arguments and renders.
+  Tool results follow the complete response; later turns append context to the
+  saved history, including after reopening, permitting prompt-cache reuse
+- Turn-scoped skill instructions are appended without changing the system
+  instructions or the existing conversation prefix
+- Output-limited replies can continue from complete encrypted reasoning even
+  without visible text; missing usage details read "not reported" rather than zero
+- Changing the endpoint, model or image capability rebuilds history from chat
+  instead of sending opaque reasoning to a different backend; interrupted tool
+  calls receive a result before the model session is saved
+- The AI is asked to work in small steps — one change, one run, one look
+  at the result — rather than one response that rewrites everything
 - The AI says what it is about to do before each tool call, or each run
   of related calls, and what a result changed when it matters, so the
   text between the tool lines reads as a running commentary rather than

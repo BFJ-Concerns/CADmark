@@ -80,7 +80,7 @@ checkout under `$CADMARK_PREFIX` (default `~/.local`):
 |------|----------|
 | `lib/cadmark/bin/` | `cadmark` and `cadmark-kernel-worker` side by side — the application starts the worker from its own directory |
 | `lib/cadmark/.venv/` | a Python runtime built from the same interpreter the binaries were compiled against |
-| `bin/cadmark` | wrapper that exports `VIRTUAL_ENV` for the installed runtime, then execs the application |
+| `bin/cadmark` | wrapper that exports `VIRTUAL_ENV` for the installed runtime and `RUST_LOG` (default `info`), appends the application's stdout and stderr to `$XDG_STATE_HOME/cadmark/cadmark.log` (default `~/.local/state/cadmark/cadmark.log`; started afresh at launch once over 5 MB), then execs the application |
 | `share/applications/cadmark.desktop` | menu entry, with `Exec` and `Icon` rewritten to absolute paths |
 | `share/icons/hicolor/scalable/apps/cadmark.svg` | application icon |
 

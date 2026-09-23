@@ -54,31 +54,33 @@ pub enum BackendError {
 }
 
 pub use cadmark_core::message::ImageData;
+pub use cadmark_core::model_session::{ModelItem, ProviderUsage, ToolCall};
 
-/// One item of the conversation the model is shown, in order.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ModelItem {
-    /// What the user said, with any images attached.
-    User {
-        text: String,
-        images: Vec<ImageData>,
-    },
-    /// What the model said.
-    Assistant { text: String },
-    /// A tool the model asked to run.
-    ToolCall(ToolCall),
-    /// What the tool returned, paired to the call by ID.
-    ToolResult { call_id: String, output: String },
+/// What a request is for, named in its transcript so a turn's own calls
+/// read apart from the documentation lookup and the condensation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestPurpose {
+    /// One request of the turn loop.
+    Turn,
+    /// The documentation tool answering a question from the corpus.
+    DocLookup,
+    /// The conversation being condensed before it overflows.
+    Condense,
+    /// A probe of the endpoint: the smoke test.
+    Probe,
 }
 
-/// A tool call the model made: the tool's name and its JSON arguments.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolCall {
-    /// The provider's ID for the call; the result carries it back.
-    pub id: String,
-    pub name: String,
-    /// The arguments as the model wrote them, a JSON object.
-    pub arguments: serde_json::Value,
+impl RequestPurpose {
+    /// The word a transcript file name carries.
+    pub fn slug(self) -> &'static str {
+        match self {
+            RequestPurpose::Turn => "turn",
+            RequestPurpose::DocLookup => "docs",
+            RequestPurpose::Condense => "condense",
+            RequestPurpose::Probe => "probe",
+        }
+    }
 }
 
 /// A tool offered to the model: name, purpose, and a JSON Schema for its
@@ -93,6 +95,7 @@ pub struct ToolSpec {
 /// One request of the loop.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelRequest {
+    pub purpose: RequestPurpose,
     /// The system instructions.
     pub instructions: String,
     /// The conversation so far, oldest first.
@@ -105,6 +108,8 @@ pub struct ModelRequest {
 /// be present; an empty `tool_calls` ends the loop.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ModelResponse {
+    /// Replayable output in provider order, before any tool results.
+    pub output_items: Vec<ModelItem>,
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     /// The provider stopped the response at its output-token limit before
@@ -112,6 +117,37 @@ pub struct ModelResponse {
     /// and `tool_calls` holds only the calls written in full; a call cut
     /// off part-way is dropped, because its arguments cannot be read.
     pub reached_output_limit: bool,
+    /// The token counts the provider reported, where it reported any.
+    pub usage: Option<ProviderUsage>,
+}
+
+impl ModelResponse {
+    /// A complete opaque reasoning item can continue a reply with no visible text.
+    pub fn has_continuable_reasoning(&self) -> bool {
+        self.output_items.iter().any(|item| {
+            matches!(item,
+                ModelItem::ProviderOutput(item) if item["type"] == "reasoning"
+                    && item.get("status").is_none_or(|status| status.is_null() || status == "completed")
+                    && item["encrypted_content"].as_str().is_some_and(|content| !content.is_empty())
+            )
+        })
+    }
+
+    /// Providers supply their ordered output; simple model implementations may
+    /// supply just text and calls instead.
+    pub fn replay_items(&self) -> Vec<ModelItem> {
+        if !self.output_items.is_empty() {
+            return self.output_items.clone();
+        }
+        let mut items = Vec::new();
+        if !self.text.is_empty() {
+            items.push(ModelItem::Assistant {
+                text: self.text.clone(),
+            });
+        }
+        items.extend(self.tool_calls.iter().cloned().map(ModelItem::ToolCall));
+        items
+    }
 }
 
 /// A fragment of the model's work, delivered as it arrives so the user can
@@ -136,6 +172,11 @@ pub trait TurnModel: Send + Sync {
     /// The model name, for the toolbar badge.
     fn model_name(&self) -> &str;
 
+    /// Scope opaque continuation data to the endpoint and model that issued it.
+    fn session_identity(&self) -> Option<String> {
+        None
+    }
+
     /// Whether the model reads image inputs. Governs whether the render
     /// and reference-image tools are offered.
     fn accepts_images(&self) -> bool;
@@ -155,6 +196,25 @@ pub trait TurnModel: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_finished_encrypted_reasoning_can_continue_a_reply() {
+        for (status, expected) in [
+            (serde_json::Value::Null, true),
+            (serde_json::json!("completed"), true),
+            (serde_json::json!("incomplete"), false),
+            (serde_json::json!("in_progress"), false),
+            (serde_json::json!("unknown"), false),
+        ] {
+            let response = ModelResponse {
+                output_items: vec![ModelItem::ProviderOutput(serde_json::json!({
+                    "type": "reasoning", "status": status, "encrypted_content": "signed"
+                }))],
+                ..Default::default()
+            };
+            assert_eq!(response.has_continuable_reasoning(), expected, "{status}");
+        }
+    }
 
     #[test]
     fn refusals_read_by_cause() {
