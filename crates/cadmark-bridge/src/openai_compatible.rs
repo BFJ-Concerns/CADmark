@@ -8,7 +8,9 @@
 //! arrive, and a quiet stream is waited on (polling the cancel flag) for
 //! as long as the user allows. There is no fixed request ceiling.
 
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -17,9 +19,10 @@ use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{
-    BackendError, DeltaSink, ImageData, ModelItem, ModelRequest, ModelResponse, RefusalCause,
-    StreamDelta, ToolCall, ToolSpec, TurnModel,
+    BackendError, DeltaSink, ImageData, ModelItem, ModelRequest, ModelResponse, ProviderUsage,
+    RefusalCause, RequestPurpose, StreamDelta, ToolCall, ToolSpec, TurnModel,
 };
+use crate::request_log::{CallRecord, RequestLog};
 
 const MAX_PROVIDER_MESSAGE_CHARS: usize = 500;
 
@@ -33,7 +36,7 @@ impl Credential {
         Self(value)
     }
 
-    fn value(&self) -> &str {
+    pub(crate) fn value(&self) -> &str {
         &self.0
     }
 }
@@ -52,6 +55,11 @@ pub struct OpenAiCompatibleClient {
     model: String,
     credential: Option<std::sync::Arc<Credential>>,
     accepts_images: bool,
+    /// Where every call is recorded, when the project keeps a record.
+    request_log: Option<Arc<RequestLog>>,
+    /// The reasoning effort asked of the model, sent as the request's
+    /// `reasoning.effort` when set; absent, the provider's default stands.
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiCompatibleClient {
@@ -74,7 +82,21 @@ impl OpenAiCompatibleClient {
             model,
             credential: credential.map(std::sync::Arc::new),
             accepts_images,
+            request_log: None,
+            reasoning_effort: None,
         })
+    }
+
+    /// Record every call this client makes.
+    pub fn with_request_log(mut self, log: Arc<RequestLog>) -> Self {
+        self.request_log = Some(log);
+        self
+    }
+
+    /// Ask the model for this reasoning effort on every request.
+    pub(crate) fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort.filter(|effort| !effort.trim().is_empty());
+        self
     }
 
     /// The model name sent with every request.
@@ -87,11 +109,13 @@ impl OpenAiCompatibleClient {
     /// test.
     pub(crate) async fn request_text(
         &self,
+        purpose: RequestPurpose,
         instructions: &str,
         input: &str,
         cancel: CancelFlag,
     ) -> Result<String, BackendError> {
         let request = ModelRequest {
+            purpose,
             instructions: instructions.to_string(),
             items: vec![ModelItem::User {
                 text: input.to_string(),
@@ -184,7 +208,12 @@ impl OpenAiCompatibleClient {
         let instructions = "Return exactly the requested sentinel and no other text.";
         let input = format!("Return exactly: {sentinel}");
         let output = self
-            .request_text(instructions, &input, CancelFlag::new())
+            .request_text(
+                RequestPurpose::Probe,
+                instructions,
+                &input,
+                CancelFlag::new(),
+            )
             .await?;
         if output.trim() == sentinel {
             Ok(())
@@ -201,6 +230,7 @@ impl OpenAiCompatibleClient {
         cancel: CancelFlag,
         sink: DeltaSink<'_>,
     ) -> Result<ModelResponse, BackendError> {
+        let purpose = request.purpose;
         let body = ResponsesRequest {
             model: &self.model,
             instructions: &request.instructions,
@@ -208,8 +238,82 @@ impl OpenAiCompatibleClient {
             tools: request.tools.iter().map(wire_tool).collect(),
             stream: true,
             store: false,
+            include: ["reasoning.encrypted_content"],
+            reasoning: self
+                .reasoning_effort
+                .as_deref()
+                .map(|effort| WireReasoning { effort }),
         };
-        let mut http = self.client.post(self.responses_url.clone()).json(&body);
+        let mut record = self
+            .request_log
+            .as_ref()
+            .map(|log| log.begin(purpose, &transcript_body(&body), self.credential.clone()));
+        log::info!(
+            "AI request ({}) to {} for {}{}",
+            purpose.slug(),
+            self.responses_url,
+            self.model,
+            record
+                .as_ref()
+                .map(|record| format!(", recorded at {}", record.path().display()))
+                .unwrap_or_default()
+        );
+        let result = self.exchange(&body, cancel, sink, record.as_mut()).await;
+        let outcome = match &result {
+            Ok(response) if response.reached_output_limit => {
+                "incomplete: max_output_tokens".to_string()
+            }
+            Ok(_) => "completed".to_string(),
+            Err(error) => format!("error: {error}"),
+        };
+        log::info!(
+            "AI request ({}) {} after {} ms{}",
+            purpose.slug(),
+            outcome,
+            record
+                .as_ref()
+                .map(|record| record.elapsed_ms())
+                .unwrap_or_default(),
+            result
+                .as_ref()
+                .ok()
+                .and_then(|response| response.usage)
+                .map(|usage| {
+                    format!(
+                        "; {} input tokens ({} cached), {} output ({} reasoning)",
+                        usage.input_tokens,
+                        usage
+                            .cached_input_tokens
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "not reported".into()),
+                        usage.output_tokens,
+                        usage
+                            .reasoning_tokens
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "not reported".into())
+                    )
+                })
+                .unwrap_or_default()
+        );
+        if let Some(record) = record {
+            record.ended(
+                &outcome,
+                result.as_ref().ok().and_then(|response| response.usage),
+            );
+        }
+        result
+    }
+
+    /// Send the request and assemble the streamed response, recording
+    /// each event as it arrives.
+    async fn exchange(
+        &self,
+        body: &ResponsesRequest<'_>,
+        cancel: CancelFlag,
+        sink: DeltaSink<'_>,
+        mut record: Option<&mut CallRecord>,
+    ) -> Result<ModelResponse, BackendError> {
+        let mut http = self.client.post(self.responses_url.clone()).json(body);
         if let Some(credential) = &self.credential {
             http = http.bearer_auth(credential.value());
         }
@@ -222,6 +326,9 @@ impl OpenAiCompatibleClient {
             let body = await_cancellable(response.text(), &cancel)
                 .await?
                 .map_err(map_transport_error)?;
+            if let Some(record) = record.as_mut() {
+                record.rejected(status.as_u16(), &body);
+            }
             return Err(non_success_error(status, &body, self.credential.as_deref()));
         }
 
@@ -233,6 +340,9 @@ impl OpenAiCompatibleClient {
                 .map_err(map_transport_error)?;
             let Some(chunk) = chunk else { break };
             for event in parser.push(&chunk)? {
+                if let Some(record) = record.as_mut() {
+                    record.event(&event);
+                }
                 assembled.apply(event, sink, self.credential.as_deref())?;
             }
         }
@@ -241,6 +351,13 @@ impl OpenAiCompatibleClient {
 }
 
 impl TurnModel for OpenAiCompatibleClient {
+    fn session_identity(&self) -> Option<String> {
+        Some(format!(
+            "{}|{}|images={}",
+            self.responses_url, self.model, self.accepts_images
+        ))
+    }
+
     fn model_name(&self) -> &str {
         &self.model
     }
@@ -345,11 +462,44 @@ struct ResponsesRequest<'a> {
     tools: Vec<WireTool>,
     stream: bool,
     store: bool,
+    include: [&'static str; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<WireReasoning<'a>>,
+}
+
+#[derive(Serialize)]
+struct WireReasoning<'a> {
+    effort: &'a str,
+}
+
+/// The request as the transcript records it: exactly what was sent, with
+/// each image's data URL replaced by its type and size, so the file stays
+/// readable and two turns' requests can still be compared.
+fn transcript_body(body: &ResponsesRequest<'_>) -> serde_json::Value {
+    let mut value = serde_json::to_value(body).expect("request serialises");
+    for item in value["input"].as_array_mut().into_iter().flatten() {
+        for part in item["content"].as_array_mut().into_iter().flatten() {
+            if part["type"] == "input_image"
+                && let Some(url) = part["image_url"].as_str()
+            {
+                let media_type = url
+                    .strip_prefix("data:")
+                    .and_then(|rest| rest.split(';').next())
+                    .unwrap_or("image");
+                part["image_url"] = serde_json::Value::String(format!(
+                    "<{media_type}, {} characters of base64 omitted>",
+                    url.len()
+                ));
+            }
+        }
+    }
+    value
 }
 
 #[derive(Serialize)]
 #[serde(untagged)]
 enum WireItem {
+    ProviderOutput(serde_json::Value),
     Message {
         role: &'static str,
         content: Vec<WireContent>,
@@ -388,6 +538,11 @@ struct WireTool {
 
 fn wire_item(item: &ModelItem) -> WireItem {
     match item {
+        ModelItem::ProviderOutput(item) => WireItem::ProviderOutput(item.clone()),
+        ModelItem::Developer { text } => WireItem::Message {
+            role: "developer",
+            content: vec![WireContent::InputText { text: text.clone() }],
+        },
         ModelItem::User { text, images } => {
             let mut content = vec![WireContent::InputText { text: text.clone() }];
             content.extend(images.iter().map(|image| WireContent::InputImage {
@@ -499,6 +654,8 @@ const OUTPUT_LIMIT_REASON: &str = "max_output_tokens";
 /// Builds the response from the event stream.
 #[derive(Default)]
 struct ResponseAssembly {
+    /// Complete output items indexed by the provider, including opaque reasoning.
+    output: BTreeMap<u64, serde_json::Value>,
     /// The reply text exactly as it was passed to the sink: every message
     /// item's text in order, a blank line between items.
     text: String,
@@ -512,11 +669,30 @@ struct ResponseAssembly {
     reasoning_part: String,
     completed: bool,
     reached_output_limit: bool,
+    /// What the provider reported the call cost, from its closing event.
+    usage: Option<ProviderUsage>,
     failed: Option<BackendError>,
+}
+
+/// The usage block of a closing event, where the provider sends one.
+fn read_usage(usage: &serde_json::Value) -> Option<ProviderUsage> {
+    let count = |value: &serde_json::Value| value.as_u64().unwrap_or_default() as usize;
+    usage["input_tokens"].as_u64()?;
+    Some(ProviderUsage {
+        input_tokens: count(&usage["input_tokens"]),
+        cached_input_tokens: usage["input_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .map(|n| n as usize),
+        output_tokens: count(&usage["output_tokens"]),
+        reasoning_tokens: usage["output_tokens_details"]["reasoning_tokens"]
+            .as_u64()
+            .map(|n| n as usize),
+    })
 }
 
 #[derive(Default)]
 struct PendingCall {
+    output_index: Option<u64>,
     id: String,
     name: String,
     arguments: String,
@@ -531,6 +707,24 @@ impl ResponseAssembly {
     ) -> Result<(), BackendError> {
         let kind = event["type"].as_str().unwrap_or_default();
         let output_index = event["output_index"].as_u64();
+        if matches!(kind, "response.completed" | "response.incomplete") {
+            // The terminal output is authoritative, including for endpoints
+            // that do not emit output_item.done events.
+            for (index, item) in event["response"]["output"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                self.apply(
+                    serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    }),
+                    sink,
+                    credential,
+                )?;
+            }
+        }
         match kind {
             "response.output_text.delta" => {
                 if let Some(delta) = event["delta"].as_str() {
@@ -573,6 +767,7 @@ impl ResponseAssembly {
                     let name = item["name"].as_str().unwrap_or_default().to_string();
                     sink(StreamDelta::ToolCallStarted { name: name.clone() });
                     self.calls.push(PendingCall {
+                        output_index,
                         id: item["call_id"].as_str().unwrap_or_default().to_string(),
                         name,
                         arguments: item["arguments"].as_str().unwrap_or_default().to_string(),
@@ -580,8 +775,16 @@ impl ResponseAssembly {
                 }
             }
             "response.function_call_arguments.delta" => {
-                if let (Some(call), Some(delta)) = (self.calls.last_mut(), event["delta"].as_str())
-                {
+                if let (Some(call), Some(delta)) = (
+                    match output_index {
+                        Some(index) => self
+                            .calls
+                            .iter_mut()
+                            .find(|call| call.output_index == Some(index)),
+                        None => self.calls.last_mut(),
+                    },
+                    event["delta"].as_str(),
+                ) {
                     call.arguments.push_str(delta);
                 }
             }
@@ -589,6 +792,8 @@ impl ResponseAssembly {
                 // The completed item carries the whole call: authoritative
                 // over any deltas, and the only form some gateways send.
                 let item = &event["item"];
+                let index = output_index.unwrap_or(self.output.len() as u64);
+                self.output.insert(index, item.clone());
                 match item["type"].as_str() {
                     Some("function_call") => {
                         let id = item["call_id"].as_str().unwrap_or_default();
@@ -596,6 +801,7 @@ impl ResponseAssembly {
                         match self.calls.iter_mut().find(|call| call.id == id) {
                             Some(call) => call.arguments = arguments,
                             None => self.calls.push(PendingCall {
+                                output_index,
                                 id: id.to_string(),
                                 name: item["name"].as_str().unwrap_or_default().to_string(),
                                 arguments,
@@ -615,8 +821,12 @@ impl ResponseAssembly {
                     _ => {}
                 }
             }
-            "response.completed" => self.completed = true,
+            "response.completed" => {
+                self.completed = true;
+                self.usage = read_usage(&event["response"]["usage"]);
+            }
             "response.incomplete" => {
+                self.usage = read_usage(&event["response"]["usage"]);
                 let reason = event["response"]["incomplete_details"]["reason"].as_str();
                 if reason == Some(OUTPUT_LIMIT_REASON) {
                     self.reached_output_limit = true;
@@ -707,7 +917,7 @@ impl ResponseAssembly {
         }
     }
 
-    fn finish(self) -> Result<ModelResponse, BackendError> {
+    fn finish(mut self) -> Result<ModelResponse, BackendError> {
         if let Some(failure) = self.failed {
             return Err(failure);
         }
@@ -716,12 +926,27 @@ impl ResponseAssembly {
                 "the stream ended before the response completed".to_string(),
             ));
         }
+        // Delta-only compatible endpoints still get a replayable transcript.
+        for (index, text) in &self.messages {
+            let index = index.unwrap_or(0);
+            self.output.entry(index).or_insert_with(|| {
+                serde_json::json!({
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}],
+                })
+            });
+        }
+        self.calls.sort_by_key(|call| call.output_index);
         let mut tool_calls = Vec::with_capacity(self.calls.len());
         for call in self.calls {
             let arguments = match serde_json::from_str(&call.arguments) {
                 Ok(arguments) => arguments,
                 // The limit fell while this call was being written.
-                Err(_) if self.reached_output_limit => continue,
+                Err(_) if self.reached_output_limit => {
+                    self.output
+                        .retain(|_, item| item["call_id"].as_str() != Some(&call.id));
+                    continue;
+                }
                 Err(error) => {
                     return Err(BackendError::ParseError(format!(
                         "tool call {} carried unreadable arguments: {error}",
@@ -729,6 +954,13 @@ impl ResponseAssembly {
                     )));
                 }
             };
+            let index = call.output_index.unwrap_or(self.output.len() as u64);
+            self.output.entry(index).or_insert_with(|| {
+                serde_json::json!({
+                    "type": "function_call", "call_id": call.id,
+                    "name": call.name, "arguments": call.arguments,
+                })
+            });
             tool_calls.push(ToolCall {
                 id: call.id,
                 name: call.name,
@@ -736,9 +968,15 @@ impl ResponseAssembly {
             });
         }
         Ok(ModelResponse {
+            output_items: self
+                .output
+                .into_values()
+                .map(ModelItem::ProviderOutput)
+                .collect(),
             text: self.text,
             tool_calls,
             reached_output_limit: self.reached_output_limit,
+            usage: self.usage,
         })
     }
 }
@@ -1304,7 +1542,7 @@ mod tests {
         }])
         .await;
         let error = client(&base_url, None)
-            .request_text("i", "x", CancelFlag::new())
+            .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1521,6 +1759,7 @@ mod tests {
         let recorded = std::sync::Arc::clone(&deltas);
         let mut sink = move |delta: StreamDelta| recorded.lock().unwrap().push(delta);
         let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
             instructions: "system content".into(),
             items: vec![ModelItem::User {
                 text: "user content".into(),
@@ -1580,6 +1819,7 @@ mod tests {
         let recorded = std::sync::Arc::clone(&deltas);
         let mut sink = move |delta: StreamDelta| recorded.lock().unwrap().push(delta);
         let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
             instructions: "system content".into(),
             items: vec![
                 ModelItem::User {
@@ -1669,7 +1909,12 @@ mod tests {
         .await;
         let client = client(&base_url, Some(secret));
         let error = client
-            .request_text("instructions", "input", CancelFlag::new())
+            .request_text(
+                RequestPurpose::Turn,
+                "instructions",
+                "input",
+                CancelFlag::new(),
+            )
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1706,11 +1951,13 @@ mod tests {
         .await;
         let client = client(&base_url, None);
         assert!(matches!(
-            client.request_text("i", "x", CancelFlag::new()).await,
+            client
+                .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
+                .await,
             Err(BackendError::ParseError(_))
         ));
         let failed = client
-            .request_text("i", "x", CancelFlag::new())
+            .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1743,6 +1990,7 @@ mod tests {
         let started = std::time::Instant::now();
         let mut sink = |_delta: StreamDelta| {};
         let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
             instructions: "i".into(),
             items: vec![ModelItem::User {
                 text: "x".into(),
@@ -1764,9 +2012,344 @@ mod tests {
         let client = client(&format!("http://{address}/v1"), None);
         assert!(matches!(
             client
-                .request_text("instructions", "input", CancelFlag::new())
+                .request_text(
+                    RequestPurpose::Turn,
+                    "instructions",
+                    "input",
+                    CancelFlag::new()
+                )
                 .await,
             Err(BackendError::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn the_usage_of_a_closing_event_is_read_and_absent_where_none_is_sent() {
+        let with = assemble(&[
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hi"}),
+            serde_json::json!({"type": "response.completed", "response": {"status": "completed",
+                "usage": {"input_tokens": 1200, "input_tokens_details": {"cached_tokens": 1000},
+                          "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 250}}}}),
+        ], None)
+        .0
+        .unwrap();
+        assert_eq!(
+            with.usage,
+            Some(ProviderUsage {
+                input_tokens: 1200,
+                cached_input_tokens: Some(1000),
+                output_tokens: 300,
+                reasoning_tokens: Some(250),
+            })
+        );
+
+        let cut_off = assemble(&[
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hi"}),
+            serde_json::json!({"type": "response.incomplete", "response": {"status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 50, "output_tokens": 64000}}}),
+        ], None)
+        .0
+        .unwrap();
+        assert!(cut_off.reached_output_limit);
+        assert_eq!(cut_off.usage.map(|usage| usage.output_tokens), Some(64000));
+
+        let without = assemble(&[
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hi"}),
+            serde_json::json!({"type": "response.completed", "response": {"status": "completed"}}),
+        ], None)
+        .0
+        .unwrap();
+        assert_eq!(without.usage, None);
+    }
+
+    #[tokio::test]
+    async fn opaque_output_round_trips_in_order_through_disk_and_the_next_http_request() {
+        use cadmark_core::message::{Conversation, Message};
+        let output = serde_json::json!([
+            {"type":"reasoning","id":"rs_1","status":"completed","summary":[],
+             "encrypted_content":"opaque-signed-state"},
+            {"type":"message","id":"msg_1","role":"assistant","status":"completed",
+             "phase":"commentary","content":[{"type":"output_text","text":"Checking.","annotations":[]}]},
+            {"type":"function_call","id":"fc_1","call_id":"call_1","name":"read_script",
+             "arguments":"{ \"start_line\": 1 }","status":"completed"},
+            {"type":"reasoning","id":"rs_2","status":"completed",
+             "summary":[{"type":"summary_text","text":"Check the dimensions."}],
+             "encrypted_content":"another-signed-state"},
+            {"type":"function_call","id":"fc_2","call_id":"call_2","name":"read_script",
+             "arguments":"{}","status":"completed"}
+        ]);
+        // Exercise both item completion and terminal-only delivery. They must
+        // converge on one item per output index, never duplicate reasoning.
+        for terminal_only in [false, true] {
+            let mut events = Vec::new();
+            if !terminal_only {
+                for (index, item) in output.as_array().unwrap().iter().enumerate() {
+                    events.push(serde_json::json!({"type":"response.output_item.done",
+                        "output_index":index,"item":item}));
+                }
+            }
+            events.push(serde_json::json!({"type":"response.completed","response":{
+                "status":"completed","output":output,
+                "usage":{"input_tokens":120,"output_tokens":24}}}));
+            let (url, requests, server) = recording::recording_server(vec![
+                recording::ScriptedResponse {
+                    status: 200,
+                    body: recording::events(&events),
+                    streamed: true,
+                    delay: None,
+                },
+                recording::completed("Done."),
+            ])
+            .await;
+            let client = client(&url, None);
+            let mut request = ModelRequest {
+                purpose: RequestPurpose::Turn,
+                instructions: "Stable instructions".into(),
+                items: vec![ModelItem::User {
+                    text: "Inspect".into(),
+                    images: vec![],
+                }],
+                tools: vec![],
+            };
+            let response = client
+                .stream(request.clone(), CancelFlag::new(), &mut |_| {})
+                .await
+                .unwrap();
+            assert_eq!(response.text, "Checking.");
+            assert_eq!(response.tool_calls.len(), 2);
+            assert!(response.has_continuable_reasoning());
+            let usage = response.usage.unwrap();
+            assert_eq!(usage.reasoning_tokens, None);
+            assert_eq!(usage.cached_input_tokens, None);
+            request.items.extend(response.replay_items());
+            for call in &response.tool_calls {
+                request.items.push(ModelItem::ToolResult {
+                    call_id: call.id.clone(),
+                    output: "line 1".into(),
+                });
+            }
+            let mut conversation = Conversation::new();
+            conversation.push(Message::user_chat("Inspect"));
+            conversation.record_session_for(request.items.clone(), client.session_identity());
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("conversation.json");
+            std::fs::write(&path, serde_json::to_vec(&conversation).unwrap()).unwrap();
+            let restored: Conversation =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            request.items = restored.replay().0.to_vec();
+            client
+                .stream(request, CancelFlag::new(), &mut |_| {})
+                .await
+                .unwrap();
+            server.await.unwrap();
+            let requests = requests.lock().unwrap();
+            let next = requests[1].body["input"].as_array().unwrap();
+            assert_eq!(&next[1..6], output.as_array().unwrap());
+            assert_eq!(next[6]["call_id"], "call_1");
+            assert_eq!(next[7]["call_id"], "call_2");
+            assert_eq!(requests[0].body["input"][0], next[0]);
+            assert_eq!(
+                requests[0].body["instructions"],
+                requests[1].body["instructions"]
+            );
+            assert_eq!(
+                requests[0].body["include"],
+                serde_json::json!(["reasoning.encrypted_content"])
+            );
+        }
+    }
+
+    #[test]
+    fn interleaved_argument_deltas_stay_with_their_output_index() {
+        let (response, _) = assemble(
+            &[
+                serde_json::json!({"type":"response.output_item.added","output_index":1,
+                "item":{"type":"function_call","call_id":"one","name":"read_script","arguments":""}}),
+                serde_json::json!({"type":"response.output_item.added","output_index":2,
+                "item":{"type":"function_call","call_id":"two","name":"read_script","arguments":""}}),
+                serde_json::json!({"type":"response.function_call_arguments.delta","output_index":1,"delta":"{\"start_line\":1}"}),
+                serde_json::json!({"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"start_line\":2}"}),
+                serde_json::json!({"type":"response.completed","response":{"status":"completed"}}),
+            ],
+            None,
+        );
+        let response = response.unwrap();
+        assert_eq!(response.tool_calls[0].arguments["start_line"], 1);
+        assert_eq!(response.tool_calls[1].arguments["start_line"], 2);
+    }
+
+    #[test]
+    fn a_cut_off_call_is_excluded_without_losing_the_reasoning_before_it() {
+        let reasoning = serde_json::json!({"type":"reasoning","id":"rs_1","summary":[],
+            "status":"completed","encrypted_content":"signed"});
+        let (response, _) = assemble(
+            &[serde_json::json!({"type":"response.incomplete","response":{
+                "incomplete_details":{"reason":"max_output_tokens"},
+                "output":[reasoning,{"type":"function_call","call_id":"partial","name":"edit_script", "arguments":"{\"old_text\":"}],
+                "usage":{"input_tokens":80,"output_tokens":64000,"output_tokens_details":{"reasoning_tokens":63990}}
+            }})],
+            None,
+        );
+        let response = response.unwrap();
+        assert!(response.reached_output_limit);
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(
+            response.output_items,
+            [ModelItem::ProviderOutput(reasoning)]
+        );
+        assert_eq!(response.usage.unwrap().reasoning_tokens, Some(63990));
+    }
+
+    #[tokio::test]
+    async fn a_configured_reasoning_effort_rides_on_every_request_and_none_by_default() {
+        use recording::{completed, recording_server};
+        let (base_url, requests, server) =
+            recording_server(vec![completed("a"), completed("b")]).await;
+        let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
+            instructions: "i".into(),
+            items: vec![ModelItem::User {
+                text: "x".into(),
+                images: vec![],
+            }],
+            tools: vec![],
+        };
+        let mut sink = |_delta: StreamDelta| {};
+        client(&base_url, None)
+            .stream(request.clone(), CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        client(&base_url, None)
+            .with_reasoning_effort(Some("medium".into()))
+            .stream(request, CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[0].body.get("reasoning").is_none(),
+            "{}",
+            requests[0].body
+        );
+        assert_eq!(requests[1].body["reasoning"]["effort"], "medium");
+    }
+
+    #[tokio::test]
+    async fn a_recorded_refusal_and_a_recorded_stream_error_carry_no_credential() {
+        use recording::{ScriptedResponse, events, provider_failure, recording_server};
+        let secret = "fake-provider-secret";
+        let (base_url, _requests, server) = recording_server(vec![
+            provider_failure(
+                401,
+                "authentication_error",
+                "invalid_api_key",
+                &format!("bad key {secret}"),
+            ),
+            ScriptedResponse {
+                status: 200,
+                body: events(&[
+                    serde_json::json!({"type": "error", "error": {"type": "server_error",
+                    "code": "internal", "message": format!("could not forward Bearer {secret}")}}),
+                ]),
+                streamed: true,
+                delay: None,
+            },
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(RequestLog::in_directory(dir.path().to_path_buf()));
+        let client = client(&base_url, Some(secret)).with_request_log(Arc::clone(&log));
+        for _ in 0..2 {
+            client
+                .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
+                .await
+                .unwrap_err();
+        }
+        server.await.unwrap();
+
+        let mut files: Vec<_> = std::fs::read_dir(log.directory())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 2);
+        let refused = std::fs::read_to_string(&files[0]).unwrap();
+        let streamed = std::fs::read_to_string(&files[1]).unwrap();
+        assert!(!refused.contains(secret), "{refused}");
+        assert!(!streamed.contains(secret), "{streamed}");
+        assert!(refused.contains("\"kind\":\"rejected\""), "{refused}");
+        assert!(refused.contains("bad key [REDACTED]"), "{refused}");
+        assert!(streamed.contains("Bearer [REDACTED]"), "{streamed}");
+    }
+
+    #[tokio::test]
+    async fn a_recorded_call_holds_the_request_as_sent_with_images_summarised_and_the_outcome() {
+        use recording::{completed, recording_server};
+        let (base_url, _requests, server) = recording_server(vec![completed("ok")]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(RequestLog::in_directory(dir.path().join("requests")));
+        let client = client(&base_url, Some("secret-token")).with_request_log(Arc::clone(&log));
+        let request = ModelRequest {
+            purpose: RequestPurpose::DocLookup,
+            instructions: "system content".into(),
+            items: vec![ModelItem::User {
+                text: "user content".into(),
+                images: vec![ImageData {
+                    media_type: "image/png".into(),
+                    bytes: vec![1, 2, 3, 4],
+                }],
+            }],
+            tools: vec![],
+        };
+        let mut sink = |_delta: StreamDelta| {};
+        let response = client
+            .stream(request, CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.text, "ok");
+
+        let mut files: Vec<_> = std::fs::read_dir(log.directory())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let path = files.remove(0);
+        assert!(
+            path.to_str().unwrap().ends_with("-docs.jsonl"),
+            "{}",
+            path.display()
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("secret-token"),
+            "the credential is never written"
+        );
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["kind"], "request");
+        assert_eq!(lines[0]["body"]["instructions"], "system content");
+        assert_eq!(
+            lines[0]["body"]["input"][0]["content"][0]["text"],
+            "user content"
+        );
+        let image = lines[0]["body"]["input"][0]["content"][1]["image_url"]
+            .as_str()
+            .unwrap();
+        assert!(image.starts_with("<image/png, "), "{image}");
+        assert!(
+            !image.contains("AQID"),
+            "the image bytes are summarised, not written"
+        );
+        assert_eq!(lines[1]["kind"], "event");
+        assert_eq!(lines[1]["event"]["type"], "response.output_text.delta");
+        assert_eq!(lines.last().unwrap()["kind"], "outcome");
+        assert_eq!(lines.last().unwrap()["outcome"], "completed");
+        assert_eq!(lines.last().unwrap()["events"], 2);
     }
 }

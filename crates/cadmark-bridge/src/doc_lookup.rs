@@ -6,6 +6,7 @@
 
 use cadmark_core::cancellation::CancelFlag;
 
+use crate::backend::RequestPurpose;
 use crate::openai_compatible::OpenAiCompatibleClient;
 
 /// System prompt for the reference lookup consumer.
@@ -105,7 +106,7 @@ impl DocLookup {
         let prompt = Self::build_prompt(query);
         match self
             .client
-            .request_text(LOOKUP_PROMPT, &prompt, cancel)
+            .request_text(RequestPurpose::DocLookup, LOOKUP_PROMPT, &prompt, cancel)
             .await
         {
             Ok(text) if text.trim().is_empty() => NO_RESULT.to_string(),
@@ -154,6 +155,7 @@ mod tests {
         let (base_url, records, server) =
             recording_server(vec![completed("Threaded bolt recipe")]).await;
         let client = crate::config::AiConfiguration {
+            reasoning_effort: None,
             base_url,
             model: "m".into(),
             accepts_images: false,
@@ -195,6 +197,7 @@ mod tests {
         )])
         .await;
         let client = crate::config::AiConfiguration {
+            reasoning_effort: None,
             base_url,
             model: "m".into(),
             accepts_images: false,

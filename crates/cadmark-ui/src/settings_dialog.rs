@@ -18,6 +18,9 @@ pub struct SettingsForm {
     pub model: String,
     pub accepts_images: bool,
     pub allow_insecure_http: bool,
+    /// The reasoning effort asked of the model on every request; blank
+    /// sends nothing and leaves the provider's default.
+    pub reasoning_effort: String,
     /// A new credential to store; empty leaves the stored one alone.
     pub credential: String,
     /// Whether a credential is already stored, for the field's hint.
@@ -131,6 +134,13 @@ impl SettingsDialog {
                         ui.add(
                             egui::TextEdit::singleline(&mut form.model)
                                 .hint_text("model name")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.end_row();
+                        ui.label("Reasoning effort");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut form.reasoning_effort)
+                                .hint_text("blank for the provider's default; low, medium, high")
                                 .desired_width(f32::INFINITY),
                         );
                         ui.end_row();
@@ -267,6 +277,7 @@ mod tests {
     #[test]
     fn the_form_converts_to_limits_with_sane_floors() {
         let form = SettingsForm {
+            reasoning_effort: String::new(),
             base_url: String::new(),
             model: String::new(),
             accepts_images: false,

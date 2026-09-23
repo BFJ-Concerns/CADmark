@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use cadmark_bridge::AiServices;
-use cadmark_bridge::backend::TurnModel;
+use cadmark_bridge::backend::{ProviderUsage, TurnModel};
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
@@ -169,6 +169,9 @@ pub struct Project {
     /// which takes precedence over the manual setting; absent when the
     /// endpoint advertised none.
     pub detected_context_window: Option<usize>,
+    /// What the provider reported the last request of a turn cost; the
+    /// one measured figure the occupancy estimate is shown against.
+    pub last_usage: Option<ProviderUsage>,
     pub busy: Option<Busy>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: ProvenanceLedger,
@@ -223,6 +226,9 @@ impl Project {
         }
 
         let mut conversation = load_conversation(&dir);
+        if let Ok(services) = &ai {
+            conversation = conversation.for_model(services.model.session_identity().as_deref());
+        }
         if conversation.is_empty() {
             conversation.push(Message::notice(format!(
                 "Describe what you'd like to build, or click a face, edge or vertex of the \
@@ -266,6 +272,7 @@ impl Project {
             conversation,
             ai_model,
             detected_context_window: None,
+            last_usage: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
@@ -845,6 +852,7 @@ mod tests {
             conversation: Conversation::new(),
             ai_model: None,
             detected_context_window: None,
+            last_usage: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
@@ -861,6 +869,47 @@ mod tests {
             measurements_in_flight: 0,
         };
         (project, cmd_rx)
+    }
+
+    #[test]
+    fn reopening_with_a_different_model_discards_opaque_context_before_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut project, _commands) = project_for_test(dir.path().to_path_buf());
+        project
+            .conversation
+            .push(Message::user_chat("Keep the design"));
+        project.conversation.record_session_for(
+            vec![cadmark_core::model_session::ModelItem::ProviderOutput(
+                serde_json::json!({
+                    "type": "reasoning", "encrypted_content": "x".repeat(4000)
+                }),
+            )],
+            Some("another backend".into()),
+        );
+        project.save_conversation().unwrap();
+        drop(project);
+        let services = cadmark_bridge::build_ai_services(
+            cadmark_bridge::config::AiConfiguration {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "new-model".into(),
+                accepts_images: false,
+                allow_insecure_http: true,
+                reasoning_effort: None,
+            },
+            None,
+        )
+        .unwrap();
+        let mut reopened = Project::open(
+            dir.path().to_path_buf(),
+            None,
+            Ok(services),
+            ExecutionLimits::default(),
+            Box::new(crate::turn::NoRender),
+        );
+        assert!(reopened.conversation.session().items.is_empty());
+        assert_eq!(reopened.conversation.messages()[0].text, "Keep the design");
+        assert!(reopened.conversation.estimated_tokens() < 1000);
+        reopened.shut_down();
     }
 
     #[test]

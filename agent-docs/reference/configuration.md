@@ -18,12 +18,13 @@ Source: `crates/cadmark-app/src/user_settings.rs:86–99`, `crates/cadmark-app/s
 | `ai.model` | string | (none) | Model name |
 | `ai.accepts_images` | bool | `false` | Whether the model reads images; sends message attachments and enables the render and reference-library tools |
 | `ai.allow_insecure_http` | bool | `false` | Permit a plain-HTTP endpoint (local model servers) |
+| `ai.reasoning_effort` | string | (none) | Sent as the request's `reasoning.effort` on every call when set (`low`, `medium`, `high`, or whatever the endpoint accepts); unset, the field is not sent and the provider's default applies |
 | `limits.wall_clock` | duration | 120 s | Script execution wall-clock ceiling |
 | `limits.memory_bytes` | integer | 4294967296 (4 GB) | Script execution resident-memory ceiling in bytes |
 | `context_window_tokens` | integer | 128000 | Fallback context window, used only when the endpoint does not advertise one for the model (see below); CADmark condenses conversation before approaching the limit in force |
 | `recent_projects` | array of paths | `[]` | Recently opened project folders, most recent first; capped at 8 |
 
-Source: `crates/cadmark-app/src/user_settings.rs:32–43`, `crates/cadmark-core/src/limits.rs:9–17`, `crates/cadmark-app/src/user_settings.rs:29`.
+Source: `crates/cadmark-app/src/user_settings.rs:32–43`, `crates/cadmark-bridge/src/config.rs` (`AiConfiguration`), `crates/cadmark-core/src/limits.rs:9–17`, `crates/cadmark-app/src/user_settings.rs:29`.
 
 ## Settings dialog
 
@@ -31,7 +32,7 @@ The dialog opens from the toolbar gear button or from the "AI off" badge. It is 
 
 Sections:
 
-- **AI provider** — base URL, model, credential (masked, never echoed), accepts-images checkbox, allow-insecure-HTTP checkbox. The hint text notes "Any OpenAI-compatible endpoint: OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server."
+- **AI provider** — base URL, model, reasoning effort (text; blank sends nothing), credential (masked, never echoed), accepts-images checkbox, allow-insecure-HTTP checkbox. The hint text notes "Any OpenAI-compatible endpoint: OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server."
 - **Script limits** — wall clock (seconds, min 1, max 3600) and memory (MB, min 64, max 65536).
 - **Conversation context** — context window in tokens (min 1024, max 10000000).
 

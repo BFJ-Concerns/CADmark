@@ -19,6 +19,7 @@ use cadmark_core::ledger::LedgerValue;
 use cadmark_core::message::{
     ContextUsage, Conversation, ImageData, Message, MessageId, MessageKind, ToolActivity,
 };
+use cadmark_core::model_session::ProviderUsage;
 use cadmark_core::pending_comment::{
     PendingAnchor, PendingComment, PendingCommentId, PendingComments,
 };
@@ -193,6 +194,7 @@ impl ChatPane {
         ui: &mut egui::Ui,
         conversation: &Conversation,
         context: ContextUsage,
+        measured: Option<ProviderUsage>,
         pending: &mut PendingComments,
     ) -> ChatAction {
         // The input sits in a bottom panel so it is laid out first and the
@@ -215,7 +217,7 @@ impl ChatPane {
                 egui::TopBottomPanel::top("chat_context_usage")
                     .frame(egui::Frame::NONE)
                     .show_separator_line(false)
-                    .show_inside(ui, |ui| show_context_usage(ui, context));
+                    .show_inside(ui, |ui| show_context_usage(ui, context, measured));
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE)
                     .show_inside(ui, |ui| self.show_messages(ui, conversation, pending))
@@ -537,40 +539,70 @@ impl ChatPane {
 }
 
 /// How much of the context window the next request occupies, with the
-/// breakdown on hover, and a warning when the request would be too large
-/// with no conversation at all — which no amount of condensing helps.
-fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage) {
-    ui.horizontal(|ui| {
-        let over = context.request_alone_is_over_budget();
-        let colour = if over {
-            theme::WARNING
-        } else {
-            theme::TEXT_MUTED
-        };
+/// breakdown on hover; under it, the provider's own count for the last
+/// request, and a warning when the request would be too large with no
+/// conversation at all — which no amount of condensing helps. Each sits
+/// on its own row and wraps, so the figures stay readable at the chat
+/// pane's narrowest width.
+fn show_context_usage(ui: &mut egui::Ui, context: ContextUsage, measured: Option<ProviderUsage>) {
+    let over = context.request_alone_is_over_budget();
+    let colour = if over {
+        theme::WARNING
+    } else {
+        theme::TEXT_MUTED
+    };
+    ui.label(
+        egui::RichText::new(format!(
+            "Context: {} / {} tokens ({}%)",
+            context.used_tokens(),
+            context.window_tokens,
+            context.percent()
+        ))
+        .small()
+        .color(colour),
+    )
+    .on_hover_text(context_breakdown(context));
+    if let Some(usage) = measured {
         ui.label(
-            egui::RichText::new(format!(
-                "Context: {} / {} tokens ({}%)",
-                context.used_tokens(),
-                context.window_tokens,
-                context.percent()
-            ))
-            .small()
-            .color(colour),
-        )
-        .on_hover_text(context_breakdown(context));
-        if over {
-            ui.label(
-                egui::RichText::new(
-                    "The script, instructions and images alone nearly fill the window; \
-                     condensing the conversation cannot make room. Raise the context \
-                     window in Settings or shorten the script.",
-                )
+            egui::RichText::new(measured_usage_line(usage))
                 .small()
-                .color(theme::WARNING),
-            );
-        }
-    });
+                .color(theme::TEXT_MUTED),
+        )
+        .on_hover_text(
+            "What the provider reported for the last request of a turn: the tokens it \
+             read, how many of those its cache served, and what the model wrote, \
+             reasoning included. The estimate above it is CADmark's own.",
+        );
+    }
+    if over {
+        ui.label(
+            egui::RichText::new(
+                "The script, instructions and images alone nearly fill the window; \
+                 condensing the conversation cannot make room. Raise the context \
+                 window in Settings or shorten the script.",
+            )
+            .small()
+            .color(theme::WARNING),
+        );
+    }
     ui.add_space(4.0);
+}
+
+/// The provider's own count for the last request, under the estimate.
+fn measured_usage_line(usage: ProviderUsage) -> String {
+    format!(
+        "Last request: {} read ({} cached) · {} written ({} reasoning)",
+        usage.input_tokens,
+        usage
+            .cached_input_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "not reported".into()),
+        usage.output_tokens,
+        usage
+            .reasoning_tokens
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "not reported".into())
+    )
 }
 
 /// The occupancy figure's parts, one per line, in estimated tokens.
@@ -1191,6 +1223,25 @@ mod tests {
     }
 
     #[test]
+    fn omitted_usage_details_are_not_displayed_as_measured_zeroes() {
+        let missing = measured_usage_line(ProviderUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            ..Default::default()
+        });
+        assert!(missing.contains("not reported cached"));
+        assert!(missing.contains("not reported reasoning"));
+        let zero = measured_usage_line(ProviderUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+            cached_input_tokens: Some(0),
+            reasoning_tokens: Some(0),
+        });
+        assert!(zero.contains("0 cached"));
+        assert!(zero.contains("0 reasoning"));
+    }
+
+    #[test]
     fn a_removed_thumbnail_is_not_among_the_images_taken_for_the_message() {
         let staged = |name: &str| StagedImage {
             name: name.to_string(),
@@ -1380,6 +1431,7 @@ mod tests {
                             request_tokens: 0,
                             window_tokens: 128_000,
                         },
+                        None,
                         &mut pending,
                     );
                 });
@@ -1569,6 +1621,7 @@ mod tests {
                         request_tokens: 0,
                         window_tokens: 128_000,
                     },
+                    None,
                     &mut pending,
                 );
             });

@@ -27,6 +27,12 @@ pub struct AiConfiguration {
     /// Permit a plain-HTTP endpoint (a local model server, a LAN gateway).
     #[serde(default)]
     pub allow_insecure_http: bool,
+    /// The reasoning effort asked of the model on every request
+    /// (`low`, `medium`, `high`, or whatever the endpoint accepts), sent
+    /// as the Responses `reasoning.effort` field. Unset, nothing is sent
+    /// and the provider's default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// A configuration error safe to show to the user.
@@ -79,6 +85,7 @@ impl AiConfiguration {
                 .map(Credential::new),
             self.accepts_images,
         )
+        .map(|client| client.with_reasoning_effort(self.reasoning_effort))
         .map_err(|_| ConfigurationError::ClientConstruction)
     }
 }
@@ -91,6 +98,7 @@ impl fmt::Debug for AiConfiguration {
             .field("model", &"[CONFIGURED]")
             .field("accepts_images", &self.accepts_images)
             .field("allow_insecure_http", &self.allow_insecure_http)
+            .field("reasoning_effort", &self.reasoning_effort)
             .finish()
     }
 }
@@ -105,6 +113,7 @@ mod tests {
             model: "test-model".to_string(),
             accepts_images: false,
             allow_insecure_http: false,
+            reasoning_effort: None,
         }
     }
 
