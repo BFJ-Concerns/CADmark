@@ -81,6 +81,10 @@ All notable changes to this project will be documented in this file.
   it without cutting
 
 ### Changed
+- While a turn runs, each tool call shows as its own collapsed line in the
+  chat, so calls can be watched as they arrive; when the turn ends each run
+  of calls folds into one line counting them ("8 tool calls: ran the script
+  ×6, looked up docs ×2"), while the AI's text between them stays shown
 - Script execution no longer spends most of its time in CADmark's own
   bookkeeping: a moderately complex part that took over two minutes now
   builds in about the time build123d itself needs. The provenance
@@ -149,6 +153,16 @@ All notable changes to this project will be documented in this file.
 - Window title carries the project name
 
 ### Fixed
+- What the AI wrote before a turn failed or was cancelled stays in the chat
+  instead of disappearing with the turn
+- A reply the provider cuts off at its output-token limit is no longer
+  reported as "provider request failed" and thrown away: CADmark keeps the
+  text, runs the tool calls written in full, says in the chat that the reply
+  was cut off, and asks the AI to continue
+- Errors a provider sends partway through a reply are reported by cause
+  (usage limit, overload, credential) with their real message, rather than
+  as "type error"; reply text a provider sends only at the end of an item
+  is no longer lost
 - A long parameter name or expression no longer widens the parameters panel past its column, which left a dark void between the panel and the viewport; the row is cut short and the full text sits in its tooltip
 - The AI is sent the script on disk with every turn, so a reopened project,
   a new conversation or a condensed chat no longer leaves it reconstructing

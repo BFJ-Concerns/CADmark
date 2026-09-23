@@ -62,8 +62,10 @@ The chat pane is where you talk to the AI. Messages are distinguished by positio
 - Your messages lean right.
 - Spatial comments carry accent-tinted chips naming each anchor's element and source line.
 - The AI's replies stream in as the turn progresses.
-- Tool calls appear as a collapsed group you can expand to see each call's input and result.
+- Tool calls appear one line each while the turn runs, so you can watch them arrive; each line is collapsed and expands to the call's input and result. When the turn ends, each run of calls folds into a single collapsed line such as "8 tool calls: ran the script ×6, looked up docs ×2", which opens to the same lines. What the AI wrote between the calls stays shown.
 - Notices from CADmark itself are quiet, or red when something failed.
+
+If a turn fails or you cancel it, whatever the AI had written so far stays in the chat, above the notice that says how the turn ended. If the provider cuts a reply off at its output limit, CADmark keeps what was written, runs the tool calls the AI had finished writing, says in the chat that the reply was cut off, and asks the AI to carry on. A reply cut off before it contains any text or a complete tool call ends the turn with a message naming the output limit, since asking again would only repeat it. When a provider reports a usage limit or overload partway through a reply, the message names that cause.
 
 Every turn sends the AI the part's script as it stands on disk, whatever the conversation holds: a reopened project, a new conversation, or a condensed chat all start from the real file. When the file differs from the last script the AI ran, because a value was changed in the parameters panel or a design step was undone, the AI is told so and which parameter values changed, so it keeps them. Each such change is also noted in the chat where it happened, in a quiet card the AI reads with the rest of the conversation, so it knows when you set a value or stepped back and can tell one edit from a later reversal.
 

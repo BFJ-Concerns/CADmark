@@ -189,9 +189,10 @@ pub fn edit_script_spec() -> ToolSpec {
 pub fn read_script_spec() -> ToolSpec {
     ToolSpec {
         name: READ_SCRIPT.to_string(),
-        description: "Read the script with line numbers, whole or between two lines. Use it \
-                      to see the lines a traceback names; the full text without numbers is \
-                      already in the <current_script> block."
+        description: "Read the script with line numbers, whole or between two lines, as it \
+                      now stands. Use it to see the lines a traceback names, or to copy exact \
+                      text after an edit; the <current_script> block shows the file only as \
+                      the turn began."
             .to_string(),
         parameters: json!({
             "type": "object",
