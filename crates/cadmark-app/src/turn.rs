@@ -331,19 +331,30 @@ impl<
         let (recorded, unrendered) = conversation.replay();
         *items = recorded.to_vec();
         items.extend(history_items(unrendered, self.model.accepts_images()));
-        if usage.needs_condensing() && !conversation.is_empty() {
-            let summary = match self.condense(conversation).await {
-                Ok(summary) => summary,
-                Err(outcome) => return outcome,
-            };
-            emit(TurnEvent::ConversationCondensed {
-                summary: summary.clone(),
-            });
-            *items = vec![ModelItem::Assistant {
-                text: format!("Conversation summary:\n{summary}"),
-            }];
-        }
+        // A condensation that fails ends the turn, but only after the
+        // turn's own input has joined the items: the sequence the turn
+        // ends with is recorded as the next request's prefix, so the
+        // request the user just made must be in it.
+        let condensation_failure = if usage.needs_condensing() && !conversation.is_empty() {
+            match self.condense(conversation).await {
+                Ok(summary) => {
+                    emit(TurnEvent::ConversationCondensed {
+                        summary: summary.clone(),
+                    });
+                    *items = vec![ModelItem::Assistant {
+                        text: format!("Conversation summary:\n{summary}"),
+                    }];
+                    None
+                }
+                Err(outcome) => Some(outcome),
+            }
+        } else {
+            None
+        };
         items.extend(assembled.items);
+        if let Some(outcome) = condensation_failure {
+            return outcome;
+        }
         let tools = assembled.tools;
         let instructions = assembled.instructions;
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
@@ -2818,6 +2829,96 @@ mod tests {
             harness.events.first(),
             Some(TurnEvent::ConversationCondensed { summary }) if summary.contains("5 mm wall")
         ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_condensation_keeps_the_turn_input_in_the_recorded_session() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat(format!(
+            "Decision: use a 5 mm wall. {}",
+            "detail ".repeat(700)
+        )));
+        conversation.push(Message::ai_response("The wall will be 5 mm."));
+        let model = ScriptedModel::new([Err(BackendError::RequestFailed("gateway down".into()))]);
+        let mut harness = Harness::with_script(Some("original"), FakeExecutor::new([]));
+
+        let outcome = harness
+            .run_with_conversation(
+                &model,
+                &conversation,
+                TurnInput {
+                    chat: Some("Open request: add a lid.".into()),
+                    context_window_tokens: 1_000,
+                    ..Default::default()
+                },
+                CancelFlag::new(),
+            )
+            .await;
+
+        assert!(
+            matches!(&outcome, TurnOutcome::Failed { error } if error.contains("condense")),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            model.requests.lock().unwrap().len(),
+            1,
+            "only the condensation was asked"
+        );
+        let Some(TurnEvent::ModelContext { items, .. }) = harness.events.last() else {
+            panic!("the turn ends by naming its model context");
+        };
+        let user_texts: Vec<&str> = items
+            .iter()
+            .filter_map(|item| match item {
+                ModelItem::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            user_texts.iter().any(|text| text.contains("add a lid")),
+            "the request the user just made is in the recorded sequence: {user_texts:?}"
+        );
+        assert!(user_texts.iter().any(|text| text.contains("5 mm wall")));
+
+        // The app records that sequence as reaching the failure notice, so
+        // the next turn replays it rather than rendering the chat again;
+        // the open request must still reach the model.
+        let mut history = conversation.clone();
+        history.push(Message::user_chat("Open request: add a lid."));
+        history.push(Message::notice(
+            "Could not condense the conversation: gateway down",
+        ));
+        history.record_session(items.clone());
+        let follow_up = ScriptedModel::new([text("A lid it is.")]);
+        harness
+            .run_with_conversation(
+                &follow_up,
+                &history,
+                TurnInput {
+                    chat: Some("Go on.".into()),
+                    context_window_tokens: 128_000,
+                    ..Default::default()
+                },
+                CancelFlag::new(),
+            )
+            .await;
+        let requests = follow_up.requests.lock().unwrap();
+        let sent: Vec<&str> = requests[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ModelItem::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent.iter()
+                .filter(|text| text.contains("add a lid"))
+                .count(),
+            1,
+            "the open request is sent once: {sent:?}"
+        );
+        assert!(sent.last().unwrap().contains("Go on."));
     }
 
     #[tokio::test]
