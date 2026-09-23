@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- The AI's thinking shows in the chat while a turn runs: "thinking…" as
+  it reasons before each reply, then "thought for 2m 05s" once it speaks
+  or calls a tool, opening to the reasoning text where the provider shares
+  any. Reasoning counts as activity, so a long think no longer reads as a
+  quiet stream, and a turn that ends during one records how long it was
 - The AI edits the script in place rather than rewriting it: `edit_script`
   replaces exact text and reports the edited region with line numbers,
   `read_script` shows lines by number, and `run_script` without `code` runs

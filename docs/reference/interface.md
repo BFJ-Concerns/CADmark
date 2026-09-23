@@ -62,7 +62,9 @@ The chat pane is where you talk to the AI. Messages are distinguished by positio
 - Your messages lean right.
 - Spatial comments carry accent-tinted chips naming each anchor's element and source line.
 - The AI's replies stream in as the turn progresses.
-- Tool calls appear one line each while the turn runs, so you can watch them arrive; each line is collapsed and expands to the call's input and result. When the turn ends, each run of calls folds into a single collapsed line such as "8 tool calls: ran the script ×6, looked up docs ×2", which opens to the same lines. What the AI wrote between the calls stays shown.
+- Tool calls appear one line each while the turn runs, so you can watch them arrive; each line is collapsed and expands to the call's input and result.
+- The AI's thinking shows too: "thinking…" while it reasons before a reply, then "thought for 2m 05s" once it goes on to speak or call a tool. Where the provider shares the reasoning text, the line opens to it; where it keeps the reasoning private, the line stands alone, and the phase line under the messages still counts the reasoning as activity rather than showing the stream as quiet.
+- When the turn ends, each run of calls and thinking folds into a single collapsed line such as "8 tool calls: ran the script ×6, looked up docs ×2 · thought for 4m 10s", which opens to the same lines. What the AI wrote between the steps stays shown.
 - Notices from CADmark itself are quiet, or red when something failed.
 
 If a turn fails or you cancel it, whatever the AI had written so far stays in the chat, above the notice that says how the turn ended. If the provider cuts a reply off at its output limit, CADmark keeps what was written, runs the tool calls the AI had finished writing, says in the chat that the reply was cut off, and asks the AI to carry on. A reply cut off before it contains any text or a complete tool call ends the turn with a message naming the output limit, since asking again would only repeat it. When a provider reports a usage limit or overload partway through a reply, the message names that cause.
