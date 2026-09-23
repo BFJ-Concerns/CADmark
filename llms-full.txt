@@ -71,8 +71,11 @@ checkout under `$CADMARK_PREFIX` (default `~/.local`):
 | `share/icons/hicolor/scalable/apps/cadmark.svg` | application icon |
 
 The wrapper's `VIRTUAL_ENV` is what makes the installed copy use its own
-runtime: `discover_venv` checks that variable before the workspace root baked
-in at compile time. `WorkerLaunch::beside_current_exe` resolves the
+runtime: `discover_venv` checks that variable first, then a `.venv` beside
+the executable or up to three directories above it, then the workspace root
+baked in at compile time, then the working directory — so an installed copy
+started without the wrapper still finds `lib/cadmark/.venv` before the
+checkout it was built from. `WorkerLaunch::beside_current_exe` resolves the
 environment in the parent and passes it to the worker as `--venv`, because the
 worker's own environment is cleared before it starts.
 
@@ -334,11 +337,11 @@ Source: `crates/cadmark-app/src/user_settings.rs:86–99`, `crates/cadmark-app/s
 |-------|------|---------|-------------|
 | `ai.base_url` | string | (none) | OpenAI Responses-compatible base URL |
 | `ai.model` | string | (none) | Model name |
-| `ai.accepts_images` | bool | `false` | Whether the model reads images; enables the render and reference-image tools |
+| `ai.accepts_images` | bool | `false` | Whether the model reads images; sends message attachments and enables the render and reference-library tools |
 | `ai.allow_insecure_http` | bool | `false` | Permit a plain-HTTP endpoint (local model servers) |
 | `limits.wall_clock` | duration | 120 s | Script execution wall-clock ceiling |
 | `limits.memory_bytes` | integer | 4294967296 (4 GB) | Script execution resident-memory ceiling in bytes |
-| `context_window_tokens` | integer | 128000 | The configured model's context window; CADmark condenses conversation before approaching this limit |
+| `context_window_tokens` | integer | 128000 | Fallback context window, used only when the endpoint does not advertise one for the model (see below); CADmark condenses conversation before approaching the limit in force |
 | `recent_projects` | array of paths | `[]` | Recently opened project folders, most recent first; capped at 8 |
 
 Source: `crates/cadmark-app/src/user_settings.rs:32–43`, `crates/cadmark-core/src/limits.rs:9–17`, `crates/cadmark-app/src/user_settings.rs:29`.
@@ -367,6 +370,12 @@ An empty credential value in the dialog removes the stored file. The dialog show
 
 Source: `crates/cadmark-app/src/user_settings.rs:20–21`, `crates/cadmark-app/src/user_settings.rs:139–193`.
 
+## Context window detection
+
+On each project open the orchestrator probes the endpoint for the configured model's context window (`OpenAiCompatibleClient::context_window`): `GET {base_url}/models/{model}` first, then `GET {base_url}/models` searched by `id`. Recognised fields: `context_window`, `context_length`, `max_context_length`, `context_window_tokens`, `max_input_tokens`, `n_ctx`, `top_provider.context_length` (OpenRouter), `meta.n_ctx_train` (llama.cpp), `metadata.context_length`, and any `model_info` key ending in `.context_length` (Ollama). Values below 1024 are ignored. A found value arrives as `OrchestratorResult::ContextWindowDetected` and is held on the project (`Project::detected_context_window`), taking precedence over `context_window_tokens` for every turn and for the chat's occupancy figure; a failed or empty probe leaves the setting in force and is never an error.
+
+Source: `crates/cadmark-bridge/src/openai_compatible.rs` (`context_window`, `advertised_context_window`), `crates/cadmark-app/src/orchestrator.rs`, `crates/cadmark-app/src/app.rs` (`context_window_tokens`).
+
 ## Provider refusals
 
 When the provider refuses a request, the cause is identified and reported:
@@ -374,6 +383,7 @@ When the provider refuses a request, the cause is identified and reported:
 | Cause | Message |
 |-------|---------|
 | Usage limit / rate limit / quota | "the provider is at its usage limit or cooling down" |
+| Overloaded (HTTP 503/529, `overloaded_error`, "server is busy", "no slots available") | "the provider is overloaded or busy; try again shortly" |
 | Authentication failure | "the provider rejected the credential" |
 | Unknown model | "the provider does not serve the configured model" |
 
@@ -402,7 +412,9 @@ A new part is "Untitled" until its first save (`Ctrl+S`), which asks for a name 
 
 Window title carries the project folder name. The project menu shows the folder path, offers "Open project folder" (`Ctrl+O`), "Open recent", opening the script in an external editor, and showing the folder in the file manager.
 
-Source: `crates/cadmark-ui/src/toolbar.rs`.
+Each open project owns one orchestrator thread (`OrchestratorHandle`: command sender, result receiver, join handle). Opening another project and closing the window both call `Project::shut_down`, which cancels any running turn, closes the command channel so the thread's loop ends, drains results, and joins the thread before the window's GPU device is torn down. After shutdown the project sends nothing and polls nothing.
+
+Source: `crates/cadmark-ui/src/toolbar.rs`, `crates/cadmark-app/src/project.rs` (`shut_down`), `crates/cadmark-app/src/app.rs` (`on_exit`, `open_project`).
 
 ## Viewport
 
@@ -427,7 +439,7 @@ Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/s
 
 Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
 
-Sketch-only designs display curves, corners and filled regions face-on to the sketch plane in orthographic view, with any existing solid ghosted behind them. Viewport picking currently handles solid topology; sketch picking is not connected to the live input path.
+Sketch-only designs display curves, corners and filled regions face-on to the sketch plane in orthographic view, with any existing solid ghosted behind them. Each element carries the kernel's exact measurement (`SketchCurve::{curve_type, length, radius}`, `SketchRegion::area`), which the status bar reads through `SketchProfile::measurement` and the AI receives through `SketchProfile::identification`. The sketch lineage ledger of a sketch result is keyed by the same region, curve and corner IDs the profile draws under (`SketchLineageLedger::lookup_element`), built by `finalise_sketch` from the placed shape the profile was extracted from; build123d's 2D `chamfer` and `offset` report per-edge maker history and keep each curve's drawing line, while `fillet`, `make_face` and `make_hull` rebuild the outline and are recorded as the barrier the route could not cross. The three kinds are pick targets in the colour-ID pass, drawn after the solid passes with depth ignored (as the visible profile is): regions through the face vertex stage, curves as edge-width quads, corners as vertex-marker discs (`render_sketch_picking` in `crates/cadmark-renderer/src/viewport.rs`, `sketch_*_pick_vertices` in `pipeline.rs`). Their IDs occupy the sketch ranges of `picking.rs` and decode to `PickedElement::Sketch`. The filter maps Faces/Edges/Vertices to regions/curves/corners (`SelectionFilter::allows_pick`). The ghosted solid behind a sketch is excluded from the picking pass, since its ledger belongs to an earlier script. The visible sketch shader tints the selected and hovered element with the same colours the mesh pass uses.
 
 Selected elements glow in the viewport. The status bar shows which element is selected. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable.
 
@@ -459,9 +471,9 @@ Cuts the model along X, Y, or Z. Toggled with the "Section" button in the toolba
 - A slider to position the plane along the chosen axis, bounded by the model's extent
 - A flip button to keep the other half
 
-Cut-away geometry is also unclickable.
+Cut-away geometry is also unclickable: every picking pass, including the exact depth prepass (`fs_depth` in `picking.wgsl`), discards fragments the plane cuts away, so a click on the cut reaches the interior face it reveals rather than being blocked by the removed geometry's depth.
 
-Source: `crates/cadmark-ui/src/toolbar.rs`.
+Source: `crates/cadmark-ui/src/toolbar.rs`, `crates/cadmark-renderer/src/shaders/picking.wgsl`.
 
 ## Ghost mode
 
@@ -477,17 +489,33 @@ Conversation with the AI. Message types, distinguished by position and colour:
 - Spatial comments (accent-tinted, with chips naming each anchor's element and source line)
 - AI replies (plain card, streamed as the turn progresses)
 - Tool-call groups (collapsed by default, expandable to each call's input and result)
-- Notices from CADmark (quiet, or red on failure)
+- Notices from CADmark (quiet, or red on failure; not shown to the AI)
+- Design changes made outside the chat (quiet; sent to the AI as a "Note from CADmark" user item in history order): a parameter set in the panel, a design step undone, redone, or jumped to
 
 While a turn runs: a phase line showing the current step, elapsed time, time since last event, and a Cancel button.
 
 Input: multi-line text field. Enter sends, Shift+Enter breaks the line.
 
-Context occupancy shown in the chat, including reserved reference-image budget, against the configured context-window setting.
+Context occupancy shown in the chat against the configured context-window setting. The figure is the estimated weight of the next request as it would be assembled now (`RequestAssembly` in `crates/cadmark-app/src/turn.rs`): the conversation, the reserved reference-image budget, and the request's own overhead — system instructions with any active skill, tool definitions, the `<current_script>` block, the selected examples, and the draft chat text and pending comments. Hovering shows the breakdown. Condensation triggers at three quarters of the window when the conversation is at least a tenth of it; when the request alone is at three quarters the figure turns amber with a warning, since condensing cannot help.
 
-Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation, differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
+The AI's tools (`crates/cadmark-bridge/src/tools.rs`, dispatched in `TurnRunner::run_tool` in `crates/cadmark-app/src/turn.rs`):
 
-Source: `crates/cadmark-ui/src/chat.rs:1–9`, `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`).
+| Tool | What it does |
+|------|--------------|
+| `run_script` | Executes the script and rebuilds the model. With `code` it replaces the whole file first; without `code` it runs the file as `edit_script` left it. The result carries measurements, validity, and what the script printed, or the traceback (with anything printed before the failure). `summary` names the design step. |
+| `edit_script` | Replaces one exact occurrence of `old_text` with `new_text` (every occurrence with `replace_all`); refused when the text is absent or ambiguous. Returns the edited region with line numbers. Nothing runs. |
+| `read_script` | The script, or a line range, with line numbers. |
+| `run_python` | Runs a snippet after the current script in its namespace (or alone with `standalone`) under the script execution limits, in the confined kernel worker; returns what it printed, the `repr` of a trailing expression, and any traceback. Keeps no model. |
+| `lookup_docs` | Answers a build123d question from the bundled documentation. |
+| `render_view`, `reference_images`, `keep_reference` | Image tools, offered only to a model that reads images. |
+
+A turn keeps only its last successful `run_script`: edits with no successful run after them are discarded and the turn is reported as failed with the script restored. The kernel worker serves snippets through `WorkerRequest::RunSnippet` (`crates/cadmark-kernel/src/protocol.rs`, `execution::run_snippet`), and captures a script's stdout into `ExecutedModel::printed`, cut at `PRINTED_OUTPUT_LIMIT`.
+
+Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation (the executed text is recorded on the tool call as `executed_source`, since a run after edits carries no `code`), differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
+
+A completed turn's reply ends with a change report: face count, volume, and overall size before and after the turn. A single-part model reads as "Model change: …" or "Model unchanged." with both sets of values. A multi-part model reports one line per part under its script binding name, matched to the part of the same name before the turn; a binding no longer produced is "removed", one not produced before is "new". The `run_script` tool result the AI reads carries the same per-part measurements ("Parts: name: …; name: …") when the script completed more than one part.
+
+Source: `crates/cadmark-ui/src/chat.rs:1–9`, `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`, `describe_model`), `crates/cadmark-core/src/geometry.rs` (`describe_model_change`).
 
 The **Skills** menu inserts a built-in command into the draft. Start a message or
 spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
@@ -564,17 +592,20 @@ Source: `crates/cadmark-ui/src/toolbar.rs` (history controls), `crates/cadmark-a
 
 ## Export
 
-Export menu in the toolbar. Available when a model is loaded. Formats:
+Export menu in the toolbar. Available when a model is loaded. The formats offered depend on what the script produced (`LoadedModel::export_formats`):
 
-| Format | Extension | Description |
-|--------|-----------|-------------|
-| STEP | `.step` | STEP AP214 B-rep for other CAD tools |
-| STL | `.stl` | Binary STL mesh for slicers |
-| 3MF | `.3mf` | 3MF mesh with units for slicers |
+| Result | Format | Extension | Description |
+|--------|--------|-----------|-------------|
+| Solid | STEP | `.step` | STEP AP214 B-rep for other CAD tools |
+| Solid | STL | `.stl` | Binary STL mesh for slicers |
+| Solid | 3MF | `.3mf` | 3MF mesh with units for slicers |
+| Sketch | SVG | `.svg` | Vector drawing in the sketch's plane, millimetres |
+| Sketch | DXF | `.dxf` | 2D CAD drawing in the sketch's plane |
+| Sketch | STEP | `.step` | The sketch's faces and curves as B-rep |
 
-Export writes the file next to the part script. Multi-part models offer per-part and "Export all" options. An open or invalid solid shows a non-blocking warning before export.
+Export writes the file next to the part script from the BREP the worker retained for the result, without re-running the script. A drawing format carries the sketch's plane (`SketchPlane`) across the worker boundary and flattens the shape onto it with build123d's `Plane.to_local_coords` before `ExportSVG` or `ExportDXF` writes it. Multi-part models offer per-part and "Export all" options; the top-level entries write the selected part (`Project::request_export` routes to the active part when several exist) and the menu names it. An open or invalid solid shows a non-blocking warning before export.
 
-Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-ui/src/toolbar.rs`.
+Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-kernel/src/export.rs`, `crates/cadmark-app/src/project.rs`, `crates/cadmark-ui/src/toolbar.rs`.
 
 ## Solid validity
 
@@ -587,15 +618,19 @@ When exporting, an invalid part shows a non-blocking warning: "Cannot export: Pa
 
 Source: `crates/cadmark-app/src/validity.rs:33–53`, `crates/cadmark-app/src/app.rs:886–896`.
 
-## Reference images
+## Images in chat
 
-**Project references → Attach images…** opens a multi-file picker for PNG and JPEG images. Validated original bytes are copied into the project folder's `references/` directory; filename collisions receive a numeric suffix. Chat shows bounded thumbnails with the original aspect ratio. Import failures are shown in-app.
+Images are attached to a message, not to the project. Three routes stage an image in the chat input: the **Attach…** button (a multi-file picker offering every file, since the format is read from the bytes rather than the name), `Ctrl+V` in the input when the clipboard holds an image rather than text, and dropping files on the window. Staged images show as removable thumbnails above the input; a message may be an image alone. PNG and JPEG are accepted, up to 20 MB each; anything else is refused with the reason in the status bar.
 
-References belong to the project. New conversations and reopening the project retain them, independently of the original source files. All conversations and part scripts in the same project share the references. Files placed manually in `references/` are loaded when the project opens; `.png`, `.jpg` and `.jpeg` extensions are case-insensitive.
+On send, each staged image's original bytes are written once to `.cadmark/attachments/<timestamp>-<name>.<ext>` and the message records the file name, the user-facing name, and the media type; the conversation file never carries image bytes. Reopening the project reloads the bytes by file name; a missing file leaves the message showing the name with no image to send. The sent message shows thumbnails.
 
-Every turn includes the saved references as image inputs when `ai.accepts_images` is enabled, and reserves their token budget in the context-occupancy display. With an unavailable or text-only AI, images remain saved and the panel explains how to enable image input.
+When `ai.accepts_images` is enabled, the message's images ride with it on the wire every time the message is replayed to the model, and each is reserved at a fixed 765-token budget in the context figure. Whether or not it is enabled, each user message ends with an `[Attached images: …]` line naming each image and, in brackets, its stored file name, which is unique and is how `keep_reference` identifies an attachment; when images are disabled that line is all the model gets.
 
-Source: `crates/cadmark-app/src/reference_images.rs` (`ReferenceImages::load`, `attach`, `ReferenceImagePicker::open`), `project.rs` (`Project::open`, `Project::start_turn`) and `crates/cadmark-ui/src/reference_images.rs` (`ReferenceImagesPanel::show`).
+### The reference library
+
+`references/` in the project folder is the AI-maintained library, shared by every conversation, with `references/INDEX.md` as its catalogue (one `- \`file\`: description` line per image). Two tools, offered only to image-reading models, manage it: `reference_images` lists the library with each file's description (files placed by hand are listed without one) or returns one image by file name; `keep_reference` copies an attachment from any message in the conversation, identified by its stored file name, into the library under a chosen name and writes its description, or re-describes a file already there. The AI rewrites only the `- \`file\`: description` line it is updating (or appends one after the last such line); any other text in `INDEX.md` is the user's and is kept. Names are confined to the folder; the extension follows the image's format; an existing file is never overwritten.
+
+Source: `crates/cadmark-app/src/reference_images.rs` (`StagedImage`, `store_attachment`, `load_attachment_bytes`, `ReferenceLibrary`, `ImagePicker`), `clipboard.rs`, `turn.rs` (`ReferenceSource`, `history_items`), `crates/cadmark-bridge/src/tools.rs`, and `crates/cadmark-ui/src/chat.rs` (`ChatPane::stage_image`, `show_attachments`).
 
 ## Keyboard shortcuts
 

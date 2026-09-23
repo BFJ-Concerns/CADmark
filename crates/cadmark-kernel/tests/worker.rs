@@ -803,3 +803,146 @@ fn script_path_with(project: &tempfile::TempDir, source: &str) -> PathBuf {
     std::fs::write(&script, source).unwrap();
     script
 }
+
+// ── Scratch snippets and printed output ───────────────────────────────
+
+const BOX_THAT_PRINTS: &str = "from build123d import *\n\nprint('building the box')\nwith BuildPart() as part:\n    Box(10, 10, 10)\nprint('volume', round(part.part.volume))\n";
+
+#[test]
+fn what_a_script_prints_comes_back_with_its_model() {
+    let (_project, script, mut worker) = project_with_script(BOX_THAT_PRINTS);
+    let model = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .expect("the box builds");
+    assert_eq!(model.printed, "building the box\nvolume 1000\n");
+}
+
+#[test]
+fn a_script_that_fails_carries_what_it_printed_first() {
+    let (_project, script, mut worker) = project_with_script(
+        "from build123d import *\nprint('about to fail')\nraise ValueError('deliberate')\n",
+    );
+    let error = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap_err();
+    assert!(error.is_script_fault(), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("ValueError: deliberate"), "{message}");
+    assert!(
+        message.contains("Printed before it failed:\nabout to fail"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_snippet_after_the_script_sees_its_bindings_and_reports_value_and_prints() {
+    let (_project, script, mut worker) = project_with_script(BOX_THAT_PRINTS);
+    let outcome = worker
+        .run_snippet(
+            Some(&script),
+            "faces = part.part.faces()\nprint('faces', len(faces))\nround(part.part.volume)",
+            roomy(),
+            &CancelFlag::new(),
+        )
+        .expect("the snippet runs");
+    assert_eq!(outcome.error, None, "{outcome:?}");
+    assert_eq!(outcome.value.as_deref(), Some("1000"));
+    // The script's own prints come first, then the snippet's.
+    assert_eq!(outcome.printed, "building the box\nvolume 1000\nfaces 6\n");
+}
+
+#[test]
+fn a_standalone_snippet_runs_without_the_script_and_a_statement_has_no_value() {
+    let (_project, _script, mut worker) = project_with_script(BOX);
+    let outcome = worker
+        .run_snippet(
+            None,
+            "import math\nmath.hypot(3, 4)",
+            roomy(),
+            &CancelFlag::new(),
+        )
+        .expect("the snippet runs");
+    assert_eq!(outcome.value.as_deref(), Some("5.0"));
+    assert_eq!(outcome.error, None);
+    // A trailing assignment is a statement: nothing to report as a value,
+    // and the script's bindings are absent because it did not run.
+    let outcome = worker
+        .run_snippet(None, "x = 'part' in dir()", roomy(), &CancelFlag::new())
+        .expect("the snippet runs");
+    assert_eq!(outcome.value, None);
+    let outcome = worker
+        .run_snippet(None, "x", roomy(), &CancelFlag::new())
+        .expect("the snippet runs");
+    assert!(
+        outcome
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("NameError")),
+        "each snippet starts from an empty namespace: {outcome:?}"
+    );
+}
+
+#[test]
+fn a_snippet_that_raises_returns_the_traceback_as_its_outcome() {
+    let (_project, script, mut worker) = project_with_script(BOX);
+    let outcome = worker
+        .run_snippet(
+            Some(&script),
+            "edges = part.part.edges()\nedges[99]",
+            roomy(),
+            &CancelFlag::new(),
+        )
+        .expect("a raising snippet is still an outcome");
+    let error = outcome.error.expect("the traceback");
+    assert!(error.contains("line 2"), "{error}");
+    assert!(error.contains("IndexError"), "{error}");
+    assert_eq!(outcome.value, None);
+}
+
+#[test]
+fn a_broken_script_is_reported_before_the_snippet_runs() {
+    let (_project, script, mut worker) =
+        project_with_script("from build123d import *\nBox(10, 10, 'ten')\n");
+    let outcome = worker
+        .run_snippet(Some(&script), "1 + 1", roomy(), &CancelFlag::new())
+        .expect("a failing script is an outcome for a snippet");
+    let error = outcome.error.expect("the script's traceback");
+    assert!(
+        error.starts_with("The script itself failed before the snippet ran:"),
+        "{error}"
+    );
+    assert!(error.contains("line 2"), "{error}");
+    assert_eq!(outcome.value, None);
+}
+
+#[test]
+fn a_snippet_runs_under_the_wall_clock_ceiling() {
+    let (_project, script, mut worker) = project_with_script(BOX);
+    let limits = ExecutionLimits {
+        wall_clock: Duration::from_secs(2),
+        ..roomy()
+    };
+    let error = worker
+        .run_snippet(
+            Some(&script),
+            "while True:\n    pass",
+            limits,
+            &CancelFlag::new(),
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            WorkerError::Limit {
+                hit: LimitHit::WallClock,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    // The worker is replaced transparently: the next request is served.
+    let outcome = worker
+        .run_snippet(None, "2 + 2", roomy(), &CancelFlag::new())
+        .expect("a fresh worker serves the next snippet");
+    assert_eq!(outcome.value.as_deref(), Some("4"));
+}
