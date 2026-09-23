@@ -202,6 +202,7 @@ fn known_settings_field(path: &str) -> Option<&'static str> {
         "ai.model" => Some("ai.model"),
         "ai.accepts_images" => Some("ai.accepts_images"),
         "ai.allow_insecure_http" => Some("ai.allow_insecure_http"),
+        "ai.reasoning_effort" => Some("ai.reasoning_effort"),
         "limits" => Some("limits"),
         "limits.wall_clock" | "limits.wall_clock.secs" | "limits.wall_clock.nanos" => {
             Some("limits.wall_clock")
@@ -313,6 +314,12 @@ mod tests {
                 "malformed-literal-sentinel",
                 Some("context_window_tokens"),
                 "JSON syntax",
+            ),
+            (
+                r#"{"ai":{"base_url":"https://provider.example/v1","model":"m","reasoning_effort":1}}"#,
+                "provider.example",
+                Some("ai.reasoning_effort"),
+                "field type",
             ),
             (
                 r#"{"context_window_tokens":128000} trailing-junk-sentinel"#,
