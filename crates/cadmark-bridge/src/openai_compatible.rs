@@ -9,6 +9,7 @@
 //! as long as the user allows. There is no fixed request ceiling.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -17,9 +18,10 @@ use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{
-    BackendError, DeltaSink, ImageData, ModelItem, ModelRequest, ModelResponse, RefusalCause,
-    StreamDelta, ToolCall, ToolSpec, TurnModel,
+    BackendError, DeltaSink, ImageData, ModelItem, ModelRequest, ModelResponse, ProviderUsage,
+    RefusalCause, RequestPurpose, StreamDelta, ToolCall, ToolSpec, TurnModel,
 };
+use crate::request_log::{CallRecord, RequestLog};
 
 const MAX_PROVIDER_MESSAGE_CHARS: usize = 500;
 
@@ -52,6 +54,11 @@ pub struct OpenAiCompatibleClient {
     model: String,
     credential: Option<std::sync::Arc<Credential>>,
     accepts_images: bool,
+    /// Where every call is recorded, when the project keeps a record.
+    request_log: Option<Arc<RequestLog>>,
+    /// The reasoning effort asked of the model, sent as the request's
+    /// `reasoning.effort` when set; absent, the provider's default stands.
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAiCompatibleClient {
@@ -74,7 +81,21 @@ impl OpenAiCompatibleClient {
             model,
             credential: credential.map(std::sync::Arc::new),
             accepts_images,
+            request_log: None,
+            reasoning_effort: None,
         })
+    }
+
+    /// Record every call this client makes.
+    pub fn with_request_log(mut self, log: Arc<RequestLog>) -> Self {
+        self.request_log = Some(log);
+        self
+    }
+
+    /// Ask the model for this reasoning effort on every request.
+    pub(crate) fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort.filter(|effort| !effort.trim().is_empty());
+        self
     }
 
     /// The model name sent with every request.
@@ -87,11 +108,13 @@ impl OpenAiCompatibleClient {
     /// test.
     pub(crate) async fn request_text(
         &self,
+        purpose: RequestPurpose,
         instructions: &str,
         input: &str,
         cancel: CancelFlag,
     ) -> Result<String, BackendError> {
         let request = ModelRequest {
+            purpose,
             instructions: instructions.to_string(),
             items: vec![ModelItem::User {
                 text: input.to_string(),
@@ -184,7 +207,12 @@ impl OpenAiCompatibleClient {
         let instructions = "Return exactly the requested sentinel and no other text.";
         let input = format!("Return exactly: {sentinel}");
         let output = self
-            .request_text(instructions, &input, CancelFlag::new())
+            .request_text(
+                RequestPurpose::Probe,
+                instructions,
+                &input,
+                CancelFlag::new(),
+            )
             .await?;
         if output.trim() == sentinel {
             Ok(())
@@ -201,6 +229,7 @@ impl OpenAiCompatibleClient {
         cancel: CancelFlag,
         sink: DeltaSink<'_>,
     ) -> Result<ModelResponse, BackendError> {
+        let purpose = request.purpose;
         let body = ResponsesRequest {
             model: &self.model,
             instructions: &request.instructions,
@@ -208,8 +237,75 @@ impl OpenAiCompatibleClient {
             tools: request.tools.iter().map(wire_tool).collect(),
             stream: true,
             store: false,
+            reasoning: self
+                .reasoning_effort
+                .as_deref()
+                .map(|effort| WireReasoning { effort }),
         };
-        let mut http = self.client.post(self.responses_url.clone()).json(&body);
+        let mut record = self
+            .request_log
+            .as_ref()
+            .map(|log| log.begin(purpose, &transcript_body(&body)));
+        log::info!(
+            "AI request ({}) to {} for {}{}",
+            purpose.slug(),
+            self.responses_url,
+            self.model,
+            record
+                .as_ref()
+                .map(|record| format!(", recorded at {}", record.path().display()))
+                .unwrap_or_default()
+        );
+        let result = self.exchange(&body, cancel, sink, record.as_mut()).await;
+        let outcome = match &result {
+            Ok(response) if response.reached_output_limit => {
+                "incomplete: max_output_tokens".to_string()
+            }
+            Ok(_) => "completed".to_string(),
+            Err(error) => format!("error: {error}"),
+        };
+        log::info!(
+            "AI request ({}) {} after {} ms{}",
+            purpose.slug(),
+            outcome,
+            record
+                .as_ref()
+                .map(|record| record.elapsed_ms())
+                .unwrap_or_default(),
+            result
+                .as_ref()
+                .ok()
+                .and_then(|response| response.usage)
+                .map(|usage| {
+                    format!(
+                        "; {} input tokens ({} cached), {} output ({} reasoning)",
+                        usage.input_tokens,
+                        usage.cached_input_tokens,
+                        usage.output_tokens,
+                        usage.reasoning_tokens
+                    )
+                })
+                .unwrap_or_default()
+        );
+        if let Some(record) = record {
+            record.ended(
+                &outcome,
+                result.as_ref().ok().and_then(|response| response.usage),
+            );
+        }
+        result
+    }
+
+    /// Send the request and assemble the streamed response, recording
+    /// each event as it arrives.
+    async fn exchange(
+        &self,
+        body: &ResponsesRequest<'_>,
+        cancel: CancelFlag,
+        sink: DeltaSink<'_>,
+        mut record: Option<&mut CallRecord>,
+    ) -> Result<ModelResponse, BackendError> {
+        let mut http = self.client.post(self.responses_url.clone()).json(body);
         if let Some(credential) = &self.credential {
             http = http.bearer_auth(credential.value());
         }
@@ -222,6 +318,9 @@ impl OpenAiCompatibleClient {
             let body = await_cancellable(response.text(), &cancel)
                 .await?
                 .map_err(map_transport_error)?;
+            if let Some(record) = record.as_mut() {
+                record.rejected(status.as_u16(), &body);
+            }
             return Err(non_success_error(status, &body, self.credential.as_deref()));
         }
 
@@ -233,6 +332,9 @@ impl OpenAiCompatibleClient {
                 .map_err(map_transport_error)?;
             let Some(chunk) = chunk else { break };
             for event in parser.push(&chunk)? {
+                if let Some(record) = record.as_mut() {
+                    record.event(&event);
+                }
                 assembled.apply(event, sink, self.credential.as_deref())?;
             }
         }
@@ -345,6 +447,37 @@ struct ResponsesRequest<'a> {
     tools: Vec<WireTool>,
     stream: bool,
     store: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<WireReasoning<'a>>,
+}
+
+#[derive(Serialize)]
+struct WireReasoning<'a> {
+    effort: &'a str,
+}
+
+/// The request as the transcript records it: exactly what was sent, with
+/// each image's data URL replaced by its type and size, so the file stays
+/// readable and two turns' requests can still be compared.
+fn transcript_body(body: &ResponsesRequest<'_>) -> serde_json::Value {
+    let mut value = serde_json::to_value(body).expect("request serialises");
+    for item in value["input"].as_array_mut().into_iter().flatten() {
+        for part in item["content"].as_array_mut().into_iter().flatten() {
+            if part["type"] == "input_image"
+                && let Some(url) = part["image_url"].as_str()
+            {
+                let media_type = url
+                    .strip_prefix("data:")
+                    .and_then(|rest| rest.split(';').next())
+                    .unwrap_or("image");
+                part["image_url"] = serde_json::Value::String(format!(
+                    "<{media_type}, {} characters of base64 omitted>",
+                    url.len()
+                ));
+            }
+        }
+    }
+    value
 }
 
 #[derive(Serialize)]
@@ -512,7 +645,21 @@ struct ResponseAssembly {
     reasoning_part: String,
     completed: bool,
     reached_output_limit: bool,
+    /// What the provider reported the call cost, from its closing event.
+    usage: Option<ProviderUsage>,
     failed: Option<BackendError>,
+}
+
+/// The usage block of a closing event, where the provider sends one.
+fn read_usage(usage: &serde_json::Value) -> Option<ProviderUsage> {
+    let count = |value: &serde_json::Value| value.as_u64().unwrap_or_default() as usize;
+    usage["input_tokens"].as_u64()?;
+    Some(ProviderUsage {
+        input_tokens: count(&usage["input_tokens"]),
+        cached_input_tokens: count(&usage["input_tokens_details"]["cached_tokens"]),
+        output_tokens: count(&usage["output_tokens"]),
+        reasoning_tokens: count(&usage["output_tokens_details"]["reasoning_tokens"]),
+    })
 }
 
 #[derive(Default)]
@@ -615,8 +762,12 @@ impl ResponseAssembly {
                     _ => {}
                 }
             }
-            "response.completed" => self.completed = true,
+            "response.completed" => {
+                self.completed = true;
+                self.usage = read_usage(&event["response"]["usage"]);
+            }
             "response.incomplete" => {
+                self.usage = read_usage(&event["response"]["usage"]);
                 let reason = event["response"]["incomplete_details"]["reason"].as_str();
                 if reason == Some(OUTPUT_LIMIT_REASON) {
                     self.reached_output_limit = true;
@@ -739,6 +890,7 @@ impl ResponseAssembly {
             text: self.text,
             tool_calls,
             reached_output_limit: self.reached_output_limit,
+            usage: self.usage,
         })
     }
 }
@@ -1304,7 +1456,7 @@ mod tests {
         }])
         .await;
         let error = client(&base_url, None)
-            .request_text("i", "x", CancelFlag::new())
+            .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1521,6 +1673,7 @@ mod tests {
         let recorded = std::sync::Arc::clone(&deltas);
         let mut sink = move |delta: StreamDelta| recorded.lock().unwrap().push(delta);
         let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
             instructions: "system content".into(),
             items: vec![ModelItem::User {
                 text: "user content".into(),
@@ -1580,6 +1733,7 @@ mod tests {
         let recorded = std::sync::Arc::clone(&deltas);
         let mut sink = move |delta: StreamDelta| recorded.lock().unwrap().push(delta);
         let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
             instructions: "system content".into(),
             items: vec![
                 ModelItem::User {
@@ -1669,7 +1823,12 @@ mod tests {
         .await;
         let client = client(&base_url, Some(secret));
         let error = client
-            .request_text("instructions", "input", CancelFlag::new())
+            .request_text(
+                RequestPurpose::Turn,
+                "instructions",
+                "input",
+                CancelFlag::new(),
+            )
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1706,11 +1865,13 @@ mod tests {
         .await;
         let client = client(&base_url, None);
         assert!(matches!(
-            client.request_text("i", "x", CancelFlag::new()).await,
+            client
+                .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
+                .await,
             Err(BackendError::ParseError(_))
         ));
         let failed = client
-            .request_text("i", "x", CancelFlag::new())
+            .request_text(RequestPurpose::Turn, "i", "x", CancelFlag::new())
             .await
             .unwrap_err();
         server.await.unwrap();
@@ -1743,6 +1904,7 @@ mod tests {
         let started = std::time::Instant::now();
         let mut sink = |_delta: StreamDelta| {};
         let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
             instructions: "i".into(),
             items: vec![ModelItem::User {
                 text: "x".into(),
@@ -1764,9 +1926,157 @@ mod tests {
         let client = client(&format!("http://{address}/v1"), None);
         assert!(matches!(
             client
-                .request_text("instructions", "input", CancelFlag::new())
+                .request_text(
+                    RequestPurpose::Turn,
+                    "instructions",
+                    "input",
+                    CancelFlag::new()
+                )
                 .await,
             Err(BackendError::Unavailable(_))
         ));
+    }
+
+    #[test]
+    fn the_usage_of_a_closing_event_is_read_and_absent_where_none_is_sent() {
+        let with = assemble(&[
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hi"}),
+            serde_json::json!({"type": "response.completed", "response": {"status": "completed",
+                "usage": {"input_tokens": 1200, "input_tokens_details": {"cached_tokens": 1000},
+                          "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 250}}}}),
+        ], None)
+        .0
+        .unwrap();
+        assert_eq!(
+            with.usage,
+            Some(ProviderUsage {
+                input_tokens: 1200,
+                cached_input_tokens: 1000,
+                output_tokens: 300,
+                reasoning_tokens: 250,
+            })
+        );
+
+        let cut_off = assemble(&[
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hi"}),
+            serde_json::json!({"type": "response.incomplete", "response": {"status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 50, "output_tokens": 64000}}}),
+        ], None)
+        .0
+        .unwrap();
+        assert!(cut_off.reached_output_limit);
+        assert_eq!(cut_off.usage.map(|usage| usage.output_tokens), Some(64000));
+
+        let without = assemble(&[
+            serde_json::json!({"type": "response.output_text.delta", "delta": "hi"}),
+            serde_json::json!({"type": "response.completed", "response": {"status": "completed"}}),
+        ], None)
+        .0
+        .unwrap();
+        assert_eq!(without.usage, None);
+    }
+
+    #[tokio::test]
+    async fn a_configured_reasoning_effort_rides_on_every_request_and_none_by_default() {
+        use recording::{completed, recording_server};
+        let (base_url, requests, server) =
+            recording_server(vec![completed("a"), completed("b")]).await;
+        let request = ModelRequest {
+            purpose: RequestPurpose::Turn,
+            instructions: "i".into(),
+            items: vec![ModelItem::User {
+                text: "x".into(),
+                images: vec![],
+            }],
+            tools: vec![],
+        };
+        let mut sink = |_delta: StreamDelta| {};
+        client(&base_url, None)
+            .stream(request.clone(), CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        client(&base_url, None)
+            .with_reasoning_effort(Some("medium".into()))
+            .stream(request, CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[0].body.get("reasoning").is_none(),
+            "{}",
+            requests[0].body
+        );
+        assert_eq!(requests[1].body["reasoning"]["effort"], "medium");
+    }
+
+    #[tokio::test]
+    async fn a_recorded_call_holds_the_request_as_sent_with_images_summarised_and_the_outcome() {
+        use recording::{completed, recording_server};
+        let (base_url, _requests, server) = recording_server(vec![completed("ok")]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(RequestLog::in_directory(dir.path().join("requests")));
+        let client = client(&base_url, Some("secret-token")).with_request_log(Arc::clone(&log));
+        let request = ModelRequest {
+            purpose: RequestPurpose::DocLookup,
+            instructions: "system content".into(),
+            items: vec![ModelItem::User {
+                text: "user content".into(),
+                images: vec![ImageData {
+                    media_type: "image/png".into(),
+                    bytes: vec![1, 2, 3, 4],
+                }],
+            }],
+            tools: vec![],
+        };
+        let mut sink = |_delta: StreamDelta| {};
+        let response = client
+            .stream(request, CancelFlag::new(), &mut sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.text, "ok");
+
+        let mut files: Vec<_> = std::fs::read_dir(log.directory())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(files.len(), 1);
+        let path = files.remove(0);
+        assert!(
+            path.to_str().unwrap().ends_with("-docs.jsonl"),
+            "{}",
+            path.display()
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("secret-token"),
+            "the credential is never written"
+        );
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines[0]["kind"], "request");
+        assert_eq!(lines[0]["body"]["instructions"], "system content");
+        assert_eq!(
+            lines[0]["body"]["input"][0]["content"][0]["text"],
+            "user content"
+        );
+        let image = lines[0]["body"]["input"][0]["content"][1]["image_url"]
+            .as_str()
+            .unwrap();
+        assert!(image.starts_with("<image/png, "), "{image}");
+        assert!(
+            !image.contains("AQID"),
+            "the image bytes are summarised, not written"
+        );
+        assert_eq!(lines[1]["kind"], "event");
+        assert_eq!(lines[1]["event"]["type"], "response.output_text.delta");
+        assert_eq!(lines.last().unwrap()["kind"], "outcome");
+        assert_eq!(lines.last().unwrap()["outcome"], "completed");
+        assert_eq!(lines.last().unwrap()["events"], 2);
     }
 }
