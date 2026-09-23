@@ -116,7 +116,7 @@ Changing a value rewrites that one number in the script, rebuilds the model, and
 
 Lists every completed part the script produced, in the order the script binds them: a colour swatch matching the part in the viewport, the part's name, and a tick box for whether it is drawn. The part the current selection belongs to is highlighted. Hovering a name shows its measurements; clicking it selects the whole part. A part that is not a closed solid carries a warning mark.
 
-Unticking a part hides it: it is neither drawn nor clickable, and nothing behind it is hidden by it any more. A hidden part stays hidden by name through rebuilds, so a part you have set aside stays out of the way while the AI works on the others. Hiding the part that holds the current selection puts the selection down.
+Unticking a part hides it: it is neither drawn nor clickable, and nothing behind it is hidden by it any more. A hidden part stays hidden by name through rebuilds, so a part you have set aside stays out of the way while the AI works on the others; opening another script or project shows everything again. Hiding the part that holds the current selection puts the selection down.
 
 Parts are coloured from a fixed palette by their position in the script: the first part keeps the grey a single-part model has always had, and later parts take distinct muted hues.
 
