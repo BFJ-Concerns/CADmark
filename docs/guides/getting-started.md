@@ -69,6 +69,10 @@ it again.
 Re-run `just install` whenever you want the installed copy brought up to the
 current source.
 
+The installed copy keeps a log at `~/.local/state/cadmark/cadmark.log` (or
+under `XDG_STATE_HOME` if you set it), with a line for each AI request as it
+starts and ends. It is trimmed automatically once it passes five megabytes.
+
 ## Connect an AI provider
 
 Open Settings (the gear button, or `Ctrl+,`) and fill in:
