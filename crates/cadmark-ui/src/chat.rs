@@ -821,6 +821,12 @@ fn show_message(
             });
         }
         MessageKind::AiResponse => {
+            // A reply nothing has been written into yet is the turn's
+            // placeholder, not something to show: the status line already
+            // says the AI is at work.
+            if message.text.is_empty() {
+                return;
+            }
             let frame = theme::card();
             let inner = card_inner(&frame);
             frame.show(ui, |ui| {
@@ -1421,6 +1427,7 @@ mod tests {
         )]));
         conversation.push(Message::ai_response("Running it now."));
         let thinking_now = conversation.push(thinking("", 3, false));
+        conversation.push(Message::ai_response(""));
         let mut pane = ChatPane::new();
 
         let now = Instant::now();
@@ -1453,6 +1460,11 @@ mod tests {
         );
         assert!(shows(&running, "Checking the fillet API first."));
         assert!(shows(&running, "Running it now."));
+        assert_eq!(
+            running.iter().filter(|drawn| *drawn == "CADmark").count(),
+            2,
+            "a reply still empty draws no card: {running:?}"
+        );
 
         pane.activity = ChatActivity::Idle;
         let finished = drawn_text(&mut pane, &conversation);
