@@ -98,6 +98,19 @@ fn remove_if_blank(conversation: &mut Conversation, response: MessageId) {
     }
 }
 
+/// End the turn's open thinking record, if any: the model has gone on to
+/// speak, call a tool, or stop.
+fn close_thinking(conversation: &mut Conversation, turn: &mut TurnRecord) {
+    if let Some(id) = turn.thinking.take()
+        && let Some(Message {
+            kind: MessageKind::Thinking { finished },
+            ..
+        }) = conversation.message_mut(id)
+    {
+        *finished = Some(chrono::Utc::now());
+    }
+}
+
 /// What a finished turn reports about the geometry it produced: each part
 /// compared with the part of the same name before it, or a sketch described
 /// in its own terms, because a profile has nothing to compare a volume
@@ -204,9 +217,13 @@ struct TurnRecord {
     /// The tool-call group the next call joins, until the AI speaks or
     /// CADmark posts a notice.
     tools: Option<MessageId>,
-    /// Every tool-call group the turn has made. The chat shows these call
-    /// by call while the turn runs, and folds each into one line after.
-    tool_groups: Vec<MessageId>,
+    /// Every step the turn has made: its tool-call groups and thinking
+    /// records. The chat shows these one by one while the turn runs, and
+    /// folds each run of them into one line after.
+    steps: Vec<MessageId>,
+    /// The thinking record the model's reasoning is streaming into, until
+    /// it goes on to speak or call a tool.
+    thinking: Option<MessageId>,
     /// The spatial comments the turn is acting on.
     comment_ids: Vec<MessageId>,
     /// Every part's measurements before the turn, for the change report.
@@ -654,7 +671,8 @@ impl CadmarkApp {
                 self.turn = Some(TurnRecord {
                     response,
                     tools: None,
-                    tool_groups: Vec::new(),
+                    steps: Vec::new(),
+                    thinking: None,
                     comment_ids,
                     parts_before,
                     history_len,
@@ -685,7 +703,31 @@ impl CadmarkApp {
             return;
         };
         let conversation = &mut project.conversation;
+        // Reasoning precedes whatever the model does next, so any other
+        // event ends the open thinking record.
+        if !matches!(event, TurnEvent::Thinking(_)) {
+            close_thinking(conversation, turn);
+        }
         match event {
+            TurnEvent::Thinking(text) => {
+                let id = match turn.thinking {
+                    Some(id) => id,
+                    None => {
+                        // Reasoning sits between what came before it and
+                        // what it leads to, so the reply and tool group
+                        // above it close here.
+                        remove_if_blank(conversation, turn.response);
+                        let id = conversation.push(Message::thinking());
+                        turn.response = conversation.push(Message::ai_response(""));
+                        turn.tools = None;
+                        turn.steps.push(id);
+                        turn.thinking = Some(id);
+                        id
+                    }
+                };
+                conversation.append_text(id, &text);
+                project.note_turn_event(None);
+            }
             TurnEvent::ConversationCondensed { summary } => {
                 conversation.condense_before(turn.history_len, summary);
                 turn.history_len = 1;
@@ -715,7 +757,7 @@ impl CadmarkApp {
                 let (tools, response) =
                     record_tool_start(conversation, turn.tools, turn.response, activity);
                 if turn.tools != Some(tools) {
-                    turn.tool_groups.push(tools);
+                    turn.steps.push(tools);
                 }
                 turn.tools = Some(tools);
                 turn.response = response;
@@ -761,8 +803,11 @@ impl CadmarkApp {
             return;
         };
         project.busy = None;
-        let Some(turn) = self.turn.take() else { return };
+        let Some(mut turn) = self.turn.take() else {
+            return;
+        };
         let conversation = &mut project.conversation;
+        close_thinking(conversation, &mut turn);
         // What the outcome asks of the rest of the application, once the
         // conversation has been brought up to date.
         let mut show: Option<(Box<cadmark_kernel::protocol::ExecutedModel>, String)> = None;
@@ -1987,10 +2032,10 @@ impl CadmarkApp {
                         phase: phase.clone(),
                         started: *started,
                         last_event: *last_event,
-                        tool_groups: self
+                        steps: self
                             .turn
                             .as_ref()
-                            .map(|turn| turn.tool_groups.clone())
+                            .map(|turn| turn.steps.clone())
                             .unwrap_or_default(),
                     }),
                 };
@@ -2852,7 +2897,8 @@ mod tests {
             turn: Some(TurnRecord {
                 response,
                 tools: None,
-                tool_groups: Vec::new(),
+                steps: Vec::new(),
+                thinking: None,
                 comment_ids: vec![],
                 parts_before: Vec::new(),
                 history_len: 1,
@@ -3017,7 +3063,8 @@ mod tests {
         app.turn = Some(TurnRecord {
             response,
             tools: None,
-            tool_groups: Vec::new(),
+            steps: Vec::new(),
+            thinking: None,
             comment_ids: vec![],
             parts_before: Vec::new(),
             history_len: 1,
@@ -3195,7 +3242,8 @@ mod tests {
         app.turn = Some(TurnRecord {
             response,
             tools: None,
-            tool_groups: Vec::new(),
+            steps: Vec::new(),
+            thinking: None,
             comment_ids: vec![],
             parts_before: app.project().unwrap().part_measurements(),
             history_len: 1,
@@ -3598,6 +3646,97 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_is_recorded_as_thinking_between_what_it_follows_and_what_it_leads_to() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_pending_response(project_dir.path().to_path_buf());
+        let turn_start = app.project().unwrap().conversation.len() - 1;
+        let started = |call_id: &str| TurnEvent::ToolStarted {
+            call_id: call_id.into(),
+            tool: "run_script".into(),
+            arguments: serde_json::json!({"code": "X = 1"}),
+        };
+        let now = Instant::now();
+        app.project_mut().unwrap().busy = Some(crate::project::Busy::Turn {
+            cancel: cadmark_core::cancellation::CancelFlag::new(),
+            started: now,
+            last_event: now,
+            phase: "thinking".into(),
+        });
+        let quiet_since = |app: &CadmarkApp| match &app.project().unwrap().busy {
+            Some(crate::project::Busy::Turn { last_event, .. }) => *last_event,
+            None | Some(crate::project::Busy::Building) => panic!("no turn is running"),
+        };
+
+        // A provider that keeps its reasoning private still shows the
+        // model at work: an empty piece is a sign of life.
+        let before = quiet_since(&app);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.apply_turn_event(TurnEvent::Thinking(String::new()));
+        assert!(quiet_since(&app) > before, "reasoning counts as an event");
+        app.apply_turn_event(TurnEvent::Thinking(String::new()));
+        app.apply_turn_event(TurnEvent::Text("Measuring first.".into()));
+        app.apply_turn_event(started("c1"));
+        app.apply_turn_event(TurnEvent::Thinking("Weigh the ".into()));
+        app.apply_turn_event(TurnEvent::Thinking("options.".into()));
+        app.apply_turn_event(started("c2"));
+        app.apply_turn_event(TurnEvent::Thinking(String::new()));
+        app.finish_turn(TurnOutcome::Failed {
+            error: "cut off".into(),
+        });
+
+        let conversation = &app.project().unwrap().conversation;
+        let shape: Vec<_> = conversation.messages()[turn_start..]
+            .iter()
+            .map(|message| match &message.kind {
+                MessageKind::Thinking { finished } => format!(
+                    "thought{}:{}",
+                    if finished.is_some() {
+                        ""
+                    } else {
+                        "-unfinished"
+                    },
+                    message.text
+                ),
+                MessageKind::ToolCalls(activities) => format!(
+                    "tools:{}",
+                    activities
+                        .iter()
+                        .map(|activity| activity.call_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                MessageKind::Notice { .. } => "notice".to_string(),
+                _ => format!("said:{}", message.text),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "thought:",
+                "said:Measuring first.",
+                "tools:c1",
+                "thought:Weigh the options.",
+                "tools:c2",
+                "thought:",
+                "notice",
+            ],
+            "each think is one record, closed by what follows it, even the turn's end"
+        );
+        let steps: Vec<_> = conversation
+            .messages()
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.kind,
+                    MessageKind::ToolCalls(_) | MessageKind::Thinking { .. }
+                )
+            })
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(steps.len(), 5);
+    }
+
+    #[test]
     fn a_notice_mid_turn_closes_the_reply_and_tool_group_above_it() {
         let project_dir = tempfile::tempdir().unwrap();
         let mut app = app_with_pending_response(project_dir.path().to_path_buf());
@@ -3640,7 +3779,7 @@ mod tests {
             .map(|message| message.id)
             .collect();
         assert_eq!(
-            app.turn.as_ref().unwrap().tool_groups,
+            app.turn.as_ref().unwrap().steps,
             groups,
             "the chat is told every group the running turn made"
         );

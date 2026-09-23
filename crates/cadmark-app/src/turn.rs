@@ -98,6 +98,10 @@ pub enum TurnEvent {
     /// Something the user should know about how the turn is going, said
     /// by CADmark rather than the AI.
     Notice(String),
+    /// The model is reasoning before it answers: a piece of the reasoning
+    /// text where the provider shares it, or empty where it does not, so
+    /// a long think shows as work rather than silence.
+    Thinking(String),
 }
 
 /// Shown in the chat when the provider cuts a reply off at its output
@@ -323,6 +327,7 @@ impl<
             };
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => emit(TurnEvent::Text(text)),
+                StreamDelta::Reasoning(text) => emit(TurnEvent::Thinking(text)),
                 StreamDelta::ToolCallStarted { name } => {
                     emit(TurnEvent::Phase(format!(
                         "preparing to {}",
@@ -1141,7 +1146,7 @@ fn history_items(conversation: &Conversation, accepts_images: bool) -> Vec<Model
                 text: format!("Note from CADmark: {}", message.text),
                 images: Vec::new(),
             }),
-            MessageKind::Notice { .. } => {}
+            MessageKind::Notice { .. } | MessageKind::Thinking { .. } => {}
         }
     }
     items
