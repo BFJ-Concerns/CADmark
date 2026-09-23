@@ -860,9 +860,9 @@ fn apply_edit(
     let count = source.matches(old_text).count();
     if count == 0 {
         return Err(
-            "`old_text` was not found in the script. Copy it exactly from the \
-                    <current_script> block, whitespace included; `read_script` shows the \
-                    file with line numbers."
+            "`old_text` was not found in the script. Copy it exactly from the file as \
+                    it now stands, whitespace included: `read_script` shows it with line \
+                    numbers, and the <current_script> block shows it only as the turn began."
                 .to_string(),
         );
     }
