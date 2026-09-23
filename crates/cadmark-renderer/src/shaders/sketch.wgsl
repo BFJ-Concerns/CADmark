@@ -16,8 +16,8 @@ struct Uniforms {
     _pad3: u32,
     marker_count: u32,
     ghost: f32,
-    selected_part_id: u32,
-    hover_part_id: u32,
+    _pad4: u32,
+    _pad5: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
     section_plane: vec4<f32>,
@@ -26,6 +26,8 @@ struct Uniforms {
     _pad7: f32,
     _pad8: f32,
     marker_size: MarkerExtent,
+    // The surface colour of each part by ordinal.
+    part_colours: array<vec4<f32>, PART_PALETTE_LEN>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;

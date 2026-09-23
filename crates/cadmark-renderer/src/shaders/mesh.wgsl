@@ -22,8 +22,8 @@ struct Uniforms {
     // Fades the solid towards the background so a sketch drawn in
     // front of it reads as the live thing.
     ghost: f32,
-    selected_part_id: u32,
-    hover_part_id: u32,
+    _pad4: u32,
+    _pad5: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
     // Section plane [nx, ny, nz, d]: a fragment is discarded when
@@ -35,6 +35,8 @@ struct Uniforms {
     _pad7: f32,
     _pad8: f32,
     marker_size: MarkerExtent,
+    // The surface colour of each part by ordinal.
+    part_colours: array<vec4<f32>, PART_PALETTE_LEN>,
 }
 
 // Whether the section plane keeps `world_pos`. Mirrors
@@ -102,8 +104,6 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// Machined light-grey material, linear colour.
-const BASE_COLOUR: vec3<f32> = vec3<f32>(0.62, 0.64, 0.67);
 // Hemisphere ambient: cool sky above, warm dim ground below.
 const SKY_COLOUR: vec3<f32> = vec3<f32>(0.30, 0.33, 0.38);
 const GROUND_COLOUR: vec3<f32> = vec3<f32>(0.12, 0.11, 0.10);
@@ -131,19 +131,25 @@ fn shade_surface(in: VertexOutput, front_facing: bool) -> vec4<f32> {
     }
     let view_dir = normalize(uniforms.eye_pos - in.world_pos);
 
+    // Each part has its own material colour, so neighbouring parts of one
+    // model read apart under the same light rig.
+    let fid = u32(in.face_id + 0.5);
+    let pid = u32(in.part_id + 0.5);
+    let base_colour = uniforms.part_colours[part_ordinal(pid) % PART_PALETTE_LEN].rgb;
+
     // Ambient from the sky/ground hemisphere, keyed on world up (Z).
     let hemisphere = normal.z * 0.5 + 0.5;
-    var colour = BASE_COLOUR * mix(GROUND_COLOUR, SKY_COLOUR, hemisphere);
+    var colour = base_colour * mix(GROUND_COLOUR, SKY_COLOUR, hemisphere);
 
     // Key light: diffuse plus a tight Blinn-Phong highlight.
     let key_ndl = max(dot(normal, uniforms.key_light_dir), 0.0);
     let key_half = normalize(uniforms.key_light_dir + view_dir);
     let key_spec = pow(max(dot(normal, key_half), 0.0), 48.0) * 0.35;
-    colour += BASE_COLOUR * KEY_COLOUR * key_ndl * 0.85 + KEY_COLOUR * key_spec;
+    colour += base_colour * KEY_COLOUR * key_ndl * 0.85 + KEY_COLOUR * key_spec;
 
     // Fill light: soft, cool, from the opposite side.
     let fill_ndl = max(dot(normal, uniforms.fill_light_dir), 0.0);
-    colour += BASE_COLOUR * FILL_COLOUR * fill_ndl * 0.45;
+    colour += base_colour * FILL_COLOUR * fill_ndl * 0.45;
 
     // Rim: lifts silhouettes so the outline stays legible against the
     // background whichever way the model is turned.
@@ -151,24 +157,24 @@ fn shade_surface(in: VertexOutput, front_facing: bool) -> vec4<f32> {
     let rim = pow(1.0 - facing, 3.0) * 0.18;
     colour += SKY_COLOUR * rim;
 
+    // Every ID the uniforms and markers carry is qualified by its part,
+    // because face IDs restart at zero in every part; the whole part is
+    // its own element, qualified the same way.
+    let face = pick_in_part(fid, pid);
+    let whole_part = pick_in_part(pid, pid);
     // Application-provided markers come before transient highlights.
-    let fid = u32(in.face_id + 0.5);
-    let pid = u32(in.part_id + 0.5);
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
-        if fid == markers[index].element_id && fid != 0u {
+        if face == markers[index].element_id && fid != 0u {
             let marker = markers[index].colour;
             colour = mix(colour, marker.rgb, marker.a);
             break;
         }
     }
-    // A whole part is selected when its own picking ID matches; a face is
-    // selected only within the part the selection came from, because face
-    // IDs restart at zero in every part.
-    if (pid == uniforms.selected_id || (fid == uniforms.selected_id && pid == uniforms.selected_part_id)) && uniforms.selected_id != 0u {
+    if (whole_part == uniforms.selected_id || face == uniforms.selected_id) && uniforms.selected_id != 0u {
         colour = mix(colour, uniforms.selected_colour.rgb, uniforms.selected_colour.a);
-    } else if fid == uniforms.hover_id && pid == uniforms.hover_part_id && uniforms.hover_id != 0u {
+    } else if face == uniforms.hover_id && uniforms.hover_id != 0u {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a);
-    } else if in_highlight(fid) {
+    } else if in_highlight(face) {
         colour = mix(colour, uniforms.hover_colour.rgb, uniforms.hover_colour.a * 0.7);
     }
 

@@ -4,7 +4,7 @@
 // pass, a section-plane pass) is added here and drawn from there.
 
 use crate::mesh::{GpuMesh, GpuSketch};
-use crate::picking::{self, PickingPass, SelectionFilter};
+use crate::picking::{self, Pick, PickingPass, SelectionFilter};
 use crate::pipeline::RenderPipelines;
 
 /// Encode the shaded mesh, wireframe overlay and sketch profile into the
@@ -64,7 +64,7 @@ pub fn render_scene_into(
         ..Default::default()
     });
 
-    for mesh in meshes {
+    for mesh in meshes.iter().filter(|mesh| mesh.visible) {
         pass.set_pipeline(if transparent {
             &pipelines.mesh_transparent_pipeline
         } else {
@@ -114,7 +114,7 @@ pub fn render_scene_into(
 fn render_topology_depth(
     encoder: &mut wgpu::CommandEncoder,
     pipelines: &RenderPipelines,
-    all_meshes: &[GpuMesh],
+    meshes: &[GpuMesh],
     pipeline: &wgpu::RenderPipeline,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -130,7 +130,7 @@ fn render_topology_depth(
         }),
         ..Default::default()
     });
-    for mesh in all_meshes {
+    for mesh in meshes.iter().filter(|mesh| mesh.visible) {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -146,29 +146,30 @@ fn render_topology_depth(
 /// ignore depth, as the visible profile does, so a click on the drawing
 /// reaches the drawing rather than the ghosted solid behind it.
 ///
+/// Every visible part is a pick target, its IDs qualified by the part in
+/// the shaders, so a click on any part names that part's element.
+///
 /// `filter` decides which kinds are drawn at all. A kind the filter
 /// refuses leaves the ID texture holding whatever is behind it, so a
 /// click there falls through rather than reading as empty space. The
-/// depth prepass is unfiltered: hidden geometry must still lose to a part
-/// in front of it however the user has narrowed the selection.
+/// depth prepass is unfiltered: occluded geometry must still lose to a
+/// part in front of it however the user has narrowed the selection.
 pub fn render_picking(
     encoder: &mut wgpu::CommandEncoder,
     pipelines: &RenderPipelines,
     picking: &PickingPass,
-    all_meshes: &[GpuMesh],
     meshes: &[GpuMesh],
     sketch: Option<&GpuSketch>,
     filter: SelectionFilter,
 ) {
-    // First establish scene depth with every part. The selected part's local
-    // IDs are rendered afterwards, but hidden geometry must still lose to a
-    // different part in front of it. This pass has no colour attachment: it
-    // must not manufacture IDs for non-active parts.
+    // First establish scene depth with every part, so a face behind
+    // another part's face loses to it whatever the filter says. This pass
+    // has no colour attachment.
     if filter.faces {
         render_topology_depth(
             encoder,
             pipelines,
-            all_meshes,
+            meshes,
             &pipelines.topology_depth_pipeline,
         );
     }
@@ -197,7 +198,7 @@ pub fn render_picking(
             ..Default::default()
         });
 
-        for mesh in meshes.iter().filter(|_| filter.faces) {
+        for mesh in meshes.iter().filter(|mesh| filter.faces && mesh.visible) {
             pass.set_pipeline(&pipelines.picking_pipeline);
             pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
             pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -209,17 +210,12 @@ pub fn render_picking(
     // Face IDs use exact occlusion. Markers need a surface-slope allowance
     // across their wider targets; establish that depth only after faces.
     if filter.edges || filter.vertices {
-        render_topology_depth(
-            encoder,
-            pipelines,
-            all_meshes,
-            &pipelines.marker_depth_pipeline,
-        );
+        render_topology_depth(encoder, pipelines, meshes, &pipelines.marker_depth_pipeline);
     }
 
     for mesh in meshes
         .iter()
-        .filter(|mesh| filter.edges && mesh.edge_vertex_count > 0)
+        .filter(|mesh| filter.edges && mesh.visible && mesh.edge_vertex_count > 0)
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("edge_picking_pass"),
@@ -250,7 +246,7 @@ pub fn render_picking(
 
     for mesh in meshes
         .iter()
-        .filter(|mesh| filter.vertices && mesh.marker_vertex_count > 0)
+        .filter(|mesh| filter.vertices && mesh.visible && mesh.marker_vertex_count > 0)
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("marker_picking_pass"),
@@ -374,7 +370,7 @@ pub fn render_part_picking(
         }),
         ..Default::default()
     });
-    for mesh in meshes {
+    for mesh in meshes.iter().filter(|mesh| mesh.visible) {
         pass.set_pipeline(&pipelines.part_picking_pipeline);
         pass.set_bind_group(0, &pipelines.picking_bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
@@ -427,10 +423,7 @@ pub fn copy_pick_pixel(
 /// in flight when the user narrows the selection carries IDs the filter
 /// now refuses, and honouring the old frame would select a kind the user
 /// has just turned off.
-pub fn decode_pick_result(
-    data: &[u8],
-    filter: SelectionFilter,
-) -> Option<cadmark_core::geometry::PickedElement> {
+pub fn decode_pick_result(data: &[u8], filter: SelectionFilter) -> Option<Pick> {
     if data.len() < 4 {
         return None;
     }
@@ -444,7 +437,7 @@ mod tests {
     use std::sync::mpsc;
 
     use cadmark_core::geometry::{
-        FaceId, PartId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
+        FaceId, PartId, SketchElement, SketchElementKind, TopologyElement,
     };
     use cadmark_core::mesh::{MeshVertex, TessellatedMesh};
 
@@ -537,12 +530,19 @@ mod tests {
         );
         assert_eq!(
             decode_pick_result(&[4, 0, 0, 0, 9, 9], SelectionFilter::default()),
-            Some(PickedElement::Solid(TopologyElement::Face(FaceId(3))))
+            Some(Pick::Solid {
+                part: PartId(0),
+                element: TopologyElement::Face(FaceId(3))
+            })
         );
     }
 
     #[test]
-    fn topology_picking_reads_the_active_face_but_not_an_occluded_one() {
+    fn topology_picking_names_the_part_under_the_cursor_and_skips_a_hidden_one() {
+        // Two parts, each with a face numbered zero, one in front of the
+        // other. A pick must name the near part's face zero, not the far
+        // part's; and once the near part is hidden it neither answers nor
+        // occludes, so the same pixel names the far part's face.
         let (device, queue) = gpu_device();
         let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8Unorm, 64, 64);
         queue.write_buffer(
@@ -561,48 +561,46 @@ mod tests {
         );
         let near = upload_mesh(&device, &triangle(0.2), PartId(0), &[]);
         let far = upload_mesh(&device, &triangle(0.8), PartId(1), &[]);
-        let meshes = [near, far];
+        let mut meshes = [near, far];
         let picking = PickingPass::new(&device, 64, 64);
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("topology_pick_occlusion_test"),
-        });
-        render_picking(
-            &mut encoder,
-            &pipelines,
-            &picking,
-            &meshes,
-            &meshes[1..],
-            None,
-            SelectionFilter::default(),
-        );
-        copy_pick_pixel(&mut encoder, &picking, &picking.staging_buffer, 32, 32);
-        queue.submit([encoder.finish()]);
-        assert_eq!(
-            read_pick_pixel(&device, &picking.staging_buffer),
-            [0, 0, 0, 0]
-        );
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("topology_pick_active_face_test"),
-        });
-        render_picking(
-            &mut encoder,
-            &pipelines,
-            &picking,
-            &meshes[..1],
-            &meshes[..1],
-            None,
-            SelectionFilter::default(),
-        );
-        copy_pick_pixel(&mut encoder, &picking, &picking.staging_buffer, 32, 32);
-        queue.submit([encoder.finish()]);
-        assert_eq!(
+        let pick_at_centre = |meshes: &[GpuMesh]| {
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("topology_pick_part_test"),
+            });
+            render_picking(
+                &mut encoder,
+                &pipelines,
+                &picking,
+                meshes,
+                None,
+                SelectionFilter::default(),
+            );
+            copy_pick_pixel(&mut encoder, &picking, &picking.staging_buffer, 32, 32);
+            queue.submit([encoder.finish()]);
             decode_pick_result(
                 &read_pick_pixel(&device, &picking.staging_buffer),
                 SelectionFilter::default(),
-            ),
-            Some(PickedElement::Solid(TopologyElement::Face(FaceId(0))))
+            )
+        };
+
+        assert_eq!(
+            pick_at_centre(&meshes),
+            Some(Pick::Solid {
+                part: PartId(0),
+                element: TopologyElement::Face(FaceId(0))
+            }),
+            "the near part's face answers, named with its part"
+        );
+
+        meshes[0].visible = false;
+        assert_eq!(
+            pick_at_centre(&meshes),
+            Some(Pick::Solid {
+                part: PartId(1),
+                element: TopologyElement::Face(FaceId(0))
+            }),
+            "a hidden part neither answers nor occludes"
         );
     }
 
@@ -626,16 +624,17 @@ mod tests {
                 _pad0: 0.0,
                 fill_light_dir: [0.0, 0.0, 1.0],
                 _pad1: 0.0,
-                selected_id: 6,
+                selected_id: crate::picking::encode_pick(&Pick::Solid {
+                    part: PartId(1),
+                    element: TopologyElement::Face(FaceId(5)),
+                }),
                 hover_id: 0,
                 highlight_count: 0,
                 _pad3: 0,
                 marker_count: 0,
                 ghost: 0.0,
-                selected_part_id: crate::picking::encode_picking_id(&TopologyElement::Part(
-                    PartId(1),
-                )),
-                hover_part_id: 0,
+                _pad4: 0,
+                _pad5: 0,
                 selected_colour: [1.0, 0.0, 0.0, 1.0],
                 hover_colour: [0.0; 4],
                 section_plane: [0.0; 4],
@@ -644,6 +643,7 @@ mod tests {
                 _pad7: 0.0,
                 _pad8: 0.0,
                 marker_size: crate::markers::MarkerSizing::default().extent(64, 64),
+                part_colours: crate::pipeline::PART_PALETTE,
             }),
         );
         let near = upload_mesh(&device, &triangle_with_face(0.2, 0), PartId(0), &[]);
@@ -736,8 +736,8 @@ mod tests {
                 _pad3: 0,
                 marker_count: 0,
                 ghost: 0.0,
-                selected_part_id: 0,
-                hover_part_id: 0,
+                _pad4: 0,
+                _pad5: 0,
                 selected_colour: [0.0; 4],
                 hover_colour: [0.0; 4],
                 section_plane: [0.0; 4],
@@ -746,6 +746,7 @@ mod tests {
                 _pad7: 0.0,
                 _pad8: 0.0,
                 marker_size: crate::markers::MarkerSizing::default().extent(64, 64),
+                part_colours: crate::pipeline::PART_PALETTE,
             }),
         );
         // Two parts side by side: the left half is part zero's alone, the
@@ -834,7 +835,7 @@ mod tests {
         // 400_001 = the first sketch curve, above the part range.
         assert_eq!(
             decode_pick_result(&(400_001u32).to_le_bytes(), SelectionFilter::default()),
-            Some(PickedElement::Sketch(SketchElement {
+            Some(Pick::Sketch(SketchElement {
                 kind: SketchElementKind::Curve,
                 index: 0,
             })),

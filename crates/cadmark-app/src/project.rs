@@ -552,8 +552,16 @@ impl Project {
             .collect()
     }
 
-    /// Make one part's local topology IDs the active selection domain after
-    /// it has been picked as a whole.
+    /// The part whose ledger, lineage and descriptors the current selection
+    /// resolves against; none until a solid with parts is loaded.
+    pub fn active_model_part(&self) -> Option<&LoadedPart> {
+        let id = self.active_model_part_id?;
+        self.model_parts.iter().find(|part| part.id == id)
+    }
+
+    /// Make one part's ledger, lineage and descriptors the ones later picks
+    /// resolve against: the part the user last clicked, in the viewport or
+    /// the parts list.
     pub fn select_model_part(&mut self, id: u32) -> Option<&LoadedPart> {
         let part = self.model_parts.iter().find(|part| part.id == id)?;
         self.ledger = part.ledger.clone();
