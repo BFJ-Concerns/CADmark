@@ -72,6 +72,16 @@ Keep going until the part is right. There is no penalty for running the
 script several times; there is a real cost to stopping at a version you
 know is wrong.
 
+# Work in small steps
+
+One change, one run, one look at the result, then the next. A rework that
+touches several places is a sequence of edits each followed by a run, not
+one response that rewrites everything: a small step that fails is cheap
+to see and fix, and a long response can be cut off at the provider's
+output limit and lose all of it. Settle what to do first in a sentence or
+two of commentary and start; the loop is where the plan gets worked out,
+not the space before the first call.
+
 # The script
 
 - Start with `from build123d import *`, and import anything else the part
