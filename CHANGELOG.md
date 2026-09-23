@@ -23,6 +23,41 @@ All notable changes to this project will be documented in this file.
   script
 - What a script prints comes back to the AI with the run result, and with
   the traceback when the script fails
+
+### Changed
+- While a turn runs, each tool call shows as its own collapsed line in the
+  chat, so calls can be watched as they arrive; when the turn ends each run
+  of calls folds into one line counting them ("8 tool calls: ran the script
+  ×6, looked up docs ×2"), while the AI's text between them stays shown
+- Script execution no longer spends most of its time in CADmark's own
+  bookkeeping: a moderately complex part that took over two minutes now
+  builds in about the time build123d itself needs. The provenance
+  instrumentation looks moved copies of a shape up by hash instead of
+  scanning every recorded shape, reads the kernel's history lists without
+  triggering a C++ exception per query, and the exact bounding box is
+  searched only on the faces and edges that can extend it. The execution
+  log now states how long the script and each capture stage took
+- Version numbers follow semantic versioning in place of the earlier
+  date-derived scheme
+
+### Fixed
+- What the AI wrote before a turn failed or was cancelled stays in the chat
+  instead of disappearing with the turn
+- A reply the provider cuts off at its output-token limit is no longer
+  reported as "provider request failed" and thrown away: CADmark keeps the
+  text, runs the tool calls written in full, says in the chat that the reply
+  was cut off, and asks the AI to continue
+- Errors a provider sends partway through a reply are reported by cause
+  (usage limit, overload, credential) with their real message, rather than
+  as "type error"; reply text a provider sends only at the end of an item
+  is no longer lost
+- A long parameter name or expression no longer widens the parameters panel
+  past its column, which left a dark void between the panel and the viewport;
+  the row is cut short and the full text sits in its tooltip
+
+## [0.1.0] - 2026-09-19
+
+### Added
 - A sketch exports as a drawing: SVG and DXF written flat in the plane the
   sketch was drawn on at true size, or STEP carrying its faces and curves.
   The Export menu offers the formats the result on screen can take
@@ -86,20 +121,6 @@ All notable changes to this project will be documented in this file.
   it without cutting
 
 ### Changed
-- While a turn runs, each tool call shows as its own collapsed line in the
-  chat, so calls can be watched as they arrive; when the turn ends each run
-  of calls folds into one line counting them ("8 tool calls: ran the script
-  ×6, looked up docs ×2"), while the AI's text between them stays shown
-- Script execution no longer spends most of its time in CADmark's own
-  bookkeeping: a moderately complex part that took over two minutes now
-  builds in about the time build123d itself needs. The provenance
-  instrumentation looks moved copies of a shape up by hash instead of
-  scanning every recorded shape, reads the kernel's history lists without
-  triggering a C++ exception per query, and the exact bounding box is
-  searched only on the faces and edges that can extend it. The execution
-  log now states how long the script and each capture stage took
-- Version numbers follow semantic versioning in place of the earlier
-  date-derived scheme
 - The top-level Export entries of a multi-part model write the part
   currently selected and name it in the menu, rather than the last part
   the script bound
@@ -156,17 +177,6 @@ All notable changes to this project will be documented in this file.
 - Window title carries the project name
 
 ### Fixed
-- What the AI wrote before a turn failed or was cancelled stays in the chat
-  instead of disappearing with the turn
-- A reply the provider cuts off at its output-token limit is no longer
-  reported as "provider request failed" and thrown away: CADmark keeps the
-  text, runs the tool calls written in full, says in the chat that the reply
-  was cut off, and asks the AI to continue
-- Errors a provider sends partway through a reply are reported by cause
-  (usage limit, overload, credential) with their real message, rather than
-  as "type error"; reply text a provider sends only at the end of an item
-  is no longer lost
-- A long parameter name or expression no longer widens the parameters panel past its column, which left a dark void between the panel and the viewport; the row is cut short and the full text sits in its tooltip
 - The AI is sent the script on disk with every turn, so a reopened project,
   a new conversation or a condensed chat no longer leaves it reconstructing
   the file from memory or asking for it to be pasted; when the file differs
