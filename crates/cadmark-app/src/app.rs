@@ -87,6 +87,17 @@ fn record_tool_start(
     (group, conversation.push(Message::ai_response("")))
 }
 
+/// Drop a reply the AI never wrote anything into, so the chat shows no
+/// blank card; a reply with any text in it stays.
+fn remove_if_blank(conversation: &mut Conversation, response: MessageId) {
+    if conversation
+        .message_mut(response)
+        .is_some_and(|message| message.text.trim().is_empty())
+    {
+        conversation.remove(response);
+    }
+}
+
 /// What a finished turn reports about the geometry it produced: each part
 /// compared with the part of the same name before it, or a sketch described
 /// in its own terms, because a profile has nothing to compare a volume
@@ -190,8 +201,12 @@ fn history_move_note(how: HistoryMove, restored_summary: &str) -> String {
 struct TurnRecord {
     /// The AI response message the streamed text grows.
     response: MessageId,
-    /// The tool-call group message, created on the first call.
+    /// The tool-call group the next call joins, until the AI speaks or
+    /// CADmark posts a notice.
     tools: Option<MessageId>,
+    /// Every tool-call group the turn has made. The chat shows these call
+    /// by call while the turn runs, and folds each into one line after.
+    tool_groups: Vec<MessageId>,
     /// The spatial comments the turn is acting on.
     comment_ids: Vec<MessageId>,
     /// Every part's measurements before the turn, for the change report.
@@ -639,6 +654,7 @@ impl CadmarkApp {
                 self.turn = Some(TurnRecord {
                     response,
                     tools: None,
+                    tool_groups: Vec::new(),
                     comment_ids,
                     parts_before,
                     history_len,
@@ -698,8 +714,21 @@ impl CadmarkApp {
                 };
                 let (tools, response) =
                     record_tool_start(conversation, turn.tools, turn.response, activity);
+                if turn.tools != Some(tools) {
+                    turn.tool_groups.push(tools);
+                }
                 turn.tools = Some(tools);
                 turn.response = response;
+                project.note_turn_event(None);
+            }
+            TurnEvent::Notice(text) => {
+                // The notice sits between what the AI said before it and
+                // what it says after, so both the reply and the tool group
+                // close here.
+                remove_if_blank(conversation, turn.response);
+                conversation.push(Message::notice(text));
+                turn.response = conversation.push(Message::ai_response(""));
+                turn.tools = None;
                 project.note_turn_event(None);
             }
             TurnEvent::ToolFinished {
@@ -779,23 +808,18 @@ impl CadmarkApp {
                 let _ = self.record_design_step(&summary, &summary);
                 show = Some((model, source));
             }
-            TurnOutcome::Answered => {
-                if conversation
-                    .message_mut(turn.response)
-                    .is_some_and(|message| message.text.trim().is_empty())
-                {
-                    conversation.remove(turn.response);
-                }
-            }
+            TurnOutcome::Answered => remove_if_blank(conversation, turn.response),
+            // What the AI had written before the turn failed or was
+            // cancelled stays, above the notice that says how it ended.
             TurnOutcome::Failed { error } => {
-                conversation.remove(turn.response);
+                remove_if_blank(conversation, turn.response);
                 conversation.push(Message::error_notice(format!(
                     "The turn did not produce a working model, so the previous one was kept.\n\n{error}"
                 )));
                 rebuild = true;
             }
             TurnOutcome::Cancelled => {
-                conversation.remove(turn.response);
+                remove_if_blank(conversation, turn.response);
                 conversation.push(Message::notice("Turn cancelled; the model is as it was."));
                 rebuild = true;
             }
@@ -1963,6 +1987,11 @@ impl CadmarkApp {
                         phase: phase.clone(),
                         started: *started,
                         last_event: *last_event,
+                        tool_groups: self
+                            .turn
+                            .as_ref()
+                            .map(|turn| turn.tool_groups.clone())
+                            .unwrap_or_default(),
                     }),
                 };
                 ui.horizontal(|ui| {
@@ -2646,9 +2675,10 @@ mod tests {
     use super::{
         Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, ImagePicker, NoRender, OverlayState,
         ParametersPanel, PartNameDialog, Project, Renderer, SceneHandle, SettingsDialog,
-        SettingsStore, TurnGeometry, TurnOutcome, TurnRecord, UserSettings, VersionDialog,
-        ai_services, camera_change, candidate_highlight_ids, history_move_note, measurement_pair,
-        measurement_readout, pending_markers, record_tool_start, turn_chat_message,
+        SettingsStore, TurnEvent, TurnGeometry, TurnOutcome, TurnRecord, UserSettings,
+        VersionDialog, ai_services, camera_change, candidate_highlight_ids, history_move_note,
+        measurement_pair, measurement_readout, pending_markers, record_tool_start,
+        turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2822,6 +2852,7 @@ mod tests {
             turn: Some(TurnRecord {
                 response,
                 tools: None,
+                tool_groups: Vec::new(),
                 comment_ids: vec![],
                 parts_before: Vec::new(),
                 history_len: 1,
@@ -2986,6 +3017,7 @@ mod tests {
         app.turn = Some(TurnRecord {
             response,
             tools: None,
+            tool_groups: Vec::new(),
             comment_ids: vec![],
             parts_before: Vec::new(),
             history_len: 1,
@@ -3163,6 +3195,7 @@ mod tests {
         app.turn = Some(TurnRecord {
             response,
             tools: None,
+            tool_groups: Vec::new(),
             comment_ids: vec![],
             parts_before: app.project().unwrap().part_measurements(),
             history_len: 1,
@@ -3522,6 +3555,95 @@ mod tests {
         store.save(&settings).unwrap();
         let services = ai_services(&store.load().unwrap(), Some(&store)).unwrap();
         assert_eq!(services.model.model_name(), "hosted-cad-model");
+    }
+
+    #[test]
+    fn what_the_ai_wrote_before_a_turn_failed_or_was_cancelled_stays_in_the_chat() {
+        let outcomes = [
+            TurnOutcome::Failed {
+                error: "AI request failed: provider request failed".into(),
+            },
+            TurnOutcome::Cancelled,
+        ];
+        for outcome in outcomes {
+            let project_dir = tempfile::tempdir().unwrap();
+            let mut app = app_with_pending_response(project_dir.path().to_path_buf());
+            let turn_start = app.project().unwrap().conversation.len() - 1;
+            app.apply_turn_event(TurnEvent::Text("The duct needs a sectioning ".into()));
+            app.apply_turn_event(TurnEvent::Text("plane at".into()));
+            app.finish_turn(outcome.clone());
+
+            let messages =
+                kinds_and_text(&app.project().unwrap().conversation).split_off(turn_start);
+            assert_eq!(messages.len(), 2, "{outcome:?}: {messages:?}");
+            assert_eq!(
+                messages[0],
+                (
+                    MessageKind::AiResponse,
+                    "The duct needs a sectioning plane at".to_string()
+                ),
+                "{outcome:?}"
+            );
+            assert!(matches!(messages[1].0, MessageKind::Notice { .. }));
+        }
+
+        // A reply the AI never wrote into leaves no blank card behind.
+        let project_dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_pending_response(project_dir.path().to_path_buf());
+        let turn_start = app.project().unwrap().conversation.len() - 1;
+        app.finish_turn(TurnOutcome::Cancelled);
+        let messages = kinds_and_text(&app.project().unwrap().conversation).split_off(turn_start);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(matches!(messages[0].0, MessageKind::Notice { .. }));
+    }
+
+    #[test]
+    fn a_notice_mid_turn_closes_the_reply_and_tool_group_above_it() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_pending_response(project_dir.path().to_path_buf());
+        let turn_start = app.project().unwrap().conversation.len() - 1;
+        let started = |call_id: &str| TurnEvent::ToolStarted {
+            call_id: call_id.into(),
+            tool: "run_script".into(),
+            arguments: serde_json::json!({"code": "X = 1"}),
+        };
+        app.apply_turn_event(started("c1"));
+        app.apply_turn_event(TurnEvent::Notice("cut off".into()));
+        app.apply_turn_event(started("c2"));
+        app.apply_turn_event(TurnEvent::Text("Continuing.".into()));
+
+        let conversation = &app.project().unwrap().conversation;
+        let shape: Vec<_> = conversation.messages()[turn_start..]
+            .iter()
+            .map(|message| match &message.kind {
+                MessageKind::ToolCalls(activities) => format!(
+                    "tools:{}",
+                    activities
+                        .iter()
+                        .map(|activity| activity.call_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                MessageKind::Notice { .. } => format!("notice:{}", message.text),
+                _ => format!("said:{}", message.text),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            ["tools:c1", "notice:cut off", "tools:c2", "said:Continuing."],
+            "a call after the notice must not join the group above it"
+        );
+        let groups: Vec<_> = conversation
+            .messages()
+            .iter()
+            .filter(|message| matches!(message.kind, MessageKind::ToolCalls(_)))
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(
+            app.turn.as_ref().unwrap().tool_groups,
+            groups,
+            "the chat is told every group the running turn made"
+        );
     }
 
     #[tokio::test]
