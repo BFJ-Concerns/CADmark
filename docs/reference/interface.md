@@ -77,6 +77,12 @@ A completed turn's reply ends with what measurably changed: face count, volume, 
 
 While a turn is running, the pane shows which step the AI is on, how long it has been at it, and a Cancel button. The context figure above the messages shows how much of the configured context window the next request would occupy: the conversation, the reference images, and everything else a request carries (the AI's instructions, its tools, the current script, the examples chosen for the request, and what you have typed). Hover it for the breakdown. It turns amber with a warning when the script, instructions and images alone nearly fill the window, because condensing the conversation cannot help then; raise the context window in Settings or shorten the script.
 
+That figure is CADmark's own estimate. Beside it, once a turn has had a reply, is what the provider actually counted for the last request: the tokens it read, how many of those came from its cache, the tokens the model wrote, and how many of those were spent reasoning. The two rarely agree exactly, and the provider's line is the one to trust. Reasoning counts as output, so a reply the provider cut off at its output limit before it wrote anything visible spent the whole limit thinking.
+
+Each turn's request builds on the last one rather than starting over. CADmark keeps, with the conversation, exactly what the model was shown in the previous turn and what it replied, renders and all, and sends that again unchanged with only the new messages added after it. A provider that caches prompts by their prefix then serves the history from its cache and charges for the new part alone. Starting a new conversation or condensing a long one begins a fresh sequence.
+
+Every request the AI is sent, and everything it streams back, is written to the project folder under `.cadmark/requests/`, one file per call, as it happens. When a turn seems stuck, the newest file there shows what was sent and what has arrived so far; when it ends, the last line says how and what it cost. The newest sixty files are kept. Your credential is never written there.
+
 Type with Enter to send, Shift+Enter for a line break.
 
 "New conversation" at the top of the chat pane archives the current chat and starts blank. The script stays as it is. This button is unavailable while a build or AI turn runs.
