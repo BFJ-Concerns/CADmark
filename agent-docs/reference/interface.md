@@ -108,7 +108,20 @@ Input: multi-line text field. Enter sends, Shift+Enter breaks the line.
 
 Context occupancy shown in the chat against the configured context-window setting. The figure is the estimated weight of the next request as it would be assembled now (`RequestAssembly` in `crates/cadmark-app/src/turn.rs`): the conversation, the reserved reference-image budget, and the request's own overhead — system instructions with any active skill, tool definitions, the `<current_script>` block, the selected examples, and the draft chat text and pending comments. Hovering shows the breakdown. Condensation triggers at three quarters of the window when the conversation is at least a tenth of it; when the request alone is at three quarters the figure turns amber with a warning, since condensing cannot help.
 
-Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation, differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
+The AI's tools (`crates/cadmark-bridge/src/tools.rs`, dispatched in `TurnRunner::run_tool` in `crates/cadmark-app/src/turn.rs`):
+
+| Tool | What it does |
+|------|--------------|
+| `run_script` | Executes the script and rebuilds the model. With `code` it replaces the whole file first; without `code` it runs the file as `edit_script` left it. The result carries measurements, validity, and what the script printed, or the traceback (with anything printed before the failure). `summary` names the design step. |
+| `edit_script` | Replaces one exact occurrence of `old_text` with `new_text` (every occurrence with `replace_all`); refused when the text is absent or ambiguous. Returns the edited region with line numbers. Nothing runs. |
+| `read_script` | The script, or a line range, with line numbers. |
+| `run_python` | Runs a snippet after the current script in its namespace (or alone with `standalone`) under the script execution limits, in the confined kernel worker; returns what it printed, the `repr` of a trailing expression, and any traceback. Keeps no model. |
+| `lookup_docs` | Answers a build123d question from the bundled documentation. |
+| `render_view`, `reference_images`, `keep_reference` | Image tools, offered only to a model that reads images. |
+
+A turn keeps only its last successful `run_script`: edits with no successful run after them are discarded and the turn is reported as failed with the script restored. The kernel worker serves snippets through `WorkerRequest::RunSnippet` (`crates/cadmark-kernel/src/protocol.rs`, `execution::run_snippet`), and captures a script's stdout into `ExecutedModel::printed`, cut at `PRINTED_OUTPUT_LIMIT`.
+
+Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation (the executed text is recorded on the tool call as `executed_source`, since a run after edits carries no `code`), differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
 
 A completed turn's reply ends with a change report: face count, volume, and overall size before and after the turn. A single-part model reads as "Model change: …" or "Model unchanged." with both sets of values. A multi-part model reports one line per part under its script binding name, matched to the part of the same name before the turn; a binding no longer produced is "removed", one not produced before is "new". The `run_script` tool result the AI reads carries the same per-part measurements ("Parts: name: …; name: …") when the script completed more than one part.
 

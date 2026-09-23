@@ -13,7 +13,7 @@ use cadmark_core::geometry::{MinimumDistance, TopologyElement};
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::Conversation;
 use cadmark_core::sketch::SketchPlane;
-use cadmark_kernel::protocol::{ExecutedModel, ModelFile};
+use cadmark_kernel::protocol::{ExecutedModel, ModelFile, SnippetOutcome};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 
 use crate::reference_images::ReferenceLibrary;
@@ -100,6 +100,16 @@ impl ScriptExecutor for WorkerExecutor {
         cancel: &CancelFlag,
     ) -> Result<ExecutedModel, WorkerError> {
         self.worker.execute(script_path, self.limits, cancel)
+    }
+
+    fn run_snippet(
+        &mut self,
+        script_path: Option<&Path>,
+        code: &str,
+        cancel: &CancelFlag,
+    ) -> Result<SnippetOutcome, WorkerError> {
+        self.worker
+            .run_snippet(script_path, code, self.limits, cancel)
     }
 }
 
