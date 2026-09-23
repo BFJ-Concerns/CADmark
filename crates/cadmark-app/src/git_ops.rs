@@ -363,9 +363,12 @@ mod tests {
     use std::fs;
 
     /// Create a temporary directory with a git repo for testing.
+    ///
+    /// The initial branch is named explicitly: the tests that switch back
+    /// to `main` must not depend on the host's `init.defaultBranch`.
     fn test_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        run_git(dir.path(), &["init"]).unwrap();
+        run_git(dir.path(), &["init", "--initial-branch=main"]).unwrap();
         // Configure git user for commits.
         run_git(dir.path(), &["config", "user.email", "test@test.com"]).unwrap();
         run_git(dir.path(), &["config", "user.name", "Test"]).unwrap();
