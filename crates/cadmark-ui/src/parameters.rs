@@ -2,10 +2,11 @@
 //
 // Adjusting a dimension is the one change the user makes without asking
 // the AI (C16), so the panel sits beside the viewport rather than behind
-// a mode: a row per module-level numeric name, a drag-or-type field for
-// the ones bound to a literal, and the expression itself for the ones
-// derived from other parameters. Committing a value is what the
-// application turns into a rewritten script, a rebuild and a design step.
+// a mode, as one tab of the left panel: a row per module-level numeric
+// name, a drag-or-type field for the ones bound to a literal, and the
+// expression itself for the ones derived from other parameters.
+// Committing a value is what the application turns into a rewritten
+// script, a rebuild and a design step.
 
 use crate::theme;
 
@@ -22,7 +23,6 @@ pub struct ParameterRow<'a> {
 
 /// What the panel shows.
 pub struct ParametersView<'a> {
-    pub script_filename: &'a str,
     pub parameters: &'a [ParameterRow<'a>],
     /// Whether the script on screen is one we could have parameters for.
     pub has_script: bool,
@@ -52,21 +52,6 @@ impl ParametersPanel {
     /// Render the panel. Returns the edit the user committed, if any.
     pub fn show(&mut self, ui: &mut egui::Ui, view: ParametersView<'_>) -> ParametersAction {
         let mut action = ParametersAction::None;
-
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new("Parameters")
-                    .strong()
-                    .color(theme::TEXT_STRONG),
-            );
-            ui.label(
-                egui::RichText::new(view.script_filename)
-                    .monospace()
-                    .size(theme::SMALL_SIZE)
-                    .color(theme::TEXT_MUTED),
-            );
-        });
-        ui.add_space(6.0);
 
         if view.parameters.is_empty() {
             let message = if view.has_script {
@@ -217,7 +202,6 @@ mod tests {
                             panel.show(
                                 ui,
                                 ParametersView {
-                                    script_filename: "part.py",
                                     parameters: rows,
                                     has_script: true,
                                     controls_enabled: true,

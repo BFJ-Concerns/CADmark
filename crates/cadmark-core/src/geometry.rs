@@ -125,6 +125,13 @@ pub enum SelectionState {
 pub struct GeometryContext {
     /// What the user selected: a piece of the solid, or a sketch element.
     pub element: PickedElement,
+    /// The part whose local numbering `element` uses, where the model has
+    /// parts: face, edge and vertex IDs restart in every part, so the
+    /// element alone does not say which solid it is on. Filled by the
+    /// application, which knows which part's ledger resolved the element;
+    /// a sketch element belongs to no part.
+    #[serde(default)]
+    pub part: Option<PartId>,
     /// Construction-time provenance: one source line, several candidate
     /// lines, or none. Never guessed; the UI and the AI both see which.
     pub provenance: LedgerValue,

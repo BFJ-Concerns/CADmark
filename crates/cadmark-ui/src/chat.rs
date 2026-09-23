@@ -1310,6 +1310,7 @@ mod tests {
     #[test]
     fn chip_names_element_and_known_lines() {
         let resolved = GeometryContext {
+            part: None,
             sketch: Default::default(),
             element: PickedElement::Solid(TopologyElement::Face(FaceId(1))),
             provenance: LedgerValue::Resolved(entry(7)),
@@ -1320,6 +1321,7 @@ mod tests {
         };
         assert_eq!(spatial_chip(&resolved), "face 1 · line 7");
         let ambiguous = GeometryContext {
+            part: None,
             sketch: Default::default(),
             element: PickedElement::Solid(TopologyElement::Edge(EdgeId(2))),
             provenance: LedgerValue::Ambiguous(vec![entry(3), entry(9)]),
@@ -1330,6 +1332,7 @@ mod tests {
         };
         assert_eq!(spatial_chip(&ambiguous), "edge 2 · lines 3/9");
         let drawn = GeometryContext {
+            part: None,
             sketch: cadmark_core::sketch_lineage::SketchLineage::Resolved(
                 cadmark_core::sketch_lineage::SketchSource {
                     source: cadmark_core::ledger::SourceRef {
@@ -1351,6 +1354,7 @@ mod tests {
         };
         assert_eq!(spatial_chip(&drawn), "sketch region 0 · line 4");
         let untraced = GeometryContext {
+            part: None,
             sketch: Default::default(),
             element: PickedElement::Solid(TopologyElement::Edge(EdgeId(2))),
             provenance: LedgerValue::Untraced,
@@ -1645,6 +1649,7 @@ mod tests {
 
     fn untraced_face(face: u32) -> GeometryContext {
         GeometryContext {
+            part: None,
             sketch: Default::default(),
             element: PickedElement::Solid(TopologyElement::Face(FaceId(face))),
             provenance: LedgerValue::Untraced,

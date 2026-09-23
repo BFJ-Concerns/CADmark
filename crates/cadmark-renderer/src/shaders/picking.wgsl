@@ -40,18 +40,21 @@ struct EdgeVertexInput {
     @location(3) side: f32,
     @location(4) cap: f32,
     @location(5) end_sign: f32,
+    @location(6) part_id: f32,
 }
 
 struct EdgeVertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) edge_id: f32,
     @location(1) world_pos: vec3<f32>,
+    @location(2) @interpolate(flat) part_id: f32,
 }
 
 struct MarkerVertexInput {
     @location(0) position: vec3<f32>,
     @location(1) vertex_id: f32,
     @location(2) corner: vec2<f32>,
+    @location(3) part_id: f32,
 }
 
 struct MarkerVertexOutput {
@@ -61,6 +64,7 @@ struct MarkerVertexOutput {
     // The marker's own vertex, not the expanded corner: a marker is
     // clipped away with the vertex it stands for, as a whole.
     @location(2) world_pos: vec3<f32>,
+    @location(3) @interpolate(flat) part_id: f32,
 }
 
 fn encode_id(id: u32) -> vec4<u32> {
@@ -87,8 +91,8 @@ fn fs_part(in: VertexOutput) -> @location(0) vec4<u32> {
     if !section_keeps(uniforms.section_plane, in.world_pos) {
         discard;
     }
-    let id = u32(in.part_id + 0.5);
-    return vec4<u32>(id & 0xFFu, (id >> 8u) & 0xFFu, (id >> 16u) & 0xFFu, (id >> 24u) & 0xFFu);
+    let pid = u32(in.part_id + 0.5);
+    return encode_id(pick_in_part(pid, pid));
 }
 
 @vertex
@@ -99,6 +103,7 @@ fn vs_edge(in: EdgeVertexInput) -> EdgeVertexOutput {
     out.clip_pos = expand_edge(here, other, in.side, in.cap, in.end_sign, uniforms.marker_size);
     out.edge_id = in.edge_id;
     out.world_pos = in.position;
+    out.part_id = in.part_id;
     return out;
 }
 
@@ -110,6 +115,7 @@ fn vs_marker(in: MarkerVertexInput) -> MarkerVertexOutput {
     out.vertex_id = in.vertex_id;
     out.corner = in.corner;
     out.world_pos = in.position;
+    out.part_id = in.part_id;
     return out;
 }
 
@@ -118,14 +124,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<u32> {
     if !section_keeps(uniforms.section_plane, in.world_pos) {
         discard;
     }
-    // Encode the face ID as a 32-bit value split across RGBA channels.
-    let id = u32(in.face_id + 0.5);
-    return vec4<u32>(
-        id & 0xFFu,
-        (id >> 8u) & 0xFFu,
-        (id >> 16u) & 0xFFu,
-        (id >> 24u) & 0xFFu,
-    );
+    // The face within its part, as one 32-bit ID split across RGBA.
+    return encode_id(pick_in_part(u32(in.face_id + 0.5), u32(in.part_id + 0.5)));
 }
 
 @fragment
@@ -133,7 +133,7 @@ fn fs_edge(in: EdgeVertexOutput) -> @location(0) vec4<u32> {
     if !section_keeps(uniforms.section_plane, in.world_pos) {
         discard;
     }
-    return encode_id(u32(in.edge_id + 0.5));
+    return encode_id(pick_in_part(u32(in.edge_id + 0.5), u32(in.part_id + 0.5)));
 }
 
 // A vertex marker's disc. The same mask the visible pass uses, so the
@@ -146,7 +146,7 @@ fn fs_marker(in: MarkerVertexOutput) -> @location(0) vec4<u32> {
     if !marker_covers(in.corner) {
         discard;
     }
-    return encode_id(u32(in.vertex_id + 0.5));
+    return encode_id(pick_in_part(u32(in.vertex_id + 0.5), u32(in.part_id + 0.5)));
 }
 
 // The exact depth prepass for face picking. It writes no colour, only
