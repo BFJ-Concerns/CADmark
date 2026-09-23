@@ -56,6 +56,20 @@ The workspace has two binaries (`cadmark` in cadmark-app, `cadmark-kernel-worker
 
 Source: `crates/cadmark-app/Cargo.toml:6–8`, `crates/cadmark-kernel/Cargo.toml:6–7`, `crates/cadmark-app/src/main.rs:34–64`, `crates/cadmark-app/src/launch.rs`.
 
+## Test runner
+
+`just test` runs `cargo test --workspace`. With `CADMARK_TEST_RUNNER=nextest` it runs cargo-nextest's `ci` profile instead (two retries, no fail-fast, a 120 s slow-test timeout that terminates a hung test after three periods, and a junit report at `target/nextest/ci/junit.xml`), then the doctests under plain `cargo test --doc`, which nextest cannot run. Any other value is an error.
+
+The renderer's `picking_readback` integration test has its own `main` rather than libtest's, so it can point the GL loader at a software rasteriser before any driver opens. It answers the libtest command line both runners use: `--list --format terse` lists its checks, positional names select by substring (or by whole name with `--exact`), and `--nocapture` is accepted.
+
+Source: `justfile`, `.config/nextest.toml`, `crates/cadmark-renderer/tests/picking_readback.rs`.
+
+## Continuous integration
+
+`.forgejo/workflows/ci.yml` runs `just verify` with `CADMARK_TEST_RUNNER=nextest` on every non-draft pull request and on pushes to `main` and `structural/**`, in the `forge-ci/rust` image on the Forgejo Actions runner. The image carries the Rust toolchain, cargo-nextest, just, and Mesa's Vulkan drivers (lavapipe serves as the software adapter); it has no Python 3.12, so the job installs a pinned uv, fetches the pinned CPython 3.12 build, and runs `just bootstrap` against it, caching the interpreter and `.venv` on the pins and `requirements.txt`. A pull request whose head commit already has a verdict from the workflow is not re-run. A test that failed and then passed on retry marks the PR with the `Flaky Test` label.
+
+Source: `.forgejo/workflows/ci.yml`.
+
 ## Desktop installation
 
 `just install` builds the workspace in release mode and runs
