@@ -2692,9 +2692,6 @@ fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
         .collect()
 }
 
-/// Which of a freshly executed model's parts start out hidden: the ones
-/// whose script binding the user hid earlier. Names are the identity a
-/// part keeps from one execution to the next; ordinals are not.
 /// A viewport click awaiting its pick readback: where it landed, relative
 /// to the viewport, and whether it asked for the whole part (Alt held)
 /// rather than the face, edge or vertex under it.
@@ -2727,6 +2724,9 @@ fn pick_requests(
     }
 }
 
+/// Which of a freshly executed model's parts start out hidden: the ones
+/// whose script binding the user hid earlier. Names are the identity a
+/// part keeps from one execution to the next; ordinals are not.
 fn hidden_part_ids(
     parts: &[cadmark_kernel::protocol::ExecutedPart],
     hidden: &std::collections::HashSet<String>,
