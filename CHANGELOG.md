@@ -4,6 +4,73 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-24
+
+### Added
+- Each part of a multi-part model is drawn in its own colour, from a fixed
+  palette by the part's position in the script; a single-part model keeps
+  its grey
+- A Parts tab in the left panel, beside Parameters: every part with its
+  colour swatch, name and measurements, the active one highlighted; clicking
+  a name selects the whole part, and a tick box hides or shows it in the
+  viewport. A hidden part is neither drawn nor clickable, and stays hidden by
+  name through rebuilds
+- Every AI request is recorded in the project folder under
+  `.cadmark/requests/`, one file per model call: the request as sent
+  (images summarised), each streamed event with its offset, and the outcome
+  with the token counts the provider reported. Files are written as the
+  stream arrives, so a call still running can be read; the newest sixty are
+  kept
+- The chat's context figure gains the provider's own counts for the last
+  request, on a line under CADmark's estimate: tokens read, how many the provider's
+  cache served, tokens written, and how many of those were reasoning
+- A reasoning-effort setting, sent as the request's `reasoning.effort`
+  when filled in; blank leaves the provider's default
+- The installed application writes its log to
+  `~/.local/state/cadmark/cadmark.log` (under `XDG_STATE_HOME` when set),
+  one line per AI request start and end among the rest
+- The AI's thinking shows in the chat while a turn runs: "thinking…" as
+  it reasons before each reply, then "thought for 2m 05s" once it speaks
+  or calls a tool, opening to the reasoning text where the provider shares
+  any. Reasoning counts as activity, so a long think no longer reads as a
+  quiet stream, and a turn that ends during one records how long it was
+
+### Changed
+- Clicking any part of a multi-part model selects that part's face, edge or
+  vertex; before, only the part the script bound last answered a click, and
+  the others needed "Pick part" first
+- Alt+click selects the whole part under the cursor; the toolbar's
+  "Pick part" button, which armed the next click for that, is gone
+- Two comment anchors on different parts are no longer offered as a
+  distance measurement, since each part numbers its elements on its own
+- Model sessions preserve provider output in order, including encrypted
+  reasoning, assistant message metadata, original tool arguments and renders.
+  Tool results follow the complete response; later turns append context to the
+  saved history, including after reopening, permitting prompt-cache reuse
+- Turn-scoped skill instructions are appended without changing the system
+  instructions or the existing conversation prefix
+- Output-limited replies can continue from complete encrypted reasoning even
+  without visible text; missing usage details read "not reported" rather than zero
+- Changing the endpoint, model or image capability rebuilds history from chat
+  instead of sending opaque reasoning to a different backend; interrupted tool
+  calls receive a result before the model session is saved
+- The AI is asked to work in small steps — one change, one run, one look
+  at the result — rather than one response that rewrites everything
+- The AI says what it is about to do before each tool call, or each run
+  of related calls, and what a result changed when it matters, so the
+  text between the tool lines reads as a running commentary rather than
+  a single line per reply
+- Every dependency is refreshed to its newest compatible release; the
+  wgpu, egui, and PyO3 majors stay where they are
+
+### Fixed
+- Exporting one part from the toolbar's per-part menu wrote nothing and
+  reported the part as no longer existing: the menu named parts by their
+  picking ID where the export looked them up by ordinal
+- The model's context window is detected through gateways that report it
+  only in Anthropic's model-list format, such as CLIProxyAPI; before, such an
+  endpoint read as reporting nothing and the manual setting stood in
+
 ## [0.2.0] - 2026-09-23
 
 ### Added

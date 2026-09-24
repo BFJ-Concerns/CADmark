@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::geometry::GeometryContext;
+use crate::model_session::{ModelItem, ModelSession};
 
 /// Unique identifier for a chat message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,8 +54,26 @@ pub struct ToolActivity {
 pub struct ImageData {
     /// `image/png` or `image/jpeg`.
     pub media_type: String,
-    /// The encoded bytes.
+    /// The encoded bytes; base64 text on disk, where a model session
+    /// keeps the renders the model was shown.
+    #[serde(with = "base64_bytes")]
     pub bytes: Vec<u8>,
+}
+
+mod base64_bytes {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+
+    pub fn serialize<S: serde::Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u8>, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        STANDARD.decode(text).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Images reserve a conservative fixed budget each, since providers do not
@@ -110,6 +129,14 @@ pub enum MessageKind {
     /// A run of consecutive tool calls in one turn, grouped so a long
     /// turn reads as one collapsed entry.
     ToolCalls(Vec<ToolActivity>),
+    /// The model's reasoning before one reply: how long it took, and
+    /// whatever of it the provider shares (nothing, from a provider that
+    /// keeps its reasoning private). Shown so a long silence reads as work;
+    /// the display record is not replayed as assistant text.
+    Thinking {
+        /// When the reasoning ended; `None` while it is still going.
+        finished: Option<DateTime<Utc>>,
+    },
     /// A note from CADmark itself rather than the AI: an execution failure,
     /// a provider error, or AI being unavailable.
     Notice { is_error: bool },
@@ -185,6 +212,12 @@ impl Message {
         Self::new(MessageKind::ToolCalls(activities), "")
     }
 
+    /// The model's reasoning before a reply, begun now; its text grows as
+    /// the provider shares any.
+    pub fn thinking() -> Self {
+        Self::new(MessageKind::Thinking { finished: None }, "")
+    }
+
     /// A note from CADmark about the session: shown quietly, not as speech.
     pub fn notice(text: impl Into<String>) -> Self {
         Self::new(MessageKind::Notice { is_error: false }, text)
@@ -221,6 +254,11 @@ impl Message {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Conversation {
     messages: Vec<Message>,
+    /// The item sequence the model last answered, so the next request
+    /// extends it byte for byte. Absent in a conversation no turn has
+    /// recorded one for, where the messages are rendered afresh.
+    #[serde(default)]
+    session: ModelSession,
 }
 
 impl Conversation {
@@ -260,8 +298,21 @@ impl Conversation {
         }
     }
 
-    /// Remove a message, for a turn that ended with nothing to show.
+    /// Remove a message, for a turn that ended with nothing to show. A
+    /// session that reached the removed message now reaches the one
+    /// before it, so the messages after it are still rendered once.
     pub fn remove(&mut self, id: MessageId) {
+        if self.session.covers == Some(id) {
+            self.session.covers = self
+                .messages
+                .iter()
+                .position(|message| message.id == id)
+                .and_then(|index| index.checked_sub(1))
+                .map(|index| self.messages[index].id);
+            if self.session.covers.is_none() {
+                self.session = ModelSession::default();
+            }
+        }
         self.messages.retain(|message| message.id != id);
     }
 
@@ -275,20 +326,73 @@ impl Conversation {
 
     /// Replace the completed portion of a conversation with the model's
     /// compact account, retaining messages which belong to the active turn.
+    /// The recorded session described the replaced messages, so it goes
+    /// with them; the turn that condensed records the new one when it ends.
     pub fn condense_before(&mut self, index: usize, summary: impl Into<String>) {
         let retained = self.messages.split_off(index.min(self.messages.len()));
         self.messages = vec![Message::conversation_summary(summary)];
         self.messages.extend(retained);
+        self.session = ModelSession::default();
     }
 
-    /// A deliberately conservative, provider-neutral estimate. Providers do
-    /// not expose one common tokenizer, so this is used to start condensing
-    /// early rather than to claim an exact token count.
+    /// The items the next request begins with, and the messages still to
+    /// be rendered after them: the recorded session and what came after
+    /// the message it reaches, or nothing and every message when no
+    /// session is recorded or its message is gone.
+    pub fn replay(&self) -> (&[ModelItem], &[Message]) {
+        let reached = self
+            .session
+            .covers
+            .and_then(|id| self.messages.iter().position(|message| message.id == id));
+        match reached {
+            Some(index) if !self.session.is_empty() => {
+                (&self.session.items, &self.messages[index + 1..])
+            }
+            _ => (&[], &self.messages),
+        }
+    }
+
+    /// Record the item sequence a turn ended with as the session the next
+    /// request extends. It accounts for every message now in the
+    /// conversation, this turn's own included.
+    pub fn record_session(&mut self, items: Vec<ModelItem>) {
+        self.record_session_for(items, None);
+    }
+
+    pub fn record_session_for(&mut self, items: Vec<ModelItem>, identity: Option<String>) {
+        self.session = ModelSession {
+            items,
+            identity,
+            covers: self.messages.last().map(|message| message.id),
+        };
+    }
+
+    /// Reconstruct the human history when changing provider or model: opaque
+    /// reasoning is meaningful only to the backend that issued it.
+    pub fn for_model(&self, identity: Option<&str>) -> Self {
+        let mut conversation = self.clone();
+        if self.session.identity.as_deref() != identity {
+            conversation.session = ModelSession::default();
+        }
+        conversation
+    }
+
+    pub fn session(&self) -> &ModelSession {
+        &self.session
+    }
+
+    /// A deliberately conservative, provider-neutral estimate of what the
+    /// next request's history weighs: the recorded session and the
+    /// messages rendered after it. Providers do not expose one common
+    /// tokenizer, so this is used to start condensing early rather than to
+    /// claim an exact token count.
     pub fn estimated_tokens(&self) -> usize {
-        self.messages
-            .iter()
-            .map(|message| message.estimated_tokens())
-            .sum()
+        let (items, messages) = self.replay();
+        items.iter().map(ModelItem::estimated_tokens).sum::<usize>()
+            + messages
+                .iter()
+                .map(|message| message.estimated_tokens())
+                .sum::<usize>()
     }
 }
 
@@ -302,6 +406,11 @@ pub fn estimate_tokens(text: &str) -> usize {
 
 impl Message {
     fn estimated_tokens(&self) -> usize {
+        // Provider reasoning is counted in the saved model session, not twice
+        // through its separate display record.
+        if let MessageKind::Thinking { .. } = &self.kind {
+            return 0;
+        }
         let image_tokens = self.attachments.len() * IMAGE_TOKENS;
         let mut characters = self.text.chars().count();
         if let MessageKind::ToolCalls(activities) = &self.kind {
@@ -382,6 +491,7 @@ mod tests {
 
     fn sample_geometry_context() -> GeometryContext {
         GeometryContext {
+            part: None,
             sketch: Default::default(),
             element: PickedElement::Solid(TopologyElement::Face(FaceId(5))),
             provenance: LedgerValue::Resolved(ProvenanceEntry {
@@ -525,6 +635,88 @@ mod tests {
         ));
         assert!(conversation.messages()[0].text.contains("5 mm wall"));
         assert_eq!(conversation.messages()[1].text, "Add an open top.");
+    }
+
+    fn assistant(text: &str) -> ModelItem {
+        ModelItem::Assistant {
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_recorded_session_is_replayed_and_only_later_messages_are_rendered() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("Make a box."));
+        conversation.push(Message::ai_response("Done."));
+        conversation.record_session(vec![assistant("the exact items sent")]);
+        let later = conversation.push(Message::design_change("Undid the box."));
+
+        let (items, messages) = conversation.replay();
+        assert_eq!(items, &[assistant("the exact items sent")]);
+        assert_eq!(
+            messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![later]
+        );
+        assert_eq!(
+            conversation.estimated_tokens(),
+            assistant("the exact items sent").estimated_tokens()
+                + conversation.messages()[2].estimated_tokens()
+        );
+    }
+
+    #[test]
+    fn without_a_session_every_message_is_rendered() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("Make a box."));
+        let (items, messages) = conversation.replay();
+        assert!(items.is_empty());
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn removing_the_message_a_session_reaches_moves_it_to_the_one_before() {
+        let mut conversation = Conversation::new();
+        let first = conversation.push(Message::user_chat("Make a box."));
+        let blank = conversation.push(Message::ai_response(""));
+        conversation.record_session(vec![assistant("sent")]);
+        let after = conversation.push(Message::design_change("Undid the box."));
+
+        conversation.remove(blank);
+
+        assert_eq!(conversation.session().covers, Some(first));
+        let (items, messages) = conversation.replay();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![after]
+        );
+    }
+
+    #[test]
+    fn removing_the_only_message_a_session_reaches_drops_the_session() {
+        let mut conversation = Conversation::new();
+        let only = conversation.push(Message::ai_response(""));
+        conversation.record_session(vec![assistant("sent")]);
+        conversation.remove(only);
+        assert!(conversation.session().is_empty());
+        assert!(conversation.replay().0.is_empty());
+    }
+
+    #[test]
+    fn condensing_drops_the_session_the_replaced_messages_described() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat("Use a 5 mm wall."));
+        conversation.push(Message::ai_response("I will use a 5 mm wall."));
+        conversation.record_session(vec![assistant("sent")]);
+        let active_start = conversation.len();
+        conversation.push(Message::user_chat("Add an open top."));
+
+        conversation.condense_before(active_start, "Decision: 5 mm wall.");
+
+        assert!(conversation.session().is_empty());
+        let (items, messages) = conversation.replay();
+        assert!(items.is_empty());
+        assert_eq!(messages.len(), 2);
     }
 
     #[test]

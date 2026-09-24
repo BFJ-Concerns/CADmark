@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 
 use cadmark_bridge::SYSTEM_PROMPT;
 use cadmark_bridge::backend::{
-    BackendError, ImageData, ModelItem, ModelRequest, StreamDelta, ToolCall, ToolSpec, TurnModel,
+    BackendError, ImageData, ModelItem, ModelRequest, ProviderUsage, RequestPurpose, StreamDelta,
+    ToolCall, ToolSpec, TurnModel,
 };
 use cadmark_bridge::examples;
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
@@ -31,7 +32,8 @@ use cadmark_bridge::tools::{
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::geometry::describe_parts;
 use cadmark_core::message::{
-    ContextUsage, Conversation, IMAGE_TOKENS, ImageAttachment, MessageKind, estimate_tokens,
+    ContextUsage, Conversation, IMAGE_TOKENS, ImageAttachment, Message, MessageKind,
+    estimate_tokens,
 };
 use cadmark_core::skills;
 use cadmark_kernel::protocol::{ExecutedModel, ModelForm, SnippetOutcome};
@@ -98,6 +100,19 @@ pub enum TurnEvent {
     /// Something the user should know about how the turn is going, said
     /// by CADmark rather than the AI.
     Notice(String),
+    /// What the provider reported one request of the turn cost.
+    Usage(ProviderUsage),
+    /// The item sequence the turn ended with: every request's items and
+    /// the reply that closed it. Sent last, however the turn ended, so
+    /// the next turn's request extends this sequence.
+    ModelContext {
+        items: Vec<ModelItem>,
+        identity: Option<String>,
+    },
+    /// The model is reasoning before it answers: a piece of the reasoning
+    /// text where the provider shares it, or empty where it does not, so
+    /// a long think shows as work rather than silence.
+    Thinking(String),
 }
 
 /// Shown in the chat when the provider cuts a reply off at its output
@@ -108,14 +123,14 @@ const OUTPUT_LIMIT_NOTICE: &str = "The AI's reply reached the provider's output 
 /// Told to the model after a reply the provider cut off at its output
 /// limit.
 const CONTINUE_AFTER_OUTPUT_LIMIT: &str = "Your last response reached the provider's output \
-    limit and was cut off. Its text and every tool call you finished writing are above; a tool \
+    limit and was cut off. Its text, retained reasoning and complete tool calls are above; a tool \
     call you had not finished writing was dropped and did not run. Continue from where you \
     stopped, making any dropped call again in full.";
 
 /// The turn's error when a reply is cut off before it holds anything to
 /// continue from.
 const OUTPUT_LIMIT_WITHOUT_PROGRESS: &str = "The AI's reply reached the provider's output limit \
-    (max_output_tokens) before it had written any text or a complete tool call, so there was \
+    (max_output_tokens) without text, a complete tool call or resumable reasoning, so there was \
     nothing to continue from. A higher output limit at the provider or gateway, or a smaller \
     request, may get through.";
 
@@ -268,6 +283,26 @@ impl<
         input: &TurnInput,
         mut emit: impl FnMut(TurnEvent) + Send,
     ) -> TurnOutcome {
+        let identity = self.model.session_identity();
+        let conversation = conversation.for_model(identity.as_deref());
+        let mut items = Vec::new();
+        let outcome = self
+            .run_with(&conversation, input, &mut emit, &mut items)
+            .await;
+        settle_unanswered_calls(&mut items);
+        emit(TurnEvent::ModelContext { items, identity });
+        outcome
+    }
+
+    /// The turn itself. `items` is the conversation as the model is shown
+    /// it, left holding the sequence the turn ended with.
+    async fn run_with(
+        &mut self,
+        conversation: &Conversation,
+        input: &TurnInput,
+        mut emit: impl FnMut(TurnEvent) + Send,
+        items: &mut Vec<ModelItem>,
+    ) -> TurnOutcome {
         let original = std::fs::read_to_string(&self.script_path).ok();
         // Every image the conversation holds, newest first, so a request
         // to keep "the drawing" finds the one from three turns ago as
@@ -291,20 +326,35 @@ impl<
             self.model.accepts_images(),
         );
         let usage = assembled.usage(input.context_window_tokens);
-        let mut items = history_items(conversation, self.model.accepts_images());
-        if usage.needs_condensing() && !conversation.is_empty() {
-            let summary = match self.condense(conversation).await {
-                Ok(summary) => summary,
-                Err(outcome) => return outcome,
-            };
-            emit(TurnEvent::ConversationCondensed {
-                summary: summary.clone(),
-            });
-            items = vec![ModelItem::Assistant {
-                text: format!("Conversation summary:\n{summary}"),
-            }];
-        }
+        // The recorded session first, exactly as the model last saw it,
+        // then whatever the chat gained after it.
+        let (recorded, unrendered) = conversation.replay();
+        *items = recorded.to_vec();
+        items.extend(history_items(unrendered, self.model.accepts_images()));
+        // A condensation that fails ends the turn, but only after the
+        // turn's own input has joined the items: the sequence the turn
+        // ends with is recorded as the next request's prefix, so the
+        // request the user just made must be in it.
+        let condensation_failure = if usage.needs_condensing() && !conversation.is_empty() {
+            match self.condense(conversation).await {
+                Ok(summary) => {
+                    emit(TurnEvent::ConversationCondensed {
+                        summary: summary.clone(),
+                    });
+                    *items = vec![ModelItem::Assistant {
+                        text: format!("Conversation summary:\n{summary}"),
+                    }];
+                    None
+                }
+                Err(outcome) => Some(outcome),
+            }
+        } else {
+            None
+        };
         items.extend(assembled.items);
+        if let Some(outcome) = condensation_failure {
+            return outcome;
+        }
         let tools = assembled.tools;
         let instructions = assembled.instructions;
         let mut last_good: Option<(String, Box<ExecutedModel>, String)> = None;
@@ -317,12 +367,14 @@ impl<
             }
             emit(TurnEvent::Phase("thinking".to_string()));
             let request = ModelRequest {
+                purpose: RequestPurpose::Turn,
                 instructions: instructions.clone(),
                 items: items.clone(),
                 tools: tools.clone(),
             };
             let mut sink = |delta: StreamDelta| match delta {
                 StreamDelta::Text(text) => emit(TurnEvent::Text(text)),
+                StreamDelta::Reasoning(text) => emit(TurnEvent::Thinking(text)),
                 StreamDelta::ToolCallStarted { name } => {
                     emit(TurnEvent::Phase(format!(
                         "preparing to {}",
@@ -349,16 +401,19 @@ impl<
                 }
             };
 
-            if !response.text.is_empty() {
-                items.push(ModelItem::Assistant {
-                    text: response.text.clone(),
-                });
+            if let Some(usage) = response.usage {
+                emit(TurnEvent::Usage(usage));
             }
+            items.extend(response.replay_items());
             // A reply cut off at the output limit is kept, its whole tool
             // calls run, and the model is asked to go on; one cut off
             // before it wrote anything would only be cut off again.
             let cut_off = response.reached_output_limit;
-            if cut_off && response.text.trim().is_empty() && response.tool_calls.is_empty() {
+            if cut_off
+                && response.text.trim().is_empty()
+                && response.tool_calls.is_empty()
+                && !response.has_continuable_reasoning()
+            {
                 return self.abort(
                     original.as_deref(),
                     TurnOutcome::Failed {
@@ -426,7 +481,6 @@ impl<
                     failed,
                     executed,
                 });
-                items.push(ModelItem::ToolCall(call.clone()));
                 items.push(ModelItem::ToolResult {
                     call_id: call.id,
                     output,
@@ -492,8 +546,9 @@ impl<
     /// resumed project useful before old detail uses the available context.
     async fn condense(&self, conversation: &Conversation) -> Result<String, TurnOutcome> {
         let request = ModelRequest {
+            purpose: RequestPurpose::Condense,
             instructions: "Condense this earlier CAD conversation for the next turn. Retain every decision already made and every request still open, including dimensions, constraints, and unresolved questions. Drop only chatter and completed detail. Return the compact account alone; do not call tools.".to_string(),
-            items: history_items(conversation, self.model.accepts_images()),
+            items: history_items(conversation.messages(), self.model.accepts_images()),
             tools: Vec::new(),
         };
         let mut sink = |_delta: StreamDelta| {};
@@ -1086,14 +1141,41 @@ fn changed_parameter_values(before: &str, after: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every replayed tool call needs a result, including calls interrupted by Cancel.
+fn settle_unanswered_calls(items: &mut Vec<ModelItem>) {
+    let pending: Vec<String> = items
+        .iter()
+        .filter_map(|item| match item {
+            ModelItem::ToolCall(call) => Some(call.id.clone()),
+            ModelItem::ProviderOutput(item) if item["type"] == "function_call" => {
+                item["call_id"].as_str().map(str::to_string)
+            }
+            _ => None,
+        })
+        .filter(|id| {
+            !items.iter().any(|item| {
+                matches!(item,
+                    ModelItem::ToolResult { call_id, .. } if call_id == id
+                )
+            })
+        })
+        .collect();
+    for call_id in pending {
+        items.push(ModelItem::ToolResult {
+            call_id,
+            output: "The turn ended before this call returned a result. Check the current script before making further edits.".into(),
+        });
+    }
+}
+
 /// The conversation so far as the model sees it.
 /// The saved conversation as the model is shown it. A user message's
 /// attached images ride with it again, so a picture the user gave three
 /// turns ago is still in front of the model; a model that cannot read
 /// images is shown the text alone.
-fn history_items(conversation: &Conversation, accepts_images: bool) -> Vec<ModelItem> {
+fn history_items(messages: &[Message], accepts_images: bool) -> Vec<ModelItem> {
     let mut items = Vec::new();
-    for message in conversation.messages() {
+    for message in messages {
         let images = if accepts_images {
             message.images()
         } else {
@@ -1141,7 +1223,7 @@ fn history_items(conversation: &Conversation, accepts_images: bool) -> Vec<Model
                 text: format!("Note from CADmark: {}", message.text),
                 images: Vec::new(),
             }),
-            MessageKind::Notice { .. } => {}
+            MessageKind::Notice { .. } | MessageKind::Thinking { .. } => {}
         }
     }
     items
@@ -1186,7 +1268,7 @@ impl RequestAssembly {
         // last run the history does hold. The curated example library for
         // the operations the request names comes next, so the request
         // itself stays last.
-        let items = vec![
+        let mut items = vec![
             ModelItem::User {
                 text: current_script_block(script_on_disk, last_run),
                 images: Vec::new(),
@@ -1210,12 +1292,14 @@ impl RequestAssembly {
                 },
             },
         ];
-        let mut instructions = instructions_for(accepts_images);
+        let instructions = instructions_for(accepts_images);
         for skill in selected_skills {
-            instructions.push_str(&format!(
-                "\n\n# Active skill: {}\n\nThe user explicitly invoked this built-in skill for this turn.\n{}",
-                skill.name, skill.instructions,
-            ));
+            items.insert(items.len() - 1, ModelItem::Developer {
+                text: format!(
+                    "# Active skill: {}\n\nApply this skill only to the following user request and its tool loop.\n{}",
+                    skill.name, skill.instructions,
+                ),
+            });
         }
         Self {
             instructions,
@@ -1245,6 +1329,9 @@ impl RequestAssembly {
                     estimate_tokens(&call.name) + estimate_tokens(&call.arguments.to_string())
                 }
                 ModelItem::ToolResult { output, .. } => estimate_tokens(output),
+                ModelItem::ProviderOutput(_) | ModelItem::Developer { .. } => {
+                    item.estimated_tokens()
+                }
             })
             .sum();
         let tools: usize = self
@@ -1455,7 +1542,10 @@ mod tests {
                     .iter()
                     .map(|item| match item {
                         ModelItem::User { text, .. } | ModelItem::Assistant { text } => text,
-                        ModelItem::ToolCall(_) | ModelItem::ToolResult { .. } => "",
+                        ModelItem::ToolCall(_)
+                        | ModelItem::ToolResult { .. }
+                        | ModelItem::ProviderOutput(_)
+                        | ModelItem::Developer { .. } => "",
                     })
                     .collect::<String>();
                 if transcript.contains("Decision: use a 5 mm wall")
@@ -1475,7 +1565,9 @@ mod tests {
 
     fn text(reply: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: reply.to_string(),
             tool_calls: Vec::new(),
         })
@@ -1483,7 +1575,9 @@ mod tests {
 
     fn run_script(id: &str, code: &str, summary: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: id.to_string(),
@@ -1495,7 +1589,9 @@ mod tests {
 
     fn edit(id: &str, old_text: &str, new_text: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: id.to_string(),
@@ -1508,7 +1604,9 @@ mod tests {
     /// A `run_script` without `code`: run the file as the edits left it.
     fn rerun(id: &str, summary: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: id.to_string(),
@@ -1520,7 +1618,9 @@ mod tests {
 
     fn python(id: &str, code: &str, standalone: bool) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: id.to_string(),
@@ -1532,7 +1632,9 @@ mod tests {
 
     fn lookup(id: &str, query: &str) -> Result<ModelResponse, BackendError> {
         Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: id.to_string(),
@@ -1912,18 +2014,18 @@ mod tests {
                 let requests = model.requests.lock().unwrap();
                 assert_eq!(requests.len(), 2);
                 for request in requests.iter() {
-                    assert_eq!(
-                        request
-                            .instructions
-                            .matches("# Active skill: 3d-printing")
-                            .count(),
-                        1
-                    );
-                    assert!(
-                        request
-                            .instructions
-                            .contains(skills::BUILT_IN[0].instructions)
-                    );
+                    let active: Vec<_> = request
+                        .items
+                        .iter()
+                        .filter_map(|item| match item {
+                            ModelItem::Developer { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(active.len(), 1);
+                    assert!(active[0].contains(skills::BUILT_IN[0].instructions));
+                    assert!(active[0].contains("only to the following user request"));
+                    assert!(!request.instructions.contains("# Active skill:"));
                     assert!(request.items.iter().any(|item| matches!(item,
                         ModelItem::User { text, .. } if text.contains(original))));
                     assert!(request.items.iter().any(|item| matches!(item,
@@ -1941,8 +2043,318 @@ mod tests {
                 )
                 .await;
             let requests = model.requests.lock().unwrap();
-            assert!(!requests[2].instructions.contains("# Active skill:"));
+            assert_eq!(requests[0].instructions, requests[2].instructions);
+            assert!(
+                !requests[2]
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, ModelItem::Developer { .. }))
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn a_turn_ends_by_reporting_the_item_sequence_it_sent_with_its_reply() {
+        let model = ScriptedModel::new([text("All done.")]);
+        let mut harness =
+            Harness::with_script(Some("part = Box(10, 10, 2)"), FakeExecutor::new([]));
+        let input = TurnInput {
+            chat: Some("Is it done?".into()),
+            ..Default::default()
+        };
+        harness
+            .run_with_conversation(&model, &Conversation::new(), input, CancelFlag::new())
+            .await;
+
+        let Some(TurnEvent::ModelContext { items, .. }) = harness.events.last() else {
+            panic!(
+                "the last event names the model context: {:?}",
+                harness.events.last()
+            );
+        };
+        let sent = &model.requests.lock().unwrap()[0].items;
+        assert_eq!(&items[..sent.len()], sent.as_slice());
+        assert_eq!(
+            items[sent.len()..],
+            [ModelItem::Assistant {
+                text: "All done.".into()
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_next_turn_begins_with_the_recorded_session_and_renders_only_what_came_after() {
+        let mut history = Conversation::new();
+        history.push(Message::user_chat(
+            "RENDERED-BY-THE-CHAT would be the wrong source",
+        ));
+        history.push(Message::ai_response("Done."));
+        let recorded = vec![
+            ModelItem::User {
+                text: "EXACT-ITEM the model last saw".into(),
+                images: Vec::new(),
+            },
+            ModelItem::Assistant {
+                text: "Done.".into(),
+            },
+        ];
+        history.record_session(recorded.clone());
+        history.push(Message::design_change("the user undid a step"));
+
+        let model = ScriptedModel::new([text("Noted.")]);
+        let mut harness =
+            Harness::with_script(Some("part = Box(10, 10, 2)"), FakeExecutor::new([]));
+        let input = TurnInput {
+            chat: Some("Carry on.".into()),
+            ..Default::default()
+        };
+        harness
+            .run_with_conversation(&model, &history, input, CancelFlag::new())
+            .await;
+
+        let requests = model.requests.lock().unwrap();
+        let items = &requests[0].items;
+        assert_eq!(
+            &items[..2],
+            recorded.as_slice(),
+            "the session is sent as recorded"
+        );
+        let texts: Vec<&str> = items
+            .iter()
+            .map(|item| match item {
+                ModelItem::User { text, .. } | ModelItem::Assistant { text } => text.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(
+            texts[2].contains("the user undid a step"),
+            "the message after the session is rendered next: {texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text.contains("RENDERED-BY-THE-CHAT")),
+            "messages the session accounts for are not rendered again: {texts:?}"
+        );
+        assert!(texts.last().unwrap().contains("Carry on."));
+    }
+
+    #[tokio::test]
+    async fn ordered_reasoning_and_calls_survive_tools_save_and_a_follow_up_with_a_skill() {
+        let first_call = ToolCall {
+            id: "first".into(),
+            name: LOOKUP_DOCS.into(),
+            arguments: serde_json::json!({"query":"loft"}),
+        };
+        let second_call = ToolCall {
+            id: "second".into(),
+            name: LOOKUP_DOCS.into(),
+            arguments: serde_json::json!({"query":"sweep"}),
+        };
+        let output = vec![
+            ModelItem::ProviderOutput(serde_json::json!({"type":"reasoning","id":"rs_1",
+                "encrypted_content":"signed-one","summary":[]})),
+            ModelItem::ProviderOutput(serde_json::json!({"type":"message","role":"assistant",
+                "content":[{"type":"output_text","text":"Looking up both."}]})),
+            ModelItem::ProviderOutput(serde_json::json!({"type":"function_call","call_id":"first",
+                "name":LOOKUP_DOCS,"arguments":"{\"query\":\"loft\"}"})),
+            ModelItem::ProviderOutput(serde_json::json!({"type":"reasoning","id":"rs_2",
+                "encrypted_content":"signed-two","summary":[]})),
+            ModelItem::ProviderOutput(
+                serde_json::json!({"type":"function_call","call_id":"second",
+                "name":LOOKUP_DOCS,"arguments":"{\"query\":\"sweep\"}"}),
+            ),
+        ];
+        let model = ScriptedModel::new([
+            Ok(ModelResponse {
+                output_items: output.clone(),
+                text: "Looking up both.".into(),
+                tool_calls: vec![first_call, second_call],
+                ..Default::default()
+            }),
+            text("Ready."),
+            text("Follow-up."),
+        ]);
+        let mut harness =
+            Harness::with_script(Some("part = Box(20, 10, 2)"), FakeExecutor::new([]));
+        assert_eq!(
+            harness
+                .run(&model, chat("Check both methods"), CancelFlag::new())
+                .await,
+            TurnOutcome::Answered
+        );
+        let initial_count = model.requests.lock().unwrap()[0].items.len();
+        {
+            let requests = model.requests.lock().unwrap();
+            let second = &requests[1].items;
+            assert_eq!(&second[..initial_count], requests[0].items.as_slice());
+            assert_eq!(
+                &second[initial_count..initial_count + output.len()],
+                output.as_slice()
+            );
+            assert!(
+                matches!(&second[initial_count+5], ModelItem::ToolResult {call_id,..} if call_id=="first")
+            );
+            assert!(
+                matches!(&second[initial_count+6], ModelItem::ToolResult {call_id,..} if call_id=="second")
+            );
+        }
+        let Some(TurnEvent::ModelContext { items, .. }) = harness.events.last() else {
+            panic!("no session")
+        };
+        let saved_items = items.clone();
+        let mut history = Conversation::new();
+        history.push(Message::user_chat("Check both methods"));
+        history.push(Message::ai_response("Ready."));
+        history.record_session(saved_items.clone());
+        let file = harness.script.with_file_name("conversation.json");
+        std::fs::write(&file, serde_json::to_vec(&history).unwrap()).unwrap();
+        let history: Conversation = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+        harness
+            .run_with_conversation(
+                &model,
+                &history,
+                chat("/3d-printing Check the clearances"),
+                CancelFlag::new(),
+            )
+            .await;
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(
+            &requests[2].items[..saved_items.len()],
+            saved_items.as_slice()
+        );
+        assert_eq!(requests[0].instructions, requests[2].instructions);
+        assert_eq!(requests[0].tools, requests[2].tools);
+        assert!(
+            requests[2].items[saved_items.len()..]
+                .iter()
+                .any(|item| matches!(item,
+            ModelItem::Developer {text} if text.contains(skills::BUILT_IN[0].instructions)))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_output_limit_continues_from_complete_opaque_reasoning_without_visible_text() {
+        let reasoning = ModelItem::ProviderOutput(serde_json::json!({"type":"reasoning",
+            "id":"rs_1","status":"completed","summary":[],"encrypted_content":"signed"}));
+        let model = ScriptedModel::new([
+            Ok(ModelResponse {
+                output_items: vec![reasoning.clone()],
+                reached_output_limit: true,
+                ..Default::default()
+            }),
+            text("Continued."),
+        ]);
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        assert_eq!(
+            harness
+                .run(&model, chat("Plan the splits"), CancelFlag::new())
+                .await,
+            TurnOutcome::Answered
+        );
+        let requests = model.requests.lock().unwrap();
+        let tail = &requests[1].items[requests[0].items.len()..];
+        assert_eq!(tail[0], reasoning);
+        assert!(matches!(&tail[1], ModelItem::User {text,..} if text==CONTINUE_AFTER_OUTPUT_LIMIT));
+    }
+
+    #[tokio::test]
+    async fn cancelling_before_tools_finish_leaves_paired_results_for_replay() {
+        let cancel = CancelFlag::new();
+        let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
+        let response = lookup("pending", "loft").unwrap();
+        let model = ScriptedModel::new([Ok(response)]);
+        let mut render = NoRender;
+        // Cancellation immediately after the completed response prevents the tool
+        // running but its call still belongs to the replayed provider output.
+        let model = CancelAfterResponse {
+            model,
+            cancel: cancel.clone(),
+        };
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut harness.executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            references: &NoReferences,
+            script_path: harness.script.clone(),
+            cancel,
+        };
+        let mut items = vec![];
+        let outcome = runner
+            .run(&Conversation::new(), &chat("Check"), |event| {
+                if let TurnEvent::ModelContext { items: context, .. } = event {
+                    items = context;
+                }
+            })
+            .await;
+        assert_eq!(outcome, TurnOutcome::Cancelled);
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, ModelItem::ToolCall(call) if call.id=="pending"))
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, ModelItem::ToolResult {call_id,output}
+            if call_id=="pending" && output.contains("before this call returned")))
+        );
+    }
+
+    struct CancelAfterResponse {
+        model: ScriptedModel,
+        cancel: CancelFlag,
+    }
+    impl TurnModel for CancelAfterResponse {
+        fn model_name(&self) -> &str {
+            "cancel-after-response"
+        }
+        fn accepts_images(&self) -> bool {
+            false
+        }
+        fn respond<'a>(
+            &'a self,
+            request: ModelRequest,
+            cancel: CancelFlag,
+            sink: DeltaSink<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<ModelResponse, BackendError>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                let response = self.model.respond(request, cancel, sink).await;
+                self.cancel.cancel();
+                response
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_usage_a_provider_reports_is_a_turn_event() {
+        let usage = ProviderUsage {
+            input_tokens: 900,
+            cached_input_tokens: Some(800),
+            output_tokens: 40,
+            reasoning_tokens: Some(30),
+        };
+        let model = ScriptedModel::new([Ok(ModelResponse {
+            usage: Some(usage),
+            ..text("Fine.").unwrap()
+        })]);
+        let mut harness =
+            Harness::with_script(Some("part = Box(10, 10, 2)"), FakeExecutor::new([]));
+        harness
+            .run_with_conversation(
+                &model,
+                &Conversation::new(),
+                TurnInput {
+                    chat: Some("Well?".into()),
+                    ..Default::default()
+                },
+                CancelFlag::new(),
+            )
+            .await;
+        assert!(harness.events.contains(&TurnEvent::Usage(usage)));
     }
 
     #[tokio::test]
@@ -1970,9 +2382,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert!(!requests[0].instructions.contains("# Active skill:"));
         assert!(
-            requests[1]
-                .instructions
-                .contains(skills::BUILT_IN[0].instructions)
+            requests[1].items.iter().any(|item| matches!(item, ModelItem::Developer { text } if text.contains(skills::BUILT_IN[0].instructions)))
         );
     }
 
@@ -2195,7 +2605,9 @@ mod tests {
             },
         ));
         let list = Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
@@ -2204,7 +2616,9 @@ mod tests {
             }],
         });
         let read = Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c2".into(),
@@ -2213,7 +2627,9 @@ mod tests {
             }],
         });
         let keep = Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![
                 ToolCall {
@@ -2325,8 +2741,8 @@ mod tests {
             Message::spatial_comment("this face", Vec::new())
                 .with_attachments(vec![attachment("Detail")]),
         );
-        let seeing = history_items(&conversation, true);
-        let blind = history_items(&conversation, false);
+        let seeing = history_items(conversation.messages(), true);
+        let blind = history_items(conversation.messages(), false);
         for (index, name) in ["Flange", "Detail"].into_iter().enumerate() {
             let ModelItem::User { text, images } = &seeing[index] else {
                 panic!("a user item");
@@ -2416,6 +2832,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failed_condensation_keeps_the_turn_input_in_the_recorded_session() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::user_chat(format!(
+            "Decision: use a 5 mm wall. {}",
+            "detail ".repeat(700)
+        )));
+        conversation.push(Message::ai_response("The wall will be 5 mm."));
+        let model = ScriptedModel::new([Err(BackendError::RequestFailed("gateway down".into()))]);
+        let mut harness = Harness::with_script(Some("original"), FakeExecutor::new([]));
+
+        let outcome = harness
+            .run_with_conversation(
+                &model,
+                &conversation,
+                TurnInput {
+                    chat: Some("Open request: add a lid.".into()),
+                    context_window_tokens: 1_000,
+                    ..Default::default()
+                },
+                CancelFlag::new(),
+            )
+            .await;
+
+        assert!(
+            matches!(&outcome, TurnOutcome::Failed { error } if error.contains("condense")),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            model.requests.lock().unwrap().len(),
+            1,
+            "only the condensation was asked"
+        );
+        let Some(TurnEvent::ModelContext { items, .. }) = harness.events.last() else {
+            panic!("the turn ends by naming its model context");
+        };
+        let user_texts: Vec<&str> = items
+            .iter()
+            .filter_map(|item| match item {
+                ModelItem::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            user_texts.iter().any(|text| text.contains("add a lid")),
+            "the request the user just made is in the recorded sequence: {user_texts:?}"
+        );
+        assert!(user_texts.iter().any(|text| text.contains("5 mm wall")));
+
+        // The app records that sequence as reaching the failure notice, so
+        // the next turn replays it rather than rendering the chat again;
+        // the open request must still reach the model.
+        let mut history = conversation.clone();
+        history.push(Message::user_chat("Open request: add a lid."));
+        history.push(Message::notice(
+            "Could not condense the conversation: gateway down",
+        ));
+        history.record_session(items.clone());
+        let follow_up = ScriptedModel::new([text("A lid it is.")]);
+        harness
+            .run_with_conversation(
+                &follow_up,
+                &history,
+                TurnInput {
+                    chat: Some("Go on.".into()),
+                    context_window_tokens: 128_000,
+                    ..Default::default()
+                },
+                CancelFlag::new(),
+            )
+            .await;
+        let requests = follow_up.requests.lock().unwrap();
+        let sent: Vec<&str> = requests[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ModelItem::User { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            sent.iter()
+                .filter(|text| text.contains("add a lid"))
+                .count(),
+            1,
+            "the open request is sent once: {sent:?}"
+        );
+        assert!(sent.last().unwrap().contains("Go on."));
+    }
+
+    #[tokio::test]
     async fn a_turn_iterates_through_docs_failure_and_success_then_commits_the_last_good_script() {
         let model = ScriptedModel::new([
             lookup("c1", "fillet"),
@@ -2493,8 +2999,10 @@ mod tests {
     #[tokio::test]
     async fn a_reply_cut_off_at_the_output_limit_runs_its_whole_calls_and_the_model_continues() {
         let cut_off = Ok(ModelResponse {
+            output_items: Vec::new(),
             text: "Writing the duct.".to_string(),
             reached_output_limit: true,
+            usage: None,
             ..run_script("c1", "DUCT = 1", "Duct").unwrap()
         });
         let model = ScriptedModel::new([cut_off, text("The duct is done.")]);
@@ -2543,9 +3051,11 @@ mod tests {
     #[tokio::test]
     async fn a_reply_cut_off_at_the_output_limit_with_only_text_is_continued_too() {
         let cut_off = Ok(ModelResponse {
+            output_items: Vec::new(),
             text: "The flange needs".to_string(),
             tool_calls: Vec::new(),
             reached_output_limit: true,
+            usage: None,
         });
         let model = ScriptedModel::new([cut_off, text(" a thicker rim.")]);
         let mut harness = Harness::with_script(Some("ORIGINAL = 1"), FakeExecutor::new([]));
@@ -2559,7 +3069,9 @@ mod tests {
     #[tokio::test]
     async fn a_reply_cut_off_before_it_wrote_anything_fails_the_turn_by_that_cause() {
         let cut_off = Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: true,
+            usage: None,
             ..ModelResponse::default()
         });
         let model = ScriptedModel::new([cut_off]);
@@ -2890,6 +3402,7 @@ mod tests {
         };
         use cadmark_core::ledger::LedgerValue;
         let anchor = |element: TopologyElement| GeometryContext {
+            part: None,
             sketch: Default::default(),
             element: PickedElement::Solid(element),
             provenance: LedgerValue::Untraced,
@@ -2948,7 +3461,9 @@ mod tests {
     #[tokio::test]
     async fn a_render_reaches_the_model_as_an_image_on_the_next_request() {
         let render_call = Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
@@ -3081,7 +3596,9 @@ mod tests {
         let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
 
         let render_call = Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![ToolCall {
                 id: "c1".into(),
@@ -3176,7 +3693,9 @@ mod tests {
         let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
 
         let build_and_look = Ok(ModelResponse {
+            output_items: Vec::new(),
             reached_output_limit: false,
+            usage: None,
             text: String::new(),
             tool_calls: vec![
                 ToolCall {
@@ -3276,7 +3795,7 @@ mod tests {
         conversation.push(Message::design_change(
             "Set width to 90 in the parameters panel.",
         ));
-        let items = history_items(&conversation, false);
+        let items = history_items(conversation.messages(), false);
         assert_eq!(items.len(), 5);
         assert!(matches!(&items[1], ModelItem::ToolCall(call) if call.id == "c1"));
         assert!(matches!(&items[2], ModelItem::ToolResult { call_id, .. } if call_id == "c1"));
@@ -3414,7 +3933,9 @@ mod tests {
         let original = "a = 1\nb = 2\nc = 3\n";
         let model = ScriptedModel::new([
             Ok(ModelResponse {
+                output_items: Vec::new(),
                 reached_output_limit: false,
+                usage: None,
                 text: String::new(),
                 tool_calls: vec![ToolCall {
                     id: "c1".into(),

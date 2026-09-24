@@ -1,6 +1,7 @@
 // GPU mesh buffers — vertex, index, and face-ID data uploaded to the GPU.
 
 use bytemuck::{Pod, Zeroable};
+use cadmark_core::geometry::PartId;
 
 /// Vertex layout for the main shaded render pass.
 #[repr(C)]
@@ -38,6 +39,9 @@ pub struct EdgeVertex {
     /// this corner sees points the opposite way at each end, so the side
     /// the normal picks would flip without it and fold the quad over.
     pub end_sign: f32,
+    /// Picking ID of the part this edge belongs to, as `GpuVertex::part_id`:
+    /// edge IDs restart in every part, so the ID alone names nothing.
+    pub part_id: f32,
 }
 
 /// One corner of a vertex marker's screen-space quad. Six of these carry
@@ -51,12 +55,20 @@ pub struct MarkerVertex {
     pub vertex_id: f32,
     /// Which corner of the quad this is: -1 or +1 on each axis.
     pub corner: [f32; 2],
+    /// Picking ID of the part this vertex belongs to, as `GpuVertex::part_id`.
+    pub part_id: f32,
     /// Alignment padding to 32 bytes.
-    pub _padding: [f32; 2],
+    pub _padding: f32,
 }
 
-/// All GPU buffers for a single model.
+/// All GPU buffers for one part.
 pub struct GpuMesh {
+    /// The part these buffers draw; its vertices carry its picking ID.
+    pub part: PartId,
+    /// Whether the part is drawn this frame. A hidden part is skipped by
+    /// every pass — shaded, picking and depth — so it neither shows nor
+    /// occludes nor answers a click.
+    pub visible: bool,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,

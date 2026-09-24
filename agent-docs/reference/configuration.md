@@ -18,12 +18,13 @@ Source: `crates/cadmark-app/src/user_settings.rs:86–99`, `crates/cadmark-app/s
 | `ai.model` | string | (none) | Model name |
 | `ai.accepts_images` | bool | `false` | Whether the model reads images; sends message attachments and enables the render and reference-library tools |
 | `ai.allow_insecure_http` | bool | `false` | Permit a plain-HTTP endpoint (local model servers) |
+| `ai.reasoning_effort` | string | (none) | Sent as the request's `reasoning.effort` on every call when set (`low`, `medium`, `high`, or whatever the endpoint accepts); unset, the field is not sent and the provider's default applies |
 | `limits.wall_clock` | duration | 120 s | Script execution wall-clock ceiling |
 | `limits.memory_bytes` | integer | 4294967296 (4 GB) | Script execution resident-memory ceiling in bytes |
 | `context_window_tokens` | integer | 128000 | Fallback context window, used only when the endpoint does not advertise one for the model (see below); CADmark condenses conversation before approaching the limit in force |
 | `recent_projects` | array of paths | `[]` | Recently opened project folders, most recent first; capped at 8 |
 
-Source: `crates/cadmark-app/src/user_settings.rs:32–43`, `crates/cadmark-core/src/limits.rs:9–17`, `crates/cadmark-app/src/user_settings.rs:29`.
+Source: `crates/cadmark-app/src/user_settings.rs:32–43`, `crates/cadmark-bridge/src/config.rs` (`AiConfiguration`), `crates/cadmark-core/src/limits.rs:9–17`, `crates/cadmark-app/src/user_settings.rs:29`.
 
 ## Settings dialog
 
@@ -31,7 +32,7 @@ The dialog opens from the toolbar gear button or from the "AI off" badge. It is 
 
 Sections:
 
-- **AI provider** — base URL, model, credential (masked, never echoed), accepts-images checkbox, allow-insecure-HTTP checkbox. The hint text notes "Any OpenAI-compatible endpoint: OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server."
+- **AI provider** — base URL, model, reasoning effort (text; blank sends nothing), credential (masked, never echoed), accepts-images checkbox, allow-insecure-HTTP checkbox. The hint text notes "Any OpenAI-compatible endpoint: OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server."
 - **Script limits** — wall clock (seconds, min 1, max 3600) and memory (MB, min 64, max 65536).
 - **Conversation context** — context window in tokens (min 1024, max 10000000).
 
@@ -51,7 +52,7 @@ Source: `crates/cadmark-app/src/user_settings.rs:20–21`, `crates/cadmark-app/s
 
 ## Context window detection
 
-On each project open the orchestrator probes the endpoint for the configured model's context window (`OpenAiCompatibleClient::context_window`): `GET {base_url}/models/{model}` first, then `GET {base_url}/models` searched by `id`. Recognised fields: `context_window`, `context_length`, `max_context_length`, `context_window_tokens`, `max_input_tokens`, `n_ctx`, `top_provider.context_length` (OpenRouter), `meta.n_ctx_train` (llama.cpp), `metadata.context_length`, and any `model_info` key ending in `.context_length` (Ollama). Values below 1024 are ignored. A found value arrives as `OrchestratorResult::ContextWindowDetected` and is held on the project (`Project::detected_context_window`), taking precedence over `context_window_tokens` for every turn and for the chat's occupancy figure; a failed or empty probe leaves the setting in force and is never an error.
+On each project open the orchestrator probes the endpoint for the configured model's context window (`OpenAiCompatibleClient::context_window`): `GET {base_url}/models/{model}` first, then `GET {base_url}/models` searched by `id`, then the same list requested with an `anthropic-version: 2023-06-01` header (Anthropic's list format, the only one in which gateways fronting Claude, such as CLIProxyAPI, report `max_input_tokens`). Recognised fields: `context_window`, `context_length`, `max_context_length`, `context_window_tokens`, `max_input_tokens`, `n_ctx`, `top_provider.context_length` (OpenRouter), `meta.n_ctx_train` (llama.cpp), `metadata.context_length`, and any `model_info` key ending in `.context_length` (Ollama). Values below 1024 are ignored. A found value arrives as `OrchestratorResult::ContextWindowDetected` and is held on the project (`Project::detected_context_window`), taking precedence over `context_window_tokens` for every turn and for the chat's occupancy figure; a failed or empty probe leaves the setting in force and is never an error.
 
 Source: `crates/cadmark-bridge/src/openai_compatible.rs` (`context_window`, `advertised_context_window`), `crates/cadmark-app/src/orchestrator.rs`, `crates/cadmark-app/src/app.rs` (`context_window_tokens`).
 

@@ -16,6 +16,7 @@ pub mod doc_lookup;
 pub mod examples;
 pub mod grounding;
 mod openai_compatible;
+pub mod request_log;
 pub mod sketch_route;
 pub mod tools;
 
@@ -34,6 +35,16 @@ pub struct AiServices {
 }
 
 impl AiServices {
+    /// Record every call both consumers make under `dir`.
+    pub fn recording_to(self, dir: std::path::PathBuf) -> Self {
+        let log = std::sync::Arc::new(request_log::RequestLog::in_directory(dir));
+        let model = self.model.with_request_log(std::sync::Arc::clone(&log));
+        AiServices {
+            doc_lookup: DocLookup::new(model.clone()),
+            model,
+        }
+    }
+
     /// Make a minimal credential-safe provider request for the ignored live smoke test.
     #[doc(hidden)]
     pub async fn smoke_test_exact_sentinel(

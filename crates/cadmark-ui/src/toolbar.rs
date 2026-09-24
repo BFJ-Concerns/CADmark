@@ -125,8 +125,6 @@ pub enum ToolbarAction {
     OpenScriptInEditor,
     /// Re-execute the current script and reload the model.
     Refresh,
-    /// The next viewport click selects a completed part, not a face or edge.
-    PickPart,
     /// Show or hide the code panel.
     ToggleCode,
     /// Write the current model to a file in the given format.
@@ -186,8 +184,8 @@ pub struct ToolbarState<'a> {
     /// The name of the part the top-level export writes, when the model
     /// has several and one is selected.
     pub export_target: Option<&'a str>,
-    /// The parts the executed script defines, as picking ID, script binding
-    /// name, and whether the part is a closed valid solid.
+    /// The parts the executed script defines, as part ordinal, script
+    /// binding name, and whether the part is a closed valid solid.
     pub model_parts: &'a [(u32, String, bool)],
     /// Whether the code panel is showing.
     pub code_visible: bool,
@@ -455,17 +453,6 @@ pub fn show_toolbar(
             action = ToolbarAction::Refresh;
         }
 
-        if ui
-            .add_enabled(
-                !state.model_parts.is_empty(),
-                egui::Button::new("Pick part"),
-            )
-            .on_hover_text("Select a whole part with the next viewport click")
-            .clicked()
-        {
-            action = ToolbarAction::PickPart;
-        }
-
         let selection_label = match state.selection_kinds.summary() {
             Some(summary) => format!("Select: {summary} \u{25BE}"),
             None => "Select \u{25BE}".to_string(),
@@ -483,6 +470,12 @@ pub fn show_toolbar(
                     action = ToolbarAction::ToggleSelectionKind(kind);
                 }
             }
+            ui.separator();
+            ui.label(
+                egui::RichText::new("Alt+click selects a whole part")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
         })
         .response
         .on_hover_text("Turn a kind off to click past it to what is behind");

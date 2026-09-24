@@ -76,11 +76,21 @@ install -m 755 "$repo_root/target/release/cadmark-kernel-worker" "$libdir/bin/ca
 
 cat > "$bindir/cadmark" <<WRAPPER
 #!/bin/sh
-# CADmark launcher: names the installed Python runtime, then starts the
-# application beside its kernel worker. Written by scripts/install-desktop-app.
+# CADmark launcher: names the installed Python runtime, keeps the
+# application's log, then starts it beside its kernel worker. Written by
+# scripts/install-desktop-app.
 VIRTUAL_ENV="$libdir/.venv"
 export VIRTUAL_ENV
-exec "$libdir/bin/cadmark" "\$@"
+RUST_LOG="\${RUST_LOG:-info}"
+export RUST_LOG
+log_dir="\${XDG_STATE_HOME:-\$HOME/.local/state}/cadmark"
+mkdir -p "\$log_dir"
+log="\$log_dir/cadmark.log"
+# One log file, started afresh once it passes five megabytes.
+if [ -f "\$log" ] && [ "\$(wc -c < "\$log")" -gt 5000000 ]; then
+    : > "\$log"
+fi
+exec "$libdir/bin/cadmark" "\$@" >>"\$log" 2>&1
 WRAPPER
 chmod 755 "$bindir/cadmark"
 

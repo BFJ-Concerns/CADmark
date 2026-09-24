@@ -3,17 +3,18 @@
 // and the model currently on screen. Everything here is replaced when
 // another folder is opened; nothing here touches egui or the GPU.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
 use cadmark_bridge::AiServices;
-use cadmark_bridge::backend::TurnModel;
+use cadmark_bridge::backend::{ProviderUsage, TurnModel};
 use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryDescriptors, ModelSummary, PartMeasurements, SolidValidity, TopologyElement,
+    GeometryDescriptors, ModelSummary, PartId, PartMeasurements, SolidValidity, TopologyElement,
 };
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::limits::ExecutionLimits;
@@ -169,6 +170,9 @@ pub struct Project {
     /// which takes precedence over the manual setting; absent when the
     /// endpoint advertised none.
     pub detected_context_window: Option<usize>,
+    /// What the provider reported the last request of a turn cost; the
+    /// one measured figure the occupancy estimate is shown against.
+    pub last_usage: Option<ProviderUsage>,
     pub busy: Option<Busy>,
     /// Provenance ledger — rebuilt on each script execution.
     pub ledger: ProvenanceLedger,
@@ -198,6 +202,11 @@ pub struct Project {
     pub exports_in_flight: usize,
     /// Distance requests waiting on the retained worker model.
     pub measurements_in_flight: usize,
+    /// Parts of the open script the user has hidden from the viewport, by
+    /// script binding name: the one identity a part keeps across rebuilds,
+    /// so a part stays hidden while the AI works on the others. The set
+    /// belongs to the script on screen and is emptied when another opens.
+    pub hidden_parts: HashSet<String>,
 }
 
 impl Project {
@@ -223,6 +232,9 @@ impl Project {
         }
 
         let mut conversation = load_conversation(&dir);
+        if let Ok(services) = &ai {
+            conversation = conversation.for_model(services.model.session_identity().as_deref());
+        }
         if conversation.is_empty() {
             conversation.push(Message::notice(format!(
                 "Describe what you'd like to build, or click a face, edge or vertex of the \
@@ -266,6 +278,7 @@ impl Project {
             conversation,
             ai_model,
             detected_context_window: None,
+            last_usage: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
@@ -280,6 +293,7 @@ impl Project {
             script_modified_on_disk: false,
             exports_in_flight: 0,
             measurements_in_flight: 0,
+            hidden_parts: HashSet::new(),
         };
         project.request_reload();
         project
@@ -321,6 +335,7 @@ impl Project {
         self.script_source = None;
         self.has_script = false;
         self.script_modified_on_disk = false;
+        self.hidden_parts.clear();
         let file_name = self.part.file_name().to_string();
         if self.send(OrchestratorCommand::SetScript(file_name)).is_ok() {
             self.request_reload();
@@ -545,8 +560,23 @@ impl Project {
             .collect()
     }
 
-    /// Make one part's local topology IDs the active selection domain after
-    /// it has been picked as a whole.
+    /// The part whose ledger, lineage and descriptors the current selection
+    /// resolves against; none until a solid with parts is loaded.
+    pub fn active_model_part(&self) -> Option<&LoadedPart> {
+        let id = self.active_model_part_id?;
+        self.model_parts.iter().find(|part| part.id == id)
+    }
+
+    /// The ledger a part's elements are numbered in; with no part named,
+    /// the ledger the current selection resolves against.
+    pub fn ledger_of(&self, part: Option<PartId>) -> &ProvenanceLedger {
+        part.and_then(|PartId(id)| self.model_parts.iter().find(|part| part.id == id))
+            .map_or(&self.ledger, |part| &part.ledger)
+    }
+
+    /// Make one part's ledger, lineage and descriptors the ones later picks
+    /// resolve against: the part the user last clicked, in the viewport or
+    /// the parts list.
     pub fn select_model_part(&mut self, id: u32) -> Option<&LoadedPart> {
         let part = self.model_parts.iter().find(|part| part.id == id)?;
         self.ledger = part.ledger.clone();
@@ -558,18 +588,36 @@ impl Project {
         self.model_parts.iter().find(|part| part.id == id)
     }
 
-    /// Ask the retained worker model for the closest separation of two picked elements.
-    pub fn request_minimum_distance(
-        &mut self,
-        first: TopologyElement,
-        second: TopologyElement,
-    ) -> Result<(), String> {
+    /// The retained BREP two picked elements are measured on: the part
+    /// they are numbered within, since every part numbers its own
+    /// elements, or the whole solid where the picks name no part.
+    pub fn measurement_model(&self, part: Option<PartId>) -> Result<ModelFile, String> {
         let model = self.model.as_ref().ok_or("no model to measure")?;
         let solid = model
             .solid()
             .ok_or("a sketch has no solid to measure between")?;
+        match part {
+            Some(PartId(id)) => self
+                .model_parts
+                .iter()
+                .find(|part| part.id == id)
+                .map(|part| part.model.clone())
+                .ok_or_else(|| "the measured part is no longer loaded".to_string()),
+            None => Ok(solid.file.clone()),
+        }
+    }
+
+    /// Ask the retained worker model for the closest separation of two
+    /// picked elements, both numbered within `part`.
+    pub fn request_minimum_distance(
+        &mut self,
+        part: Option<PartId>,
+        first: TopologyElement,
+        second: TopologyElement,
+    ) -> Result<(), String> {
+        let model = self.measurement_model(part)?;
         self.send(OrchestratorCommand::MinimumDistance {
-            model: solid.file.clone(),
+            model,
             first,
             second,
         })?;
@@ -845,6 +893,7 @@ mod tests {
             conversation: Conversation::new(),
             ai_model: None,
             detected_context_window: None,
+            last_usage: None,
             busy: None,
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
@@ -859,8 +908,50 @@ mod tests {
             script_modified_on_disk: false,
             exports_in_flight: 0,
             measurements_in_flight: 0,
+            hidden_parts: HashSet::new(),
         };
         (project, cmd_rx)
+    }
+
+    #[test]
+    fn reopening_with_a_different_model_discards_opaque_context_before_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut project, _commands) = project_for_test(dir.path().to_path_buf());
+        project
+            .conversation
+            .push(Message::user_chat("Keep the design"));
+        project.conversation.record_session_for(
+            vec![cadmark_core::model_session::ModelItem::ProviderOutput(
+                serde_json::json!({
+                    "type": "reasoning", "encrypted_content": "x".repeat(4000)
+                }),
+            )],
+            Some("another backend".into()),
+        );
+        project.save_conversation().unwrap();
+        drop(project);
+        let services = cadmark_bridge::build_ai_services(
+            cadmark_bridge::config::AiConfiguration {
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "new-model".into(),
+                accepts_images: false,
+                allow_insecure_http: true,
+                reasoning_effort: None,
+            },
+            None,
+        )
+        .unwrap();
+        let mut reopened = Project::open(
+            dir.path().to_path_buf(),
+            None,
+            Ok(services),
+            ExecutionLimits::default(),
+            Box::new(crate::turn::NoRender),
+        );
+        assert!(reopened.conversation.session().items.is_empty());
+        assert_eq!(reopened.conversation.messages()[0].text, "Keep the design");
+        assert!(reopened.conversation.estimated_tokens() < 1000);
+        reopened.shut_down();
     }
 
     #[test]
