@@ -21,8 +21,8 @@ struct Uniforms {
     _pad3: u32,
     marker_count: u32,
     ghost: f32,
-    selected_part_id: u32,
-    hover_part_id: u32,
+    _pad4: u32,
+    _pad5: u32,
     selected_colour: vec4<f32>,
     hover_colour: vec4<f32>,
     // Section plane [nx, ny, nz, d]: a fragment is discarded when
@@ -33,6 +33,8 @@ struct Uniforms {
     _pad7: f32,
     _pad8: f32,
     marker_size: MarkerExtent,
+    // The surface colour of each part by ordinal.
+    part_colours: array<vec4<f32>, PART_PALETTE_LEN>,
 }
 
 // Whether the section plane keeps `world_pos`. Mirrors
@@ -78,6 +80,7 @@ struct VertexInput {
     @location(1) vertex_id: f32,
     // Which corner of the marker's quad this is: -1 or +1 on each axis.
     @location(2) corner: vec2<f32>,
+    @location(3) part_id: f32,
 }
 
 struct VertexOutput {
@@ -87,6 +90,7 @@ struct VertexOutput {
     // The marker's own vertex, not the expanded corner: a marker is
     // clipped away with the vertex it stands for, as a whole.
     @location(2) world_pos: vec3<f32>,
+    @location(3) @interpolate(flat) part_id: f32,
 }
 
 @vertex
@@ -97,6 +101,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.vertex_id = in.vertex_id;
     out.corner = in.corner;
     out.world_pos = in.position;
+    out.part_id = in.part_id;
     return out;
 }
 
@@ -109,7 +114,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
     let ghost = clamp(uniforms.ghost, 0.0, 1.0);
-    let vid = u32(in.vertex_id + 0.5);
+    let vid = pick_in_part(u32(in.vertex_id + 0.5), u32(in.part_id + 0.5));
     for (var index = 0u; index < min(arrayLength(&markers), uniforms.marker_count); index++) {
         if vid == markers[index].element_id && vid != 0u {
             return marker_colour(mix(markers[index].colour.rgb, GHOST_COLOUR, ghost), coverage, uniforms.encode_srgb);

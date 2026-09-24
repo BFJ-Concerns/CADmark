@@ -31,7 +31,7 @@ The world is Z-up, matching build123d's coordinate system.
 
 ## Selecting geometry
 
-Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. To select a whole part in a multi-part model, click "Pick part" in the toolbar first.
+Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. When the script defines several parts, each is drawn in its own colour, and clicking any of them selects that part's face, edge, or vertex; the status bar and the comment overlay then speak in that part's terms. To select a whole part, hold `Alt` and click it, or click its name in the Parts tab of the left panel.
 
 The **Select** menu in the toolbar turns each kind of click target on or off. Three checkboxes — "Faces", "Edges", "Vertices" — start all on. Disabling a kind makes clicks pass through it to whatever is behind. The filter does not affect whole-part picks.
 
@@ -61,11 +61,13 @@ The chat pane is where you talk to the AI. Messages are distinguished by positio
 
 - Your messages lean right.
 - Spatial comments carry accent-tinted chips naming each anchor's element and source line.
-- The AI's replies stream in as the turn progresses.
-- Tool calls appear one line each while the turn runs, so you can watch them arrive; each line is collapsed and expands to the call's input and result. When the turn ends, each run of calls folds into a single collapsed line such as "8 tool calls: ran the script ×6, looked up docs ×2", which opens to the same lines. What the AI wrote between the calls stays shown.
+- The AI's replies stream in as the turn progresses, and it says what it is about to do before each tool call or run of calls, so the text between the tool lines reads as a running commentary.
+- Tool calls appear one line each while the turn runs, so you can watch them arrive; each line is collapsed and expands to the call's input and result.
+- The AI's thinking shows too: "thinking…" while it reasons before a reply, then "thought for 2m 05s" once it goes on to speak or call a tool. Where the provider shares the reasoning text, the line opens to it; where it keeps the reasoning private, the line stands alone, and the phase line under the messages still counts the reasoning as activity rather than showing the stream as quiet.
+- When the turn ends, each run of calls and thinking folds into a single collapsed line such as "8 tool calls: ran the script ×6, looked up docs ×2 · thought for 4m 10s", which opens to the same lines. What the AI wrote between the steps stays shown.
 - Notices from CADmark itself are quiet, or red when something failed.
 
-If a turn fails or you cancel it, whatever the AI had written so far stays in the chat, above the notice that says how the turn ended. If the provider cuts a reply off at its output limit, CADmark keeps what was written, runs the tool calls the AI had finished writing, says in the chat that the reply was cut off, and asks the AI to carry on. A reply cut off before it contains any text or a complete tool call ends the turn with a message naming the output limit, since asking again would only repeat it. When a provider reports a usage limit or overload partway through a reply, the message names that cause.
+If a turn fails or you cancel it, whatever the AI had written so far stays in the chat, above the notice that says how the turn ended. If the provider cuts a reply off at its output limit, CADmark keeps what was written, runs the tool calls the AI had finished writing, says in the chat that the reply was cut off, and asks the AI to carry on. CADmark can also continue when the provider returns a complete, resumable reasoning item without visible text. If there is no text, complete tool call or resumable reasoning, the turn ends with a message naming the output limit. When a provider reports a usage limit or overload partway through a reply, the message names that cause.
 
 Every turn sends the AI the part's script as it stands on disk, whatever the conversation holds: a reopened project, a new conversation, or a condensed chat all start from the real file. When the file differs from the last script the AI ran, because a value was changed in the parameters panel or a design step was undone, the AI is told so and which parameter values changed, so it keeps them. Each such change is also noted in the chat where it happened, in a quiet card the AI reads with the rest of the conversation, so it knows when you set a value or stepped back and can tell one edit from a later reversal.
 
@@ -74,6 +76,14 @@ Within a turn the AI works on the script the way a coding assistant works on a f
 A completed turn's reply ends with what measurably changed: face count, volume, and overall size before and after, so an edit that did more than you asked is visible at once. When the script defines several parts, each part is reported on its own line under the name the script gives it, with a part the script no longer produces marked as removed and one it did not produce before as new.
 
 While a turn is running, the pane shows which step the AI is on, how long it has been at it, and a Cancel button. The context figure above the messages shows how much of the configured context window the next request would occupy: the conversation, the reference images, and everything else a request carries (the AI's instructions, its tools, the current script, the examples chosen for the request, and what you have typed). Hover it for the breakdown. It turns amber with a warning when the script, instructions and images alone nearly fill the window, because condensing the conversation cannot help then; raise the context window in Settings or shorten the script.
+
+That figure is CADmark's own estimate. Under it, once a turn has had a reply, is what the provider actually counted for the last request: the tokens it read, how many of those came from its cache, the tokens the model wrote, and how many of those were spent reasoning. These are the provider's reported figures; missing cache or reasoning details read "not reported". An empty visible reply does not by itself show what consumed the output limit: reasoning and an unfinished tool call are both possible. The request record holds the events and usage needed to investigate.
+
+CADmark keeps the model's conversation in order across turns and project reopening, including its renders and encrypted reasoning state. New context is added after the saved history, so earlier work remains available to the model and eligible for prompt-cache reuse. Cache hits still depend on the provider's settings and retention. The thinking line in chat is the display of that activity; it is not sent back as another reply.
+
+Starting a new conversation or condensing a long one begins a fresh sequence. Changing the endpoint, model or image capability rebuilds the model's history from the chat, keeping opaque reasoning from one backend out of another. If you interrupt a tool call, its saved result tells the model that the call did not return a result.
+
+Every request the AI is sent, and everything it streams back, is written to the project folder under `.cadmark/requests/`, one file per call, as it happens. When a turn seems stuck, the newest file there shows what was sent and what has arrived so far; when it ends, the last line says how and what it cost. The newest sixty files are kept. Your credential is never written there.
 
 Type with Enter to send, Shift+Enter for a line break.
 
@@ -92,11 +102,23 @@ Comments stay as pending cards you can edit or remove before sending. They are s
 
 When a selection could have come from more than one source line, the overlay lists the candidates — ranked by likelihood when possible, and plainly unordered when it cannot tell. Hovering a candidate highlights its line in the code panel and the geometry that line accounts for. Choosing one sends that line alone to the AI; leaving the choice open sends them all.
 
-## Parameters panel
+## Left panel: parameters and parts
 
-The panel beside the viewport lists every module-level numeric name in the current script. Names bound to a literal have a drag-or-type field; names derived from other parameters show their expression.
+The panel beside the viewport has two tabs, Parameters and Parts, with the script's file name at the right of the strip. The Parts tab shows how many parts the script defines.
+
+### Parameters
+
+Lists every module-level numeric name in the current script. Names bound to a literal have a drag-or-type field; names derived from other parameters show their expression.
 
 Changing a value rewrites that one number in the script, rebuilds the model, and records a design step — no AI turn needed.
+
+### Parts
+
+Lists every completed part the script produced, in the order the script binds them: a colour swatch matching the part in the viewport, the part's name, and a tick box for whether it is drawn. The part the current selection belongs to is highlighted. Hovering a name shows its measurements; clicking it selects the whole part. A part that is not a closed solid carries a warning mark.
+
+Unticking a part hides it: it is neither drawn nor clickable, and nothing behind it is hidden by it any more. A hidden part stays hidden by name through rebuilds, so a part you have set aside stays out of the way while the AI works on the others; opening another script or project shows everything again. Hiding the part that holds the current selection puts the selection down.
+
+Parts are coloured from a fixed palette by their position in the script: the first part keeps the grey a single-part model has always had, and later parts take distinct muted hues.
 
 ## Code panel
 
@@ -187,5 +209,6 @@ Pictures that define a part, such as a dimensioned drawing or a photo of the ori
 | `F5` | Rebuild |
 | `F` | Fit view |
 | `P` | Toggle projection |
+| `Alt`+click | Select the whole part under the cursor |
 
 Shortcuts that change model state (undo, redo, rebuild, save) are held while the AI is working or a dialog is open.

@@ -45,7 +45,7 @@ Source: `crates/cadmark-renderer/src/camera.rs:1–11`, `crates/cadmark-ui/src/s
 
 ## Selection
 
-Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. "Pick part" in the toolbar selects a whole part with the next click.
+Clicking geometry selects it: faces, edges, vertices. Edges and vertex markers have smooth, fine outlines and wider invisible hit targets. Both visible and picking sizes remain constant in screen pixels at any zoom. Every part of a multi-part model is pickable: a picking ID carries the element within its part in the low 20 bits and the part ordinal above (`crates/cadmark-renderer/src/picking.rs`, `Pick`), so one readback names both, and a click on a part other than the active one first makes it active (`Project::select_model_part`, swapping in its ledger, lineage and descriptors) before the element is resolved. A whole part is selected with Alt+click in the viewport (`PendingPick::whole_part` routes the click to the part-picking pass) or from the Parts tab. Each part is shaded from `PART_PALETTE` by ordinal.
 
 Sketch-only designs display curves, corners and filled regions face-on to the sketch plane in orthographic view, with any existing solid ghosted behind them. Each element carries the kernel's exact measurement (`SketchCurve::{curve_type, length, radius}`, `SketchRegion::area`), which the status bar reads through `SketchProfile::measurement` and the AI receives through `SketchProfile::identification`. The sketch lineage ledger of a sketch result is keyed by the same region, curve and corner IDs the profile draws under (`SketchLineageLedger::lookup_element`), built by `finalise_sketch` from the placed shape the profile was extracted from; build123d's 2D `chamfer` and `offset` report per-edge maker history and keep each curve's drawing line, while `fillet`, `make_face` and `make_hull` rebuild the outline and are recorded as the barrier the route could not cross. The three kinds are pick targets in the colour-ID pass, drawn after the solid passes with depth ignored (as the visible profile is): regions through the face vertex stage, curves as edge-width quads, corners as vertex-marker discs (`render_sketch_picking` in `crates/cadmark-renderer/src/viewport.rs`, `sketch_*_pick_vertices` in `pipeline.rs`). Their IDs occupy the sketch ranges of `picking.rs` and decode to `PickedElement::Sketch`. The filter maps Faces/Edges/Vertices to regions/curves/corners (`SelectionFilter::allows_pick`). The ghosted solid behind a sketch is excluded from the picking pass, since its ledger belongs to an earlier script. The visible sketch shader tints the selected and hovered element with the same colours the mesh pass uses.
 
@@ -95,18 +95,22 @@ Conversation with the AI. Message types, distinguished by position and colour:
 
 - User messages (right-leaning card)
 - Spatial comments (accent-tinted, with chips naming each anchor's element and source line)
-- AI replies (plain card, streamed as the turn progresses). A reply of several message items shows them separated by a blank line; text a provider sends only in a completed item, not as deltas, still appears
-- Tool calls. While the turn runs, each call is its own collapsed line ("running the script…" until its result arrives), expandable to its input and result. Once the turn ends, each run of consecutive calls folds into one collapsed line, "N tool calls: ran the script ×2, looked up docs", which opens to the per-call lines; a call the turn never finished reads "did not finish". The AI speaking, or a CADmark notice, starts a new run
+- AI replies (plain card, streamed as the turn progresses). The system prompt asks the model to say what it is about to do before each tool call or run of related calls, and what a result changed when it matters, so a turn carries a short reply before most tool runs. A reply of several message items shows them separated by a blank line; text a provider sends only in a completed item, not as deltas, still appears
+- Tool calls. While the turn runs, each call is its own collapsed line ("running the script…" until its result arrives), expandable to its input and result; a call the turn never finished reads "did not finish"
+- Thinking. The model's reasoning before each reply is one record: "thinking…" while it streams, "thought for 2m 05s" once the model speaks, calls a tool, or the turn ends; a record with no end after the turn reads "did not finish". Its text is whatever reasoning the provider shares (`response.reasoning_summary_text.delta` / `response.reasoning_text.delta` on the stream; a gateway relaying Claude sends empty deltas), shown under the line when there is any. Every reasoning delta, empty or not, counts as a turn event for the phase line's quiet time. The display record is not replayed as assistant text. Provider reasoning items, including encrypted continuation data, are retained separately in the model session and included in its context estimate
+- Once the turn ends, each run of consecutive steps — tool calls and thinking — folds into one collapsed line, "N tool calls: ran the script ×2, looked up docs · thought for 1m 20s", which opens to the per-step lines; a run of thinking alone stays as its own lines. The AI speaking, or a CADmark notice, starts a new run
 - Notices from CADmark (quiet, or red on failure; not shown to the AI)
 - Design changes made outside the chat (quiet; sent to the AI as a "Note from CADmark" user item in history order): a parameter set in the panel, a design step undone, redone, or jumped to
 
 While a turn runs: a phase line showing the current step, elapsed time, time since last event, and a Cancel button.
 
-Text the AI wrote stays in the chat when the turn fails or is cancelled, above the notice saying how it ended; only a reply with no text is removed. A reply the provider cuts off at its output-token limit (`response.incomplete` with reason `max_output_tokens`) is kept: its fully written tool calls run, a call cut off mid-arguments is dropped, a notice says the reply was cut off, and the AI is asked to continue. A cut-off reply with no text and no complete tool call fails the turn, naming the output limit. Any other incomplete reason fails the turn naming that reason. An error event inside an accepted stream is reported by cause (usage limit, overloaded, credential, unknown model) as a refused request would be.
+Text the AI wrote stays in the chat when the turn fails or is cancelled, above the notice saying how it ended; only a reply with no text is removed. A reply the provider cuts off at its output-token limit (`response.incomplete` with reason `max_output_tokens`) is kept: its fully written tool calls run, a call cut off mid-arguments is dropped, a notice says the reply was cut off, and the AI is asked to continue. A cut-off reply can also continue from a complete reasoning item with non-empty encrypted continuation data. With no text, complete tool call or resumable reasoning, it fails the turn naming the output limit. Any other incomplete reason fails the turn naming that reason. An error event inside an accepted stream is reported by cause (usage limit, overloaded, credential, unknown model) as a refused request would be.
 
 Input: multi-line text field. Enter sends, Shift+Enter breaks the line.
 
-Context occupancy shown in the chat against the configured context-window setting. The figure is the estimated weight of the next request as it would be assembled now (`RequestAssembly` in `crates/cadmark-app/src/turn.rs`): the conversation, the reserved reference-image budget, and the request's own overhead — system instructions with any active skill, tool definitions, the `<current_script>` block, the selected examples, and the draft chat text and pending comments. Hovering shows the breakdown. Condensation triggers at three quarters of the window when the conversation is at least a tenth of it; when the request alone is at three quarters the figure turns amber with a warning, since condensing cannot help.
+Context occupancy shown in the chat against the configured context-window setting. The figure is the estimated weight of the next request as it would be assembled now (`RequestAssembly` in `crates/cadmark-app/src/turn.rs`): the conversation, the reserved reference-image budget, and the request's own overhead — system instructions, turn-scoped skill instructions, tool definitions, the `<current_script>` block, the selected examples, and the draft chat text and pending comments. Hovering shows the breakdown. Condensation triggers at three quarters of the window when the conversation is at least a tenth of it; when the request alone is at three quarters the figure turns amber with a warning, since condensing cannot help.
+
+Beside the estimate, once a turn's request has completed, the provider's own counts for the last request of a turn: "Last request: N read (M cached) · O written (R reasoning)", read from the `usage` block of `response.completed` or `response.incomplete` (`input_tokens`, `input_tokens_details.cached_tokens`, `output_tokens`, `output_tokens_details.reasoning_tokens`; `crates/cadmark-bridge/src/openai_compatible.rs`, `read_usage`) and held on the project (`Project::last_usage`). Absent until a provider sends one. Missing cache or reasoning details are shown as "not reported", not zero. Output tokens include reasoning, but an empty visible reply does not establish how the limit was spent: an unfinished tool call can also consume it. Use the recorded events and reported usage to distinguish them.
 
 The AI's tools (`crates/cadmark-bridge/src/tools.rs`, dispatched in `TurnRunner::run_tool` in `crates/cadmark-app/src/turn.rs`):
 
@@ -120,6 +124,12 @@ The AI's tools (`crates/cadmark-bridge/src/tools.rs`, dispatched in `TurnRunner:
 | `render_view`, `reference_images`, `keep_reference` | Image tools, offered only to a model that reads images. |
 
 A turn keeps only its last successful `run_script`: edits with no successful run after them are discarded and the turn is reported as failed with the script restored. The kernel worker serves snippets through `WorkerRequest::RunSnippet` (`crates/cadmark-kernel/src/protocol.rs`, `execution::run_snippet`), and captures a script's stdout into `ExecutedModel::printed`, cut at `PRINTED_OUTPUT_LIMIT`.
+
+The model session preserves request items and provider output in order, including renders, reasoning items with their encrypted continuation data, assistant message metadata and the original tool-argument strings (`ModelSession` in `crates/cadmark-core/src/model_session.rs`). A complete response's output items precede its tool results. Calls interrupted before a result is available receive an interruption result before the session is saved. The chat's thinking record is a separate display record.
+
+The next turn replays this sequence, including after reopening the project, then appends later chat messages, the current script, selected examples, turn-scoped skill instructions and the new input (`Conversation::replay`, `record_session_for`; `TurnEvent::ModelContext`). Activating a skill leaves the system instructions unchanged. This preserves the input prefix for cache reuse; actual cache hits depend on provider settings, routing and retention. New conversations and condensation start a fresh sequence. Changing the endpoint, model or image capability reconstructs history from the chat instead of replaying opaque output from the previous backend. Conversations saved without a model session also reconstruct history from chat.
+
+Every request is recorded under `.cadmark/requests/` in the project folder as `<UTC timestamp>-<purpose>.jsonl`, purpose `turn`, `docs`, `condense`, or `probe` (`crates/cadmark-bridge/src/request_log.rs`; `AiServices::recording_to`, applied in `CadmarkApp` at project open). Lines, each one JSON object, flushed as written so a running call can be read: a `request` line with the body as sent (each image's data URL replaced by its type and size), one `event` line per streamed event with `at_ms` from the send, a `rejected` line with `http_status` and `body` when the provider refuses the request, and an `outcome` line with `events`, `outcome` (`completed`, `incomplete: max_output_tokens`, or `error: …`) and `usage` (null when the provider sent none). The newest sixty files are kept; the credential is never written. A record that cannot be written is logged and the request proceeds.
 
 Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation (the executed text is recorded on the tool call as `executed_source`, since a run after edits carries no `code`), differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
 
@@ -142,13 +152,25 @@ For ambiguous anchors (geometry traceable to multiple source lines), the overlay
 
 Source: `crates/cadmark-ui/src/overlay.rs`, `crates/cadmark-ui/src/chat.rs:60–73`.
 
-## Parameters panel
+## Left panel: parameters and parts
+
+Two tabs behind one strip (`crates/cadmark-ui/src/side_panel.rs`), chosen by `CadmarkApp::side_panel_tab`; the strip also shows the script's file name and the part count.
+
+### Parameters
 
 Lists every module-level numeric name in the open part's script. Names bound to a literal show a drag/type field; names derived from other parameters show their expression and are read-only.
 
 Editing a value rewrites that one number in the script, rebuilds the model, and records a design step. No AI turn is involved.
 
 Source: `crates/cadmark-ui/src/parameters.rs`, `crates/cadmark-app/src/script_parameters.rs:1–53`.
+
+### Parts
+
+One row per `LoadedPart` in binding order: a swatch in the part's palette colour, the name, a visibility tick box, and a warning glyph when the part is not export-ready. The active part's row is raised. Clicking a name selects the whole part (`PartsAction::Select`); the tick box hides or shows it (`PartsAction::SetVisible`).
+
+A hidden part's `GpuMesh::visible` is false, so every renderer pass skips it: it is not shaded, not in the picking texture, and not in the depth prepass. The set of hidden parts is kept on the project by script binding name (`Project::hidden_parts`) and reapplied to each freshly executed model by name, since part ordinals are not stable across executions; it is emptied when another script is opened (`Project::switch_part`), and a new project starts with none. Hiding the active part clears the selection.
+
+Source: `crates/cadmark-ui/src/parts.rs`, `crates/cadmark-app/src/app.rs` (`show_side_panel`, `set_part_visible`, `hidden_part_ids`).
 
 ## Code panel
 
@@ -255,6 +277,7 @@ Source: `crates/cadmark-app/src/reference_images.rs` (`StagedImage`, `store_atta
 | `F5` | Rebuild (re-execute script) |
 | `F` | Fit view |
 | `P` | Toggle perspective/orthographic |
+| `Alt`+click | Select the whole part under the cursor |
 
 All shortcuts are inactive while a text field has focus, except `Ctrl+E` and `Ctrl+,`. Undo, redo, open, save, and rebuild are also inactive while the AI is working or a dialog is open.
 

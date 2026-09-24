@@ -75,8 +75,10 @@ pub enum OrchestratorResult {
         format: ExportFormat,
         result: Result<PathBuf, String>,
     },
-    /// The requested minimum distance completed.
+    /// The requested minimum distance completed, on the retained model it
+    /// was asked for.
     MinimumDistanceMeasured {
+        model: ModelFile,
         first: TopologyElement,
         second: TopologyElement,
         result: Result<MinimumDistance, String>,
@@ -258,6 +260,7 @@ impl Orchestrator {
             .minimum_distance(model, first.clone(), second.clone(), self.executor.limits)
             .map_err(|error| error.to_string());
         OrchestratorResult::MinimumDistanceMeasured {
+            model: model.clone(),
             first,
             second,
             result,

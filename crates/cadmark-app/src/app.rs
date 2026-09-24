@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
 
+use cadmark_bridge::backend::ModelItem;
 use cadmark_bridge::config::AiConfiguration;
 use cadmark_bridge::grounding::GroundedComment;
 use cadmark_core::export::ExportFormat;
@@ -21,6 +22,7 @@ use cadmark_core::message::{
 };
 use cadmark_core::pending_comment::{PendingAnchor, PendingComment, PendingComments};
 use cadmark_renderer::camera::{Bounds3, Camera, Projection};
+use cadmark_renderer::picking::{Pick, encode_pick};
 use cadmark_renderer::pipeline::{Renderer, ViewportMarker};
 use cadmark_renderer::section::{self, Axis};
 use cadmark_ui::chat::{ChatAction, ChatActivity, ChatPane, TurnStatus};
@@ -28,7 +30,9 @@ use cadmark_ui::code_panel::{CodePanel, CodePanelAction, CodeView};
 use cadmark_ui::overlay::{OverlayAction, OverlayState};
 use cadmark_ui::parameters::{ParameterRow, ParametersAction, ParametersPanel, ParametersView};
 use cadmark_ui::part_name_dialog::{PartNameAction, PartNameDialog};
+use cadmark_ui::parts::{PartRow, PartsAction, PartsView};
 use cadmark_ui::settings_dialog::{SettingsAction, SettingsDialog, SettingsForm};
+use cadmark_ui::side_panel::{SidePanelTab, SidePanelView};
 use cadmark_ui::start_view::{StartAction, StartViewState, show_start_view};
 use cadmark_ui::status::{Status, StatusView};
 use cadmark_ui::toolbar::{self, PartOption, ToolbarAction, ToolbarState};
@@ -98,6 +102,19 @@ fn remove_if_blank(conversation: &mut Conversation, response: MessageId) {
     }
 }
 
+/// End the turn's open thinking record, if any: the model has gone on to
+/// speak, call a tool, or stop.
+fn close_thinking(conversation: &mut Conversation, turn: &mut TurnRecord) {
+    if let Some(id) = turn.thinking.take()
+        && let Some(Message {
+            kind: MessageKind::Thinking { finished },
+            ..
+        }) = conversation.message_mut(id)
+    {
+        *finished = Some(chrono::Utc::now());
+    }
+}
+
 /// What a finished turn reports about the geometry it produced: each part
 /// compared with the part of the same name before it, or a sketch described
 /// in its own terms, because a profile has nothing to compare a volume
@@ -140,11 +157,29 @@ fn turn_chat_message(response_message: &str, geometry: TurnGeometry<'_>) -> Stri
 }
 
 /// The pair C21 measures: exactly the two anchors currently held for the
-/// comment the user is composing. Additional anchors remain comments only.
-fn measurement_pair(anchors: &[GeometryContext]) -> Option<(TopologyElement, TopologyElement)> {
-    (anchors.len() == 2)
-        .then(|| Some((anchors[0].solid()?.clone(), anchors[1].solid()?.clone())))
+/// comment the user is composing, with the part both are numbered within.
+/// Additional anchors remain comments only. The two must be on the same
+/// part: the measurement names elements within one part's numbering, and
+/// elements of two parts would be read against the wrong one.
+fn measurement_pair(anchors: &[GeometryContext]) -> Option<MeasurementPair> {
+    (anchors.len() == 2 && anchors[0].part == anchors[1].part)
+        .then(|| {
+            Some(MeasurementPair {
+                part: anchors[0].part,
+                first: anchors[0].solid()?.clone(),
+                second: anchors[1].solid()?.clone(),
+            })
+        })
         .flatten()
+}
+
+/// Two picked elements and the part whose retained model they are
+/// measured on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MeasurementPair {
+    part: Option<PartId>,
+    first: TopologyElement,
+    second: TopologyElement,
 }
 
 /// The readout tracks the element currently highlighted by the application;
@@ -204,15 +239,22 @@ struct TurnRecord {
     /// The tool-call group the next call joins, until the AI speaks or
     /// CADmark posts a notice.
     tools: Option<MessageId>,
-    /// Every tool-call group the turn has made. The chat shows these call
-    /// by call while the turn runs, and folds each into one line after.
-    tool_groups: Vec<MessageId>,
+    /// Every step the turn has made: its tool-call groups and thinking
+    /// records. The chat shows these one by one while the turn runs, and
+    /// folds each run of them into one line after.
+    steps: Vec<MessageId>,
+    /// The thinking record the model's reasoning is streaming into, until
+    /// it goes on to speak or call a tool.
+    thinking: Option<MessageId>,
     /// The spatial comments the turn is acting on.
     comment_ids: Vec<MessageId>,
     /// Every part's measurements before the turn, for the change report.
     parts_before: Vec<PartMeasurements>,
     /// Messages before the active turn, which a condensation event may replace.
     history_len: usize,
+    /// The item sequence the turn ended with, recorded on the
+    /// conversation once its messages are settled.
+    model_context: Option<(Vec<ModelItem>, Option<String>)>,
 }
 
 /// Top-level application state.
@@ -237,6 +279,8 @@ pub struct CadmarkApp {
     code_panel: CodePanel,
     code_visible: bool,
     parameters_panel: ParametersPanel,
+    /// Which of the left panel's tabs is showing.
+    side_panel_tab: SidePanelTab,
     /// The open part's module-level numeric names, re-read whenever the
     /// executed script changes.
     parameters: Vec<Parameter>,
@@ -258,13 +302,9 @@ pub struct CadmarkApp {
     pending_first_message: Option<String>,
     /// Bounds to frame once the viewport aspect ratio is known.
     pending_camera_bounds: Option<Bounds3>,
-    /// Local click coordinates (relative to viewport rect) for the
-    /// pending pick request. Consumed in the same frame to build the
-    /// paint callback.
-    pending_pick: Option<(f32, f32)>,
-    /// The next viewport click selects a whole completed part rather than
-    /// the face, edge or vertex under the cursor.
-    part_selection_mode: bool,
+    /// The viewport click awaiting its pick request, consumed in the same
+    /// frame to build the paint callback.
+    pending_pick: Option<PendingPick>,
     /// Absolute screen position of the in-flight pick, preserved
     /// across frames so the overlay can be positioned when the readback
     /// arrives.
@@ -328,6 +368,7 @@ impl CadmarkApp {
             code_panel: CodePanel::default(),
             code_visible: false,
             parameters_panel: ParametersPanel::default(),
+            side_panel_tab: SidePanelTab::default(),
             parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
@@ -339,7 +380,6 @@ impl CadmarkApp {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
-            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
@@ -430,10 +470,12 @@ impl CadmarkApp {
         if let Some(previous) = self.project.as_mut() {
             previous.shut_down();
         }
+        let recording = request_log_dir(&project_dir);
         let project = Project::open(
             project_dir,
             None,
-            ai_services(&self.settings, self.settings_store.as_ref()),
+            ai_services(&self.settings, self.settings_store.as_ref())
+                .map(|services| services.recording_to(recording)),
             self.settings.limits,
             render_source(&self.scene, self.wgpu_render_state.as_ref()),
         );
@@ -654,10 +696,12 @@ impl CadmarkApp {
                 self.turn = Some(TurnRecord {
                     response,
                     tools: None,
-                    tool_groups: Vec::new(),
+                    steps: Vec::new(),
+                    thinking: None,
                     comment_ids,
                     parts_before,
                     history_len,
+                    model_context: None,
                 });
                 true
             }
@@ -685,10 +729,41 @@ impl CadmarkApp {
             return;
         };
         let conversation = &mut project.conversation;
+        // Reasoning precedes whatever the model does next, so any other
+        // event ends the open thinking record.
+        if !matches!(event, TurnEvent::Thinking(_)) {
+            close_thinking(conversation, turn);
+        }
         match event {
+            TurnEvent::Thinking(text) => {
+                let id = match turn.thinking {
+                    Some(id) => id,
+                    None => {
+                        // Reasoning sits between what came before it and
+                        // what it leads to, so the reply and tool group
+                        // above it close here.
+                        remove_if_blank(conversation, turn.response);
+                        let id = conversation.push(Message::thinking());
+                        turn.response = conversation.push(Message::ai_response(""));
+                        turn.tools = None;
+                        turn.steps.push(id);
+                        turn.thinking = Some(id);
+                        id
+                    }
+                };
+                conversation.append_text(id, &text);
+                project.note_turn_event(None);
+            }
             TurnEvent::ConversationCondensed { summary } => {
                 conversation.condense_before(turn.history_len, summary);
                 turn.history_len = 1;
+            }
+            TurnEvent::Usage(usage) => {
+                project.last_usage = Some(usage);
+                project.note_turn_event(None);
+            }
+            TurnEvent::ModelContext { items, identity } => {
+                turn.model_context = Some((items, identity))
             }
             TurnEvent::Phase(phase) => {
                 project.note_turn_event(Some(phase));
@@ -715,7 +790,7 @@ impl CadmarkApp {
                 let (tools, response) =
                     record_tool_start(conversation, turn.tools, turn.response, activity);
                 if turn.tools != Some(tools) {
-                    turn.tool_groups.push(tools);
+                    turn.steps.push(tools);
                 }
                 turn.tools = Some(tools);
                 turn.response = response;
@@ -761,8 +836,11 @@ impl CadmarkApp {
             return;
         };
         project.busy = None;
-        let Some(turn) = self.turn.take() else { return };
+        let Some(mut turn) = self.turn.take() else {
+            return;
+        };
         let conversation = &mut project.conversation;
+        close_thinking(conversation, &mut turn);
         // What the outcome asks of the rest of the application, once the
         // conversation has been brought up to date.
         let mut show: Option<(Box<cadmark_kernel::protocol::ExecutedModel>, String)> = None;
@@ -823,6 +901,12 @@ impl CadmarkApp {
                 conversation.push(Message::notice("Turn cancelled; the model is as it was."));
                 rebuild = true;
             }
+        }
+        // The messages are settled; the session reaches the last of them.
+        if let Some((items, identity)) = turn.model_context.take()
+            && let Some(project) = self.project.as_mut()
+        {
+            project.conversation.record_session_for(items, identity);
         }
         if let Some((model, source)) = show {
             self.show_model(*model, source);
@@ -935,13 +1019,19 @@ impl CadmarkApp {
                     });
                 }
                 OrchestratorResult::MinimumDistanceMeasured {
+                    model,
                     first,
                     second,
                     result,
                 } => {
                     project.measurements_in_flight =
                         project.measurements_in_flight.saturating_sub(1);
-                    if measurement_pair(self.overlay.anchors()) == Some((first, second)) {
+                    // A result answers the anchors still held, measured on
+                    // the model those anchors' part retains: the same
+                    // element numbers on another part are a different pair.
+                    let current = measurement_pair(self.overlay.anchors())
+                        .filter(|pair| project.measurement_model(pair.part).as_ref() == Ok(&model));
+                    if current.is_some_and(|pair| pair.first == first && pair.second == second) {
                         self.minimum_distance = match result {
                             Ok(measurement) => Some(measurement),
                             Err(error) => {
@@ -1023,6 +1113,10 @@ impl CadmarkApp {
         // Picking IDs belong to the model they were assigned for.
         self.clear_selection();
         let sketch = model.sketch().cloned();
+        let hidden_names = self
+            .project()
+            .map(|project| project.hidden_parts.clone())
+            .unwrap_or_default();
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
@@ -1031,8 +1125,11 @@ impl CadmarkApp {
                     // the GPU so it can be ghosted behind the profile.
                     Some(sketch) => res.set_sketch(&rs.device, Some(sketch)),
                     None => {
-                        let parts = model.solid().map(|solid| solid.parts.as_slice());
-                        res.set_parts(&rs.device, parts.unwrap_or(&[]));
+                        let parts = model
+                            .solid()
+                            .map_or(&[][..], |solid| solid.parts.as_slice());
+                        let hidden = hidden_part_ids(parts, &hidden_names);
+                        res.set_parts(&rs.device, parts, &hidden);
                         res.set_sketch(&rs.device, None);
                     }
                 }
@@ -1075,8 +1172,6 @@ impl CadmarkApp {
         self.minimum_distance = None;
         self.renderer.selected_id = 0;
         self.renderer.hover_id = 0;
-        self.renderer.selected_part_id = 0;
-        self.renderer.hover_part_id = 0;
         self.highlighted_line = None;
         self.candidate_line = None;
         self.renderer.highlight_ids.clear();
@@ -1101,7 +1196,7 @@ impl CadmarkApp {
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
-                res.set_parts(&rs.device, &[]);
+                res.set_parts(&rs.device, &[], &[]);
                 res.set_sketch(&rs.device, None);
                 res.clear_picks();
             }
@@ -1251,9 +1346,15 @@ impl CadmarkApp {
     fn apply_candidate_hover(&mut self, ctx: &egui::Context) {
         let hovered = self.overlay.hovered_candidate().cloned();
         let (line, footprint) = match (&hovered, self.project.as_ref()) {
+            // The candidate belongs to its anchor's part, which need not be
+            // the part clicked last, so it is lit from that part's ledger.
             (Some(candidate), Some(project)) => (
-                Some(candidate.source.line),
-                candidate_highlight_ids(&project.ledger, candidate.operation_id),
+                Some(candidate.entry.source.line),
+                candidate_highlight_ids(
+                    project.ledger_of(candidate.part),
+                    candidate.entry.operation_id,
+                    candidate.part,
+                ),
             ),
             // A hovered sketch-route row names a drawing line the ledger
             // does not claim geometry for, so it moves the code panel and
@@ -1267,25 +1368,31 @@ impl CadmarkApp {
         }
     }
 
-    /// Picking ID of the part whose local face and edge numbering the
-    /// current selection belongs to, so a tint applies within that part only.
-    fn active_part_picking_id(&self) -> u32 {
-        self.project()
-            .and_then(|project| project.active_model_part_id)
-            .map(|id| {
-                cadmark_renderer::picking::encode_picking_id(&TopologyElement::Part(PartId(id)))
-            })
-            .unwrap_or(0)
+    /// Make one part the one later picks resolve against: its own ledger,
+    /// lineage and descriptors. Nothing to do when it already is.
+    fn activate_part(&mut self, id: PartId) -> Result<(), String> {
+        let Some(project) = self.project_mut() else {
+            return Err("no project is open".to_string());
+        };
+        if project.active_model_part_id == Some(id.0) {
+            return Ok(());
+        }
+        project
+            .select_model_part(id.0)
+            .map(|_| ())
+            .ok_or_else(|| "Selected part is no longer available".to_string())
     }
 
-    /// Take a whole part as the selection, and make its own topology tables
-    /// the domain later face and edge picks resolve against.
+    /// Take a whole part as the selection.
     fn select_whole_part(&mut self, id: PartId) {
-        let Some(project) = self.project_mut() else {
+        if let Err(error) = self.activate_part(id) {
+            self.status = Some(Status::error(error));
             return;
-        };
-        let Some(part) = project.select_model_part(id.0) else {
-            self.status = Some(Status::error("Selected part is no longer available"));
+        }
+        let Some(part) = self
+            .project()
+            .and_then(|project| project.active_model_part())
+        else {
             return;
         };
         let description = format!(
@@ -1293,30 +1400,39 @@ impl CadmarkApp {
             part.name,
             part.summary.describe()
         );
-        if let Some(rs) = &self.wgpu_render_state {
-            let mut renderer = rs.renderer.write();
-            if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
-                res.set_active_part(id.0);
-            }
-        }
         self.clear_selection();
         self.selection = SelectionState::Selected(PickedElement::Solid(TopologyElement::Part(id)));
-        self.renderer.selected_id =
-            cadmark_renderer::picking::encode_picking_id(&TopologyElement::Part(id));
+        self.renderer.selected_id = encode_pick(&Pick::part(id));
         self.status = Some(Status::info(description));
     }
 
     /// Handle a completed pick — resolve to selection and open the spatial
-    /// comment overlay, or add the element to an open comment.
-    fn handle_pick_result(&mut self, element: PickedElement, screen_pos: (f32, f32)) {
-        if let PickedElement::Solid(TopologyElement::Part(id)) = element {
-            self.select_whole_part(id);
+    /// comment overlay, or add the element to an open comment. A pick on a
+    /// part other than the active one makes that part active first, so
+    /// its element resolves against its own ledger.
+    fn handle_pick_result(&mut self, pick: Pick, screen_pos: (f32, f32)) {
+        let (part, element) = match &pick {
+            Pick::Solid {
+                part,
+                element: TopologyElement::Part(_),
+            } => {
+                self.select_whole_part(*part);
+                return;
+            }
+            Pick::Solid { part, element } => (Some(*part), PickedElement::Solid(element.clone())),
+            Pick::Sketch(element) => (None, PickedElement::Sketch(*element)),
+        };
+        if let Some(part) = part
+            && let Err(error) = self.activate_part(part)
+        {
+            self.clear_selection();
+            self.status = Some(Status::error(format!("Selection failed: {error}")));
             return;
         }
         let Some(project) = self.project.as_ref() else {
             return;
         };
-        let context = match &element {
+        let mut context = match &element {
             PickedElement::Solid(solid) => match cadmark_core::context::resolve_context(
                 solid,
                 &project.ledger,
@@ -1353,15 +1469,14 @@ impl CadmarkApp {
                 )
             }
         };
+        context.part = part;
         log::info!(
             "Selected {}: {}",
             element.display_label(),
             context.provenance.describe()
         );
         self.selection = SelectionState::Selected(element.clone());
-        self.renderer.selected_id = cadmark_renderer::picking::encode_pick(&element);
-        self.renderer.selected_part_id =
-            element.solid().map_or(0, |_| self.active_part_picking_id());
+        self.renderer.selected_id = encode_pick(&pick);
         self.highlighted_line = context
             .provenance
             .resolved()
@@ -1377,9 +1492,9 @@ impl CadmarkApp {
             );
         }
         self.minimum_distance = None;
-        if let Some((first, second)) = measurement_pair(self.overlay.anchors())
+        if let Some(pair) = measurement_pair(self.overlay.anchors())
             && let Some(project) = self.project_mut()
-            && let Err(error) = project.request_minimum_distance(first, second)
+            && let Err(error) = project.request_minimum_distance(pair.part, pair.first, pair.second)
         {
             self.status = Some(Status::error(format!("Measurement failed: {error}")));
         }
@@ -1401,7 +1516,6 @@ impl CadmarkApp {
         self.hover_readback_pending = hover_pending;
         if let Some(id) = hover {
             self.renderer.hover_id = id;
-            self.renderer.hover_part_id = self.active_part_picking_id();
         }
         match completed_pick_transition(completed, &mut self.pick_in_flight) {
             PickTransition::Waiting => {}
@@ -1411,9 +1525,7 @@ impl CadmarkApp {
                     self.clear_selection();
                 }
             }
-            PickTransition::Hit(element, screen_pos) => {
-                self.handle_pick_result(element, screen_pos)
-            }
+            PickTransition::Hit(pick, screen_pos) => self.handle_pick_result(pick, screen_pos),
             PickTransition::ReadbackFailed => {
                 self.status = Some(Status::error("Selection failed: GPU pick readback failed"));
             }
@@ -1425,6 +1537,7 @@ impl CadmarkApp {
     fn open_settings(&mut self) {
         let store = self.settings_store.as_ref();
         let ai = self.settings.ai.clone().unwrap_or(AiConfiguration {
+            reasoning_effort: None,
             base_url: String::new(),
             model: String::new(),
             accepts_images: false,
@@ -1435,6 +1548,7 @@ impl CadmarkApp {
             model: ai.model,
             accepts_images: ai.accepts_images,
             allow_insecure_http: ai.allow_insecure_http,
+            reasoning_effort: ai.reasoning_effort.unwrap_or_default(),
             credential: String::new(),
             has_stored_credential: store.is_some_and(SettingsStore::has_stored_credential),
             credential_from_environment: std::env::var_os(CREDENTIAL_ENV).is_some(),
@@ -1463,6 +1577,10 @@ impl CadmarkApp {
             model: form.model.trim().to_string(),
             accepts_images: form.accepts_images,
             allow_insecure_http: form.allow_insecure_http,
+            reasoning_effort: {
+                let effort = form.reasoning_effort.trim();
+                (!effort.is_empty()).then(|| effort.to_string())
+            },
         };
         let mut candidate = self.settings.clone();
         candidate.ai = (!ai.base_url.is_empty() || !ai.model.is_empty()).then_some(ai);
@@ -1696,10 +1814,6 @@ impl CadmarkApp {
                 }
             }
             ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
-            ToolbarAction::PickPart => {
-                self.part_selection_mode = true;
-                self.status = Some(Status::info("Click a part to select it"));
-            }
             ToolbarAction::Export(format) => self.export(format),
             ToolbarAction::ExportPart(id, format) => self.export_part(id, format),
             ToolbarAction::ExportAll(format) => {
@@ -1790,9 +1904,7 @@ impl CadmarkApp {
                     .iter()
                     .map(|part| {
                         (
-                            cadmark_renderer::picking::encode_picking_id(&TopologyElement::Part(
-                                PartId(part.id),
-                            )),
+                            part.id,
                             part.name.clone(),
                             export_decision(&part.validity) == ExportDecision::Ready,
                         )
@@ -1872,7 +1984,7 @@ impl CadmarkApp {
                     .usage(self.settings.context_window_tokens);
                 chat_action = self
                     .chat
-                    .show(ui, &waiting, usage, &mut self.pending_comments);
+                    .show(ui, &waiting, usage, None, &mut self.pending_comments);
             });
         if let ChatAction::Send(text) = chat_action {
             self.pending_first_message = Some(text);
@@ -1922,10 +2034,17 @@ impl CadmarkApp {
                     .and_then(|project| project.busy.as_ref())
                     .map(Busy::label);
                 let model = self.project().and_then(|project| project.model.as_ref());
+                // A selected element is numbered within its part, so it is
+                // measured from that part's descriptors.
+                let descriptors = self
+                    .project()
+                    .and_then(|project| project.active_model_part())
+                    .map(|part| &part.descriptors)
+                    .or(model.map(|model| &model.descriptors));
                 let measurement = measurement_readout(
                     &self.selection,
                     self.minimum_distance,
-                    model.map(|model| &model.descriptors),
+                    descriptors,
                     model.and_then(|model| model.sketch()),
                 );
                 cadmark_ui::status::show_status_bar(
@@ -1987,10 +2106,10 @@ impl CadmarkApp {
                         phase: phase.clone(),
                         started: *started,
                         last_event: *last_event,
-                        tool_groups: self
+                        steps: self
                             .turn
                             .as_ref()
-                            .map(|turn| turn.tool_groups.clone())
+                            .map(|turn| turn.steps.clone())
                             .unwrap_or_default(),
                     }),
                 };
@@ -2018,9 +2137,13 @@ impl CadmarkApp {
                     project.ai_accepts_images,
                 )
                 .usage(self.context_window_tokens());
-                action =
-                    self.chat
-                        .show(ui, &project.conversation, usage, &mut self.pending_comments);
+                action = self.chat.show(
+                    ui,
+                    &project.conversation,
+                    usage,
+                    project.last_usage,
+                    &mut self.pending_comments,
+                );
             });
         if new_conversation {
             self.start_new_conversation();
@@ -2113,7 +2236,9 @@ impl CadmarkApp {
         };
     }
 
-    fn show_parameters(&mut self, ctx: &egui::Context) {
+    /// The left panel: the script's parameters or its parts, behind a
+    /// tab strip.
+    fn show_side_panel(&mut self, ctx: &egui::Context) {
         let rows: Vec<ParameterRow<'_>> = self
             .parameters
             .iter()
@@ -2124,8 +2249,9 @@ impl CadmarkApp {
                 line: parameter.line,
             })
             .collect();
-        let mut action = ParametersAction::None;
-        egui::SidePanel::left("parameters_panel")
+        let mut parameters_action = ParametersAction::None;
+        let mut parts_action = PartsAction::None;
+        egui::SidePanel::left("side_panel")
             .resizable(true)
             .default_width(240.0)
             .width_range(180.0..=420.0)
@@ -2137,18 +2263,91 @@ impl CadmarkApp {
                 let Some(project) = self.project.as_ref() else {
                     return;
                 };
-                action = self.parameters_panel.show(
+                cadmark_ui::side_panel::show_tabs(
                     ui,
-                    ParametersView {
+                    &mut self.side_panel_tab,
+                    SidePanelView {
                         script_filename: project.part_file_name(),
-                        parameters: &rows,
-                        has_script: project.has_script,
-                        controls_enabled: project.busy.is_none(),
+                        part_count: project.model_parts.len(),
                     },
                 );
+                ui.add_space(6.0);
+                match self.side_panel_tab {
+                    SidePanelTab::Parameters => {
+                        parameters_action = self.parameters_panel.show(
+                            ui,
+                            ParametersView {
+                                parameters: &rows,
+                                has_script: project.has_script,
+                                controls_enabled: project.busy.is_none(),
+                            },
+                        );
+                    }
+                    SidePanelTab::Parts => {
+                        let summaries: Vec<String> = project
+                            .model_parts
+                            .iter()
+                            .map(|part| part.summary.describe())
+                            .collect();
+                        let parts: Vec<PartRow<'_>> = project
+                            .model_parts
+                            .iter()
+                            .zip(&summaries)
+                            .map(|(part, summary)| PartRow {
+                                id: part.id,
+                                name: &part.name,
+                                colour: part_swatch(PartId(part.id)),
+                                visible: !project.hidden_parts.contains(&part.name),
+                                printable: export_decision(&part.validity) == ExportDecision::Ready,
+                                summary,
+                            })
+                            .collect();
+                        parts_action = cadmark_ui::parts::show_parts(
+                            ui,
+                            PartsView {
+                                parts: &parts,
+                                active: project.active_model_part_id,
+                                has_script: project.has_script,
+                            },
+                        );
+                    }
+                }
             });
-        if let ParametersAction::Commit { name, value } = action {
+        if let ParametersAction::Commit { name, value } = parameters_action {
             self.apply_parameter_edit(&name, value);
+        }
+        match parts_action {
+            PartsAction::None => {}
+            PartsAction::Select(id) => self.select_whole_part(PartId(id)),
+            PartsAction::SetVisible(id, visible) => self.set_part_visible(id, visible),
+        }
+    }
+
+    /// Show or hide one part of the model on screen. The choice is kept by
+    /// the part's name, so it survives the rebuilds a turn makes.
+    fn set_part_visible(&mut self, id: u32, visible: bool) {
+        let Some(project) = self.project_mut() else {
+            return;
+        };
+        let Some(part) = project.model_parts.iter().find(|part| part.id == id) else {
+            return;
+        };
+        let name = part.name.clone();
+        let holds_selection = project.active_model_part_id == Some(id);
+        if visible {
+            project.hidden_parts.remove(&name);
+        } else {
+            project.hidden_parts.insert(name);
+        }
+        if let Some(rs) = &self.wgpu_render_state {
+            let mut renderer = rs.renderer.write();
+            if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {
+                res.set_part_visible(id, visible);
+            }
+        }
+        // A selection on a part that has just gone cannot be pointed at.
+        if !visible && holds_selection && !matches!(self.selection, SelectionState::None) {
+            self.clear_selection();
         }
     }
 
@@ -2290,12 +2489,16 @@ impl CadmarkApp {
                 self.renderer.camera.zoom(scroll * 0.01);
             }
 
-            // Left click for selection — request a pick readback.
+            // Left click for selection — request a pick readback. Alt asks
+            // for the whole part under the cursor instead of its element.
             if response.clicked()
                 && let Some(pos) = response.interact_pointer_pos()
             {
                 let local_pos = pos - rect.min;
-                self.pending_pick = Some((local_pos.x, local_pos.y));
+                self.pending_pick = Some(PendingPick {
+                    local: (local_pos.x, local_pos.y),
+                    whole_part: ui.input(|i| i.modifiers.alt),
+                });
                 self.pick_in_flight = Some((pos.x, pos.y));
             }
 
@@ -2333,14 +2536,7 @@ impl CadmarkApp {
                 .set_view(self.renderer.camera.clone(), viewport_size);
 
             let to_pixels = |local: egui::Vec2| ((local.x * ppp) as u32, (local.y * ppp) as u32);
-            let pick_request = self
-                .pending_pick
-                .take()
-                .map(|(x, y)| to_pixels(egui::vec2(x, y)));
-            let part_pick_request = self.part_selection_mode.then_some(pick_request).flatten();
-            if part_pick_request.is_some() {
-                self.part_selection_mode = false;
-            }
+            let (pick_request, part_pick_request) = pick_requests(self.pending_pick.take(), ppp);
             let hover_request = hover_local.map(to_pixels).filter(|&pixel| {
                 let probe = (pixel, self.renderer.camera.clone());
                 if self.last_hover_probe.as_ref() == Some(&probe) {
@@ -2487,13 +2683,79 @@ fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
         .flat_map(|comment| {
             comment.anchors.iter().filter_map(|anchor| match anchor {
                 PendingAnchor::Live(context) => Some(ViewportMarker {
-                    element_id: cadmark_renderer::picking::encode_pick(&context.element),
+                    element_id: encode_pick(&context_pick(context)?),
                     colour: comment.marker_colour(),
                 }),
                 PendingAnchor::Lost { .. } => None,
             })
         })
         .collect()
+}
+
+/// A viewport click awaiting its pick readback: where it landed, relative
+/// to the viewport, and whether it asked for the whole part (Alt held)
+/// rather than the face, edge or vertex under it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PendingPick {
+    local: (f32, f32),
+    whole_part: bool,
+}
+
+/// A viewport position in physical pixels, as the picking passes read it.
+type PickPixel = (u32, u32);
+
+/// Route a click to the picking pass it asked for, as viewport pixels:
+/// the topology pass for a plain click, the part pass for an Alt-click.
+fn pick_requests(
+    pending: Option<PendingPick>,
+    pixels_per_point: f32,
+) -> (Option<PickPixel>, Option<PickPixel>) {
+    let Some(pending) = pending else {
+        return (None, None);
+    };
+    let pixel = (
+        (pending.local.0 * pixels_per_point) as u32,
+        (pending.local.1 * pixels_per_point) as u32,
+    );
+    if pending.whole_part {
+        (None, Some(pixel))
+    } else {
+        (Some(pixel), None)
+    }
+}
+
+/// Which of a freshly executed model's parts start out hidden: the ones
+/// whose script binding the user hid earlier. Names are the identity a
+/// part keeps from one execution to the next; ordinals are not.
+fn hidden_part_ids(
+    parts: &[cadmark_kernel::protocol::ExecutedPart],
+    hidden: &std::collections::HashSet<String>,
+) -> Vec<u32> {
+    parts
+        .iter()
+        .filter(|part| hidden.contains(&part.name))
+        .map(|part| part.id)
+        .collect()
+}
+
+/// The pick a context's anchor draws as: its element within its part. A
+/// solid anchor that names no part cannot be placed on any one part of a
+/// multi-part model, so it draws nowhere rather than on the wrong part.
+fn context_pick(context: &GeometryContext) -> Option<Pick> {
+    match &context.element {
+        PickedElement::Solid(element) => Some(Pick::Solid {
+            part: context.part?,
+            element: element.clone(),
+        }),
+        PickedElement::Sketch(element) => Some(Pick::Sketch(*element)),
+    }
+}
+
+/// The colour the parts list shows for a part: the viewport's palette
+/// entry, display-encoded for egui.
+fn part_swatch(part: PartId) -> egui::Color32 {
+    let [r, g, b, _] = cadmark_renderer::pipeline::part_colour(part);
+    egui::Color32::from(egui::Rgba::from_rgb(r, g, b))
 }
 
 /// Stage a spatial comment without changing persisted conversation history.
@@ -2533,13 +2795,25 @@ fn section_axis_label(axis: Axis) -> toolbar::SectionAxis {
 /// The footprint is taken whole. Vertices are carried even though no pass
 /// draws them, so the highlight set says what the ledger says rather than
 /// what the renderer currently happens to consume.
+///
+/// The ledger is the active part's, so each ID is qualified by that part;
+/// with no part on screen there is nothing to light.
 fn candidate_highlight_ids(
     ledger: &cadmark_core::ledger::ProvenanceLedger,
     operation_id: u64,
+    part: Option<PartId>,
 ) -> Vec<u32> {
+    let Some(part) = part else {
+        return Vec::new();
+    };
     cadmark_core::candidates::candidate_footprint(ledger, operation_id)
         .iter()
-        .map(cadmark_renderer::picking::encode_picking_id)
+        .map(|element| {
+            encode_pick(&Pick::Solid {
+                part,
+                element: element.clone(),
+            })
+        })
         .collect()
 }
 
@@ -2572,6 +2846,11 @@ fn ai_services(
         .ok_or_else(|| "no AI provider is configured; open Settings to add one".to_string())?;
     let credential = store.and_then(SettingsStore::credential);
     cadmark_bridge::build_ai_services(ai, credential).map_err(|error| error.to_string())
+}
+
+/// Where a project's AI requests are recorded.
+fn request_log_dir(project_dir: &Path) -> PathBuf {
+    project_dir.join(".cadmark").join("requests")
 }
 
 impl eframe::App for CadmarkApp {
@@ -2624,7 +2903,7 @@ impl eframe::App for CadmarkApp {
         self.show_toolbar(ctx, frame);
         self.show_status_bar(ctx);
         self.show_chat(ctx, frame);
-        self.show_parameters(ctx);
+        self.show_side_panel(ctx);
         if self.code_visible {
             self.show_code_panel(ctx);
         }
@@ -2656,7 +2935,9 @@ impl eframe::App for CadmarkApp {
 
 #[cfg(test)]
 mod tests {
+    use cadmark_core::geometry::PartId;
     use cadmark_core::pending_comment::PendingComments;
+    use cadmark_renderer::picking::Pick;
 
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
@@ -2666,19 +2947,19 @@ mod tests {
     use cadmark_bridge::backend::{ModelItem, ModelRequest, TurnModel};
     use cadmark_core::geometry::{
         EdgeDescriptor, EdgeId, FaceId, GeometryContext, GeometryDescriptors, ModelSummary,
-        PartMeasurements, PickedElement, SelectionState, TopologyElement,
+        PartMeasurements, PickedElement, ScreenPosition, SelectionState, TopologyElement,
     };
     use cadmark_core::ledger::LedgerValue;
     use cadmark_core::limits::ExecutionLimits;
     use cadmark_core::message::{Conversation, Message, MessageKind, ToolActivity};
 
     use super::{
-        Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, ImagePicker, NoRender, OverlayState,
-        ParametersPanel, PartNameDialog, Project, Renderer, SceneHandle, SettingsDialog,
-        SettingsStore, TurnEvent, TurnGeometry, TurnOutcome, TurnRecord, UserSettings,
-        VersionDialog, ai_services, camera_change, candidate_highlight_ids, history_move_note,
-        measurement_pair, measurement_readout, pending_markers, record_tool_start,
-        turn_chat_message,
+        Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, ImagePicker, MeasurementPair,
+        NoRender, OverlayState, ParametersPanel, PartNameDialog, PendingPick, Project, Renderer,
+        SceneHandle, SettingsDialog, SettingsStore, TurnEvent, TurnGeometry, TurnOutcome,
+        TurnRecord, UserSettings, VersionDialog, ai_services, camera_change,
+        candidate_highlight_ids, encode_pick, hidden_part_ids, history_move_note, measurement_pair,
+        measurement_readout, pending_markers, pick_requests, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -2774,6 +3055,7 @@ mod tests {
     fn settings_for(base_url: String, model: &str) -> UserSettings {
         UserSettings {
             ai: Some(cadmark_bridge::config::AiConfiguration {
+                reasoning_effort: None,
                 base_url,
                 model: model.to_string(),
                 accepts_images: false,
@@ -2793,6 +3075,7 @@ mod tests {
             .model
             .respond(
                 ModelRequest {
+                    purpose: cadmark_bridge::backend::RequestPurpose::Turn,
                     instructions: "test instructions".to_string(),
                     items: vec![ModelItem::User {
                         text: "test request".to_string(),
@@ -2830,6 +3113,7 @@ mod tests {
             code_panel: CodePanel::default(),
             code_visible: false,
             parameters_panel: ParametersPanel::default(),
+            side_panel_tab: cadmark_ui::side_panel::SidePanelTab::default(),
             parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
@@ -2841,7 +3125,6 @@ mod tests {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
-            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
@@ -2852,10 +3135,12 @@ mod tests {
             turn: Some(TurnRecord {
                 response,
                 tools: None,
-                tool_groups: Vec::new(),
+                steps: Vec::new(),
+                thinking: None,
                 comment_ids: vec![],
                 parts_before: Vec::new(),
                 history_len: 1,
+                model_context: None,
             }),
         }
     }
@@ -2886,6 +3171,7 @@ mod tests {
             code_panel: CodePanel::default(),
             code_visible: false,
             parameters_panel: ParametersPanel::default(),
+            side_panel_tab: cadmark_ui::side_panel::SidePanelTab::default(),
             parameters: Vec::new(),
             highlighted_line: None,
             candidate_line: None,
@@ -2897,7 +3183,6 @@ mod tests {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
-            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
@@ -3007,6 +3292,48 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_turn_records_the_model_context_reaching_its_closing_notice() {
+        let (_dir, mut app) = two_part_project();
+        let response = app
+            .project_mut()
+            .unwrap()
+            .conversation
+            .push(Message::ai_response(""));
+        let items = vec![ModelItem::User {
+            text: "what the model saw".into(),
+            images: Vec::new(),
+        }];
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            steps: Vec::new(),
+            thinking: None,
+            comment_ids: vec![],
+            parts_before: Vec::new(),
+            history_len: 1,
+            model_context: None,
+        });
+        app.apply_turn_event(TurnEvent::ModelContext {
+            identity: None,
+            items: items.clone(),
+        });
+
+        app.finish_turn(TurnOutcome::Failed {
+            error: "the provider gave up".into(),
+        });
+
+        let conversation = &app.project().unwrap().conversation;
+        let session = conversation.session();
+        assert_eq!(session.items, items);
+        assert_eq!(
+            session.covers,
+            conversation.messages().last().map(|message| message.id),
+            "the session reaches the notice the failure posted, so nothing is rendered twice"
+        );
+        assert!(conversation.replay().1.is_empty());
+    }
+
+    #[test]
     fn a_completed_turn_records_its_design_step_against_the_open_part() {
         let (dir, mut app) = two_part_project();
         let response = app
@@ -3017,10 +3344,12 @@ mod tests {
         app.turn = Some(TurnRecord {
             response,
             tools: None,
-            tool_groups: Vec::new(),
+            steps: Vec::new(),
+            thinking: None,
             comment_ids: vec![],
             parts_before: Vec::new(),
             history_len: 1,
+            model_context: None,
         });
         std::fs::write(dir.path().join("bracket.py"), "width = 120\ndepth = 40\n").unwrap();
 
@@ -3195,10 +3524,12 @@ mod tests {
         app.turn = Some(TurnRecord {
             response,
             tools: None,
-            tool_groups: Vec::new(),
+            steps: Vec::new(),
+            thinking: None,
             comment_ids: vec![],
             parts_before: app.project().unwrap().part_measurements(),
             history_len: 1,
+            model_context: None,
         });
         app.finish_turn(TurnOutcome::Completed {
             summary: "Thicken the lid".to_string(),
@@ -3290,6 +3621,7 @@ mod tests {
             index: 2,
         };
         let anchor = GeometryContext {
+            part: None,
             element: PickedElement::Sketch(curve),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -3306,14 +3638,248 @@ mod tests {
         assert_eq!(markers.len(), 1);
         assert_eq!(
             markers[0].element_id,
-            cadmark_renderer::picking::encode_pick(&PickedElement::Sketch(curve))
+            cadmark_renderer::picking::encode_pick(&Pick::Sketch(curve))
         );
         assert_eq!(markers[0].colour, pending.comments()[0].marker_colour());
     }
 
     #[test]
+    fn a_pick_on_another_part_resolves_against_that_part_and_marks_it_as_its_own() {
+        // Two parts, each with a face zero. A click on the second part's
+        // face zero must switch the selection domain to that part, keep the
+        // anchor attributed to it, and highlight the element with its part.
+        use cadmark_core::ledger::{
+            ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+        };
+        let (_dir, mut app) = two_part_project();
+        let mut model = two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]);
+        // Each part's own ledger traces its face zero to a different line,
+        // so which ledger resolved a pick shows in the highlighted line.
+        let entry = |line: u32, operation_id: u64| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation: SemanticOperation::Box,
+            operation_id,
+            relation: ProvenanceRelation::Generated,
+        };
+        if let cadmark_kernel::protocol::ModelForm::Solid(solid) = &mut model.form {
+            for part in &mut solid.parts {
+                part.ledger
+                    .record_face(FaceId(0), LedgerValue::Resolved(entry(part.id * 10, 1)))
+                    .unwrap();
+            }
+        }
+        app.project_mut()
+            .unwrap()
+            .install_model(model, String::new());
+        assert_eq!(app.project().unwrap().active_model_part_id, Some(2));
+
+        let face_of = |part: u32| Pick::Solid {
+            part: PartId(part),
+            element: TopologyElement::Face(FaceId(0)),
+        };
+        app.handle_pick_result(face_of(1), (10.0, 10.0));
+        assert_eq!(app.project().unwrap().active_model_part_id, Some(1));
+        assert_eq!(
+            app.highlighted_line,
+            Some(10),
+            "resolved by part 1's ledger"
+        );
+        assert_eq!(app.renderer.selected_id, encode_pick(&face_of(1)));
+        assert_eq!(app.overlay.anchors()[0].part, Some(PartId(1)));
+
+        app.handle_pick_result(face_of(2), (20.0, 20.0));
+        assert_eq!(app.project().unwrap().active_model_part_id, Some(2));
+        assert_eq!(
+            app.highlighted_line,
+            Some(20),
+            "resolved by part 2's ledger"
+        );
+        assert_eq!(app.renderer.selected_id, encode_pick(&face_of(2)));
+        let anchors = app.overlay.anchors();
+        assert_eq!(
+            anchors.len(),
+            2,
+            "the second click adds an anchor on the other part"
+        );
+        assert_eq!(anchors[1].part, Some(PartId(2)));
+        assert_ne!(
+            encode_pick(&face_of(1)),
+            encode_pick(&face_of(2)),
+            "face zero of each part is its own highlight"
+        );
+    }
+
+    #[test]
+    fn a_plain_click_asks_for_the_element_and_an_alt_click_for_the_part() {
+        let click = PendingPick {
+            local: (10.0, 20.0),
+            whole_part: false,
+        };
+        assert_eq!(pick_requests(Some(click), 2.0), (Some((20, 40)), None));
+        let alt_click = PendingPick {
+            whole_part: true,
+            ..click
+        };
+        assert_eq!(pick_requests(Some(alt_click), 2.0), (None, Some((20, 40))));
+        assert_eq!(pick_requests(None, 2.0), (None, None));
+    }
+
+    #[test]
+    fn a_whole_part_pick_selects_that_part_whichever_part_was_active() {
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().install_model(
+            two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]),
+            String::new(),
+        );
+        app.handle_pick_result(Pick::part(PartId(1)), (0.0, 0.0));
+        assert_eq!(app.project().unwrap().active_model_part_id, Some(1));
+        assert_eq!(
+            app.renderer.selected_id,
+            encode_pick(&Pick::part(PartId(1)))
+        );
+        assert!(matches!(
+            app.selection,
+            SelectionState::Selected(PickedElement::Solid(TopologyElement::Part(PartId(1))))
+        ));
+        assert!(
+            app.status
+                .as_ref()
+                .unwrap()
+                .text
+                .starts_with("Selected bracket")
+        );
+    }
+
+    #[test]
+    fn a_hidden_part_is_remembered_by_name_across_a_rebuild() {
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().install_model(
+            two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]),
+            String::new(),
+        );
+        app.set_part_visible(2, false);
+        assert!(app.project().unwrap().hidden_parts.contains("lid"));
+
+        // The next execution binds the lid first, so its ordinal changes.
+        let rebuilt = two_part_model(&[("lid", 200.0, 6), ("bracket", 1000.0, 6)]);
+        let parts = rebuilt.solid().unwrap().parts.as_slice();
+        assert_eq!(
+            hidden_part_ids(parts, &app.project().unwrap().hidden_parts),
+            vec![1]
+        );
+
+        app.set_part_visible(2, true);
+        assert!(app.project().unwrap().hidden_parts.is_empty());
+        assert!(hidden_part_ids(parts, &app.project().unwrap().hidden_parts).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_part_belongs_to_the_script_that_was_open_and_not_the_next_one() {
+        // Hiding `lid` in one script must not hide an unrelated `lid` bound
+        // by another script in the folder, or by another project.
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().install_model(
+            two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]),
+            String::new(),
+        );
+        app.set_part_visible(2, false);
+        assert!(app.project().unwrap().hidden_parts.contains("lid"));
+
+        app.project_mut()
+            .unwrap()
+            .switch_part(crate::parts::OpenPart::Named("part.py".to_string()));
+        assert!(
+            app.project().unwrap().hidden_parts.is_empty(),
+            "opening another script forgets the last one's hidden parts"
+        );
+    }
+
+    #[test]
+    fn hovering_a_candidate_lights_its_anchors_part_from_that_parts_ledger() {
+        // An anchor on part 1 and a later one on part 2 leave part 2
+        // active. Hovering part 1's candidate must light part 1's face,
+        // read from part 1's ledger, not part 2's.
+        use cadmark_core::ledger::{
+            ProvenanceEntry, ProvenanceRelation, SemanticOperation, SourceRef,
+        };
+        use cadmark_ui::overlay::HoveredCandidate;
+        let (_dir, mut app) = two_part_project();
+        let mut model = two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]);
+        let entry = |line: u32, operation_id: u64| ProvenanceEntry {
+            source: SourceRef {
+                line,
+                code: format!("line {line}"),
+            },
+            operation: SemanticOperation::Box,
+            operation_id,
+            relation: ProvenanceRelation::Generated,
+        };
+        // Operation 1 built face 3 of part 1 and face 5 of part 2; the
+        // two ledgers disagree about what it claims.
+        if let cadmark_kernel::protocol::ModelForm::Solid(solid) = &mut model.form {
+            solid.parts[0]
+                .ledger
+                .record_face(FaceId(3), LedgerValue::Resolved(entry(10, 1)))
+                .unwrap();
+            solid.parts[1]
+                .ledger
+                .record_face(FaceId(5), LedgerValue::Resolved(entry(20, 1)))
+                .unwrap();
+        }
+        app.project_mut()
+            .unwrap()
+            .install_model(model, String::new());
+        assert_eq!(app.project().unwrap().active_model_part_id, Some(2));
+
+        app.overlay = OverlayState::Active {
+            anchor: ScreenPosition { x: 0.0, y: 0.0 },
+            text: String::new(),
+            anchors: Vec::new(),
+            focused: false,
+            hovered_candidate: Some(HoveredCandidate {
+                part: Some(PartId(1)),
+                entry: entry(10, 1),
+            }),
+            hovered_sketch_line: None,
+        };
+        app.apply_candidate_hover(&egui::Context::default());
+
+        assert_eq!(app.candidate_line, Some(10));
+        assert_eq!(
+            app.renderer.highlight_ids,
+            vec![encode_pick(&Pick::Solid {
+                part: PartId(1),
+                element: TopologyElement::Face(FaceId(3)),
+            })],
+            "part 1's own face, qualified by part 1"
+        );
+    }
+
+    #[test]
+    fn hiding_the_part_that_holds_the_selection_puts_the_selection_down() {
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().install_model(
+            two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]),
+            String::new(),
+        );
+        app.handle_pick_result(Pick::part(PartId(2)), (0.0, 0.0));
+        app.set_part_visible(1, false);
+        assert!(
+            matches!(app.selection, SelectionState::Selected(_)),
+            "hiding another part keeps the selection"
+        );
+        app.set_part_visible(2, false);
+        assert!(matches!(app.selection, SelectionState::None));
+        assert_eq!(app.renderer.selected_id, 0);
+    }
+
+    #[test]
     fn exactly_two_comment_anchors_become_the_measurement_pair() {
         let anchor = |id| GeometryContext {
+            part: None,
             element: PickedElement::Solid(TopologyElement::Face(FaceId(id))),
             provenance: LedgerValue::Untraced,
             identification: Default::default(),
@@ -3327,12 +3893,66 @@ mod tests {
         assert_eq!(measurement_pair(std::slice::from_ref(&first)), None);
         assert_eq!(
             measurement_pair(&[first.clone(), second.clone()]),
-            Some((
-                TopologyElement::Face(FaceId(1)),
-                TopologyElement::Face(FaceId(4))
-            ))
+            Some(MeasurementPair {
+                part: None,
+                first: TopologyElement::Face(FaceId(1)),
+                second: TopologyElement::Face(FaceId(4)),
+            })
         );
-        assert_eq!(measurement_pair(&[first, second, anchor(7)]), None);
+        assert_eq!(measurement_pair(&[first.clone(), second, anchor(7)]), None);
+        // Two anchors on different parts are numbered in different tables,
+        // so there is no pair to measure between.
+        let mut elsewhere = anchor(4);
+        elsewhere.part = Some(PartId(1));
+        assert_eq!(measurement_pair(&[first.clone(), elsewhere]), None);
+        // Two anchors on one part carry that part, so the measurement is
+        // taken on that part's own retained model.
+        let mut here = first;
+        here.part = Some(PartId(1));
+        let mut there = anchor(4);
+        there.part = Some(PartId(1));
+        assert_eq!(
+            measurement_pair(&[here, there]).map(|pair| pair.part),
+            Some(Some(PartId(1)))
+        );
+    }
+
+    #[test]
+    fn a_measurement_is_taken_on_the_retained_model_of_the_anchors_part() {
+        // Two picks on the first part name faces in that part's numbering,
+        // so the distance must be measured on that part's BREP, not on the
+        // whole model's, which the kernel builds from the last part.
+        let (_dir, mut app) = two_part_project();
+        app.project_mut().unwrap().install_model(
+            two_part_model(&[("bracket", 1000.0, 6), ("lid", 200.0, 6)]),
+            String::new(),
+        );
+        let project = app.project().unwrap();
+        let file_of = |part: u32| {
+            project
+                .model_parts
+                .iter()
+                .find(|loaded| loaded.id == part)
+                .unwrap()
+                .model
+                .clone()
+        };
+        assert_ne!(file_of(1), file_of(2));
+        assert_eq!(project.measurement_model(Some(PartId(1))), Ok(file_of(1)));
+        assert_eq!(project.measurement_model(Some(PartId(2))), Ok(file_of(2)));
+        // Anchors that name no part measure the whole solid.
+        assert_eq!(
+            project.measurement_model(None),
+            Ok(project
+                .model
+                .as_ref()
+                .unwrap()
+                .solid()
+                .unwrap()
+                .file
+                .clone())
+        );
+        assert!(project.measurement_model(Some(PartId(9))).is_err());
     }
 
     #[test]
@@ -3472,7 +4092,7 @@ mod tests {
         });
         let mut app = app_around(project);
 
-        app.handle_pick_result(PickedElement::Sketch(element), (12.0, 34.0));
+        app.handle_pick_result(Pick::Sketch(element), (12.0, 34.0));
 
         let SelectionState::Selected(selected) = &app.selection else {
             panic!("a sketch pick left no selection: {:?}", app.selection);
@@ -3480,7 +4100,7 @@ mod tests {
         assert_eq!(selected, &PickedElement::Sketch(element));
         assert_eq!(
             app.renderer.selected_id,
-            cadmark_renderer::picking::encode_pick(&PickedElement::Sketch(element))
+            cadmark_renderer::picking::encode_pick(&Pick::Sketch(element))
         );
         // The line the sketch was drawn on, read back out of the lineage
         // the click resolved against.
@@ -3545,6 +4165,7 @@ mod tests {
         let store = SettingsStore::at(configuration_dir.path().join("cadmark"));
         let settings = UserSettings {
             ai: Some(cadmark_bridge::config::AiConfiguration {
+                reasoning_effort: None,
                 base_url: "https://hosted.example/v1".to_string(),
                 model: "hosted-cad-model".to_string(),
                 accepts_images: true,
@@ -3598,6 +4219,97 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_is_recorded_as_thinking_between_what_it_follows_and_what_it_leads_to() {
+        let project_dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_pending_response(project_dir.path().to_path_buf());
+        let turn_start = app.project().unwrap().conversation.len() - 1;
+        let started = |call_id: &str| TurnEvent::ToolStarted {
+            call_id: call_id.into(),
+            tool: "run_script".into(),
+            arguments: serde_json::json!({"code": "X = 1"}),
+        };
+        let now = Instant::now();
+        app.project_mut().unwrap().busy = Some(crate::project::Busy::Turn {
+            cancel: cadmark_core::cancellation::CancelFlag::new(),
+            started: now,
+            last_event: now,
+            phase: "thinking".into(),
+        });
+        let quiet_since = |app: &CadmarkApp| match &app.project().unwrap().busy {
+            Some(crate::project::Busy::Turn { last_event, .. }) => *last_event,
+            None | Some(crate::project::Busy::Building) => panic!("no turn is running"),
+        };
+
+        // A provider that keeps its reasoning private still shows the
+        // model at work: an empty piece is a sign of life.
+        let before = quiet_since(&app);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.apply_turn_event(TurnEvent::Thinking(String::new()));
+        assert!(quiet_since(&app) > before, "reasoning counts as an event");
+        app.apply_turn_event(TurnEvent::Thinking(String::new()));
+        app.apply_turn_event(TurnEvent::Text("Measuring first.".into()));
+        app.apply_turn_event(started("c1"));
+        app.apply_turn_event(TurnEvent::Thinking("Weigh the ".into()));
+        app.apply_turn_event(TurnEvent::Thinking("options.".into()));
+        app.apply_turn_event(started("c2"));
+        app.apply_turn_event(TurnEvent::Thinking(String::new()));
+        app.finish_turn(TurnOutcome::Failed {
+            error: "cut off".into(),
+        });
+
+        let conversation = &app.project().unwrap().conversation;
+        let shape: Vec<_> = conversation.messages()[turn_start..]
+            .iter()
+            .map(|message| match &message.kind {
+                MessageKind::Thinking { finished } => format!(
+                    "thought{}:{}",
+                    if finished.is_some() {
+                        ""
+                    } else {
+                        "-unfinished"
+                    },
+                    message.text
+                ),
+                MessageKind::ToolCalls(activities) => format!(
+                    "tools:{}",
+                    activities
+                        .iter()
+                        .map(|activity| activity.call_id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                MessageKind::Notice { .. } => "notice".to_string(),
+                _ => format!("said:{}", message.text),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                "thought:",
+                "said:Measuring first.",
+                "tools:c1",
+                "thought:Weigh the options.",
+                "tools:c2",
+                "thought:",
+                "notice",
+            ],
+            "each think is one record, closed by what follows it, even the turn's end"
+        );
+        let steps: Vec<_> = conversation
+            .messages()
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.kind,
+                    MessageKind::ToolCalls(_) | MessageKind::Thinking { .. }
+                )
+            })
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(steps.len(), 5);
+    }
+
+    #[test]
     fn a_notice_mid_turn_closes_the_reply_and_tool_group_above_it() {
         let project_dir = tempfile::tempdir().unwrap();
         let mut app = app_with_pending_response(project_dir.path().to_path_buf());
@@ -3640,7 +4352,7 @@ mod tests {
             .map(|message| message.id)
             .collect();
         assert_eq!(
-            app.turn.as_ref().unwrap().tool_groups,
+            app.turn.as_ref().unwrap().steps,
             groups,
             "the chat is told every group the running turn made"
         );
@@ -3880,7 +4592,7 @@ mod tests {
 
         // The box line accounts for its own face and the shared edge.
         assert_eq!(
-            candidate_highlight_ids(&ledger, 1),
+            candidate_highlight_ids(&ledger, 1, Some(PartId(0))),
             vec![
                 encode_picking_id(&TopologyElement::Face(FaceId(3))),
                 encode_picking_id(&TopologyElement::Edge(EdgeId(5))),
@@ -3888,11 +4600,11 @@ mod tests {
         );
         // The fillet line accounts for the shared edge alone.
         assert_eq!(
-            candidate_highlight_ids(&ledger, 4),
+            candidate_highlight_ids(&ledger, 4, Some(PartId(0))),
             vec![encode_picking_id(&TopologyElement::Edge(EdgeId(5)))]
         );
         // A line claiming nothing lights nothing, rather than everything.
-        assert!(candidate_highlight_ids(&ledger, 77).is_empty());
+        assert!(candidate_highlight_ids(&ledger, 77, Some(PartId(0))).is_empty());
     }
 
     #[test]
@@ -3918,11 +4630,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            candidate_highlight_ids(&ledger, 1),
-            candidate_highlight_ids(&ledger, 4),
+            candidate_highlight_ids(&ledger, 1, Some(PartId(0))),
+            candidate_highlight_ids(&ledger, 4, Some(PartId(0))),
             "the ledger draws no distinction here and the highlight must not invent one"
         );
-        assert!(!candidate_highlight_ids(&ledger, 1).is_empty());
+        assert!(!candidate_highlight_ids(&ledger, 1, Some(PartId(0))).is_empty());
     }
 
     /// C28's start view and part-name dialog are reached only from this
