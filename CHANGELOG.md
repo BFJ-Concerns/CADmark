@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-24
+
 ### Added
 - Each part of a multi-part model is drawn in its own colour, from a fixed
   palette by the part's position in the script; a single-part model keeps
@@ -58,6 +60,8 @@ All notable changes to this project will be documented in this file.
   of related calls, and what a result changed when it matters, so the
   text between the tool lines reads as a running commentary rather than
   a single line per reply
+- Every dependency is refreshed to its newest compatible release; the
+  wgpu, egui, and PyO3 majors stay where they are
 
 ### Fixed
 - Exporting one part from the toolbar's per-part menu wrote nothing and
