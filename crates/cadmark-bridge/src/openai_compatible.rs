@@ -141,11 +141,14 @@ impl OpenAiCompatibleClient {
 
     /// The model's context window as the endpoint advertises it, or `None`
     /// when it advertises nothing CADmark recognises. Compatible endpoints
-    /// share no one field for this, so the well-known spellings are all
-    /// read: the model's own record at `models/{model}` first, then the
-    /// model list. Any failure reads as "not advertised" rather than an
-    /// error: the manual setting stands in, and a probe must never stop a
-    /// project opening.
+    /// share no one field or place for this, so the well-known spellings
+    /// are all read, asked of the model's own record at `models/{model}`,
+    /// then the model list, then the model list in Anthropic's format —
+    /// gateways fronting Claude (CLIProxyAPI among them) put the limits
+    /// only in that format, which they serve to requests carrying an
+    /// `anthropic-version` header. Any failure reads as "not advertised"
+    /// rather than an error: the manual setting stands in, and a probe
+    /// must never stop a project opening.
     pub async fn context_window(&self, cancel: CancelFlag) -> Option<usize> {
         let models_url = self.models_url()?;
         let direct = {
@@ -155,19 +158,30 @@ impl OpenAiCompatibleClient {
             url
         };
         if let Some(window) = self
-            .fetch_json(direct, &cancel)
+            .fetch_json(direct, &[], &cancel)
             .await
             .and_then(|record| advertised_context_window(&record))
         {
             return Some(window);
         }
-        let list = self.fetch_json(models_url, &cancel).await?;
-        list["data"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|record| record["id"].as_str() == Some(self.model.as_str()))
-            .and_then(advertised_context_window)
+        let listed = |list: serde_json::Value| {
+            list["data"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|record| record["id"].as_str() == Some(self.model.as_str()))
+                .and_then(advertised_context_window)
+        };
+        if let Some(window) = self
+            .fetch_json(models_url.clone(), &[], &cancel)
+            .await
+            .and_then(listed)
+        {
+            return Some(window);
+        }
+        self.fetch_json(models_url, &[("anthropic-version", "2023-06-01")], &cancel)
+            .await
+            .and_then(listed)
     }
 
     /// The `models` endpoint beside `responses`.
@@ -179,13 +193,22 @@ impl OpenAiCompatibleClient {
         Some(url)
     }
 
-    /// One authenticated GET, its body read as JSON when the status is a
-    /// success and the body is of a sane size; anything else is `None`.
-    async fn fetch_json(&self, url: Url, cancel: &CancelFlag) -> Option<serde_json::Value> {
+    /// One authenticated GET with any `headers` added, its body read as
+    /// JSON when the status is a success and the body is of a sane size;
+    /// anything else is `None`.
+    async fn fetch_json(
+        &self,
+        url: Url,
+        headers: &[(&str, &str)],
+        cancel: &CancelFlag,
+    ) -> Option<serde_json::Value> {
         const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
         let mut http = self.client.get(url);
         if let Some(credential) = &self.credential {
             http = http.bearer_auth(credential.value());
+        }
+        for (name, value) in headers {
+            http = http.header(*name, *value);
         }
         let response = await_cancellable(http.send(), cancel).await.ok()?.ok()?;
         if !response.status().is_success() {
@@ -1149,7 +1172,18 @@ pub(crate) mod recording {
     pub(crate) struct RecordedRequest {
         pub(crate) path: String,
         pub(crate) authenticated: bool,
+        /// Every header line as sent, names lowercased.
+        pub(crate) headers: Vec<(String, String)>,
         pub(crate) body: serde_json::Value,
+    }
+
+    impl RecordedRequest {
+        pub(crate) fn header(&self, name: &str) -> Option<&str> {
+            self.headers
+                .iter()
+                .find(|(sent, _)| sent == name)
+                .map(|(_, value)| value.as_str())
+        }
     }
 
     pub(crate) struct ScriptedResponse {
@@ -1333,14 +1367,17 @@ pub(crate) mod recording {
             .nth(1)
             .unwrap()
             .to_string();
-        let authenticated = headers.lines().any(|line| {
-            line.split_once(':').is_some_and(|(name, value)| {
-                name.eq_ignore_ascii_case("authorization")
-                    && value
-                        .trim()
-                        .strip_prefix("Bearer ")
-                        .is_some_and(|token| !token.is_empty())
-            })
+        let headers: Vec<(String, String)> = headers
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        let authenticated = headers.iter().any(|(name, value)| {
+            name == "authorization"
+                && value
+                    .strip_prefix("Bearer ")
+                    .is_some_and(|token| !token.is_empty())
         });
         let body = if content_length == 0 {
             serde_json::Value::Null
@@ -1350,6 +1387,7 @@ pub(crate) mod recording {
         RecordedRequest {
             path,
             authenticated,
+            headers,
             body,
         }
     }
@@ -1588,7 +1626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_context_window_is_asked_of_the_model_record_then_the_list() {
+    async fn the_context_window_is_asked_of_the_model_record_then_each_list_format() {
         // The model's own record answers.
         let (base_url, records, server) = recording_server(vec![ScriptedResponse {
             status: 200,
@@ -1630,9 +1668,63 @@ mod tests {
         let probe = client(&base_url, None);
         assert_eq!(probe.context_window(CancelFlag::new()).await, Some(131_072));
         server.await.unwrap();
-        assert_eq!(records.lock().unwrap()[1].path, "/v1/models");
+        {
+            let records = records.lock().unwrap();
+            assert_eq!(records[1].path, "/v1/models");
+            assert_eq!(records[1].header("anthropic-version"), None);
+        }
+
+        // Only the Anthropic-format list carries it, as a gateway fronting
+        // Claude serves it.
+        let (base_url, records, server) = recording_server(vec![
+            ScriptedResponse {
+                status: 404,
+                body: "{}".to_string(),
+                streamed: false,
+                delay: None,
+            },
+            ScriptedResponse {
+                status: 200,
+                body: serde_json::json!({"object": "list", "data": [
+                    {"id": "configured-model", "object": "model", "owned_by": "anthropic"},
+                ]})
+                .to_string(),
+                streamed: false,
+                delay: None,
+            },
+            ScriptedResponse {
+                status: 200,
+                body: serde_json::json!({"data": [
+                    {"id": "configured-model", "type": "model",
+                        "max_input_tokens": 1000000, "max_tokens": 128000},
+                ], "has_more": false})
+                .to_string(),
+                streamed: false,
+                delay: None,
+            },
+        ])
+        .await;
+        let probe = client(&base_url, Some("fake-token"));
+        assert_eq!(
+            probe.context_window(CancelFlag::new()).await,
+            Some(1_000_000)
+        );
+        server.await.unwrap();
+        {
+            let records = records.lock().unwrap();
+            assert_eq!(records[1].header("anthropic-version"), None);
+            assert_eq!(records[2].path, "/v1/models");
+            assert_eq!(records[2].header("anthropic-version"), Some("2023-06-01"));
+            assert!(records[2].authenticated);
+        }
 
         // Nothing advertised anywhere: not an error.
+        let unadvertised_list = || ScriptedResponse {
+            status: 200,
+            body: serde_json::json!({"data": [{"id": "configured-model"}]}).to_string(),
+            streamed: false,
+            delay: None,
+        };
         let (base_url, _records, server) = recording_server(vec![
             ScriptedResponse {
                 status: 200,
@@ -1640,12 +1732,8 @@ mod tests {
                 streamed: false,
                 delay: None,
             },
-            ScriptedResponse {
-                status: 200,
-                body: serde_json::json!({"data": [{"id": "configured-model"}]}).to_string(),
-                streamed: false,
-                delay: None,
-            },
+            unadvertised_list(),
+            unadvertised_list(),
         ])
         .await;
         let probe = client(&base_url, None);

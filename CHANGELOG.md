@@ -63,6 +63,9 @@ All notable changes to this project will be documented in this file.
 - Exporting one part from the toolbar's per-part menu wrote nothing and
   reported the part as no longer existing: the menu named parts by their
   picking ID where the export looked them up by ordinal
+- The model's context window is detected through gateways that report it
+  only in Anthropic's model-list format, such as CLIProxyAPI; before, such an
+  endpoint read as reporting nothing and the manual setting stood in
 
 ## [0.2.0] - 2026-09-23
 
