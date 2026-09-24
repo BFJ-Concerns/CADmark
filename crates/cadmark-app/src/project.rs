@@ -14,7 +14,7 @@ use cadmark_core::cancellation::CancelFlag;
 use cadmark_core::context::{IdentificationStrategy, MeasuredIdentification, NullIdentification};
 use cadmark_core::export::ExportFormat;
 use cadmark_core::geometry::{
-    GeometryDescriptors, ModelSummary, PartId, PartMeasurements, SolidValidity, TopologyElement,
+    GeometryDescriptors, ModelSummary, PartId, SolidValidity, TopologyElement,
 };
 use cadmark_core::ledger::ProvenanceLedger;
 use cadmark_core::limits::ExecutionLimits;
@@ -118,13 +118,6 @@ pub struct LoadedPart {
     pub model: ModelFile,
     /// Per-solid kernel validity retained for the export gate.
     pub validity: Vec<SolidValidity>,
-}
-
-impl LoadedPart {
-    /// The part's measurements under the name the script gave it.
-    pub fn measurements(&self) -> PartMeasurements {
-        PartMeasurements::new(self.name.clone(), self.summary.clone())
-    }
 }
 
 /// What the worker thread is doing, for the status bar and chat.
@@ -549,15 +542,6 @@ impl Project {
         })?;
         self.exports_in_flight += 1;
         Ok(path)
-    }
-
-    /// Every part on screen measured, in source binding order; empty when
-    /// nothing solid is loaded. What a turn's change report compares against.
-    pub fn part_measurements(&self) -> Vec<PartMeasurements> {
-        self.model_parts
-            .iter()
-            .map(LoadedPart::measurements)
-            .collect()
     }
 
     /// The part whose ledger, lineage and descriptors the current selection
