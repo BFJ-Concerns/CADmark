@@ -302,13 +302,9 @@ pub struct CadmarkApp {
     pending_first_message: Option<String>,
     /// Bounds to frame once the viewport aspect ratio is known.
     pending_camera_bounds: Option<Bounds3>,
-    /// Local click coordinates (relative to viewport rect) for the
-    /// pending pick request. Consumed in the same frame to build the
-    /// paint callback.
-    pending_pick: Option<(f32, f32)>,
-    /// The next viewport click selects a whole completed part rather than
-    /// the face, edge or vertex under the cursor.
-    part_selection_mode: bool,
+    /// The viewport click awaiting its pick request, consumed in the same
+    /// frame to build the paint callback.
+    pending_pick: Option<PendingPick>,
     /// Absolute screen position of the in-flight pick, preserved
     /// across frames so the overlay can be positioned when the readback
     /// arrives.
@@ -384,7 +380,6 @@ impl CadmarkApp {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
-            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
@@ -1819,10 +1814,6 @@ impl CadmarkApp {
                 }
             }
             ToolbarAction::ToggleCode => self.code_visible = !self.code_visible,
-            ToolbarAction::PickPart => {
-                self.part_selection_mode = true;
-                self.status = Some(Status::info("Click a part to select it"));
-            }
             ToolbarAction::Export(format) => self.export(format),
             ToolbarAction::ExportPart(id, format) => self.export_part(id, format),
             ToolbarAction::ExportAll(format) => {
@@ -2498,12 +2489,16 @@ impl CadmarkApp {
                 self.renderer.camera.zoom(scroll * 0.01);
             }
 
-            // Left click for selection — request a pick readback.
+            // Left click for selection — request a pick readback. Alt asks
+            // for the whole part under the cursor instead of its element.
             if response.clicked()
                 && let Some(pos) = response.interact_pointer_pos()
             {
                 let local_pos = pos - rect.min;
-                self.pending_pick = Some((local_pos.x, local_pos.y));
+                self.pending_pick = Some(PendingPick {
+                    local: (local_pos.x, local_pos.y),
+                    whole_part: ui.input(|i| i.modifiers.alt),
+                });
                 self.pick_in_flight = Some((pos.x, pos.y));
             }
 
@@ -2541,14 +2536,7 @@ impl CadmarkApp {
                 .set_view(self.renderer.camera.clone(), viewport_size);
 
             let to_pixels = |local: egui::Vec2| ((local.x * ppp) as u32, (local.y * ppp) as u32);
-            let pick_request = self
-                .pending_pick
-                .take()
-                .map(|(x, y)| to_pixels(egui::vec2(x, y)));
-            let part_pick_request = self.part_selection_mode.then_some(pick_request).flatten();
-            if part_pick_request.is_some() {
-                self.part_selection_mode = false;
-            }
+            let (pick_request, part_pick_request) = pick_requests(self.pending_pick.take(), ppp);
             let hover_request = hover_local.map(to_pixels).filter(|&pixel| {
                 let probe = (pixel, self.renderer.camera.clone());
                 if self.last_hover_probe.as_ref() == Some(&probe) {
@@ -2702,6 +2690,38 @@ fn pending_markers(pending: &PendingComments) -> Vec<ViewportMarker> {
             })
         })
         .collect()
+}
+
+/// A viewport click awaiting its pick readback: where it landed, relative
+/// to the viewport, and whether it asked for the whole part (Alt held)
+/// rather than the face, edge or vertex under it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PendingPick {
+    local: (f32, f32),
+    whole_part: bool,
+}
+
+/// A viewport position in physical pixels, as the picking passes read it.
+type PickPixel = (u32, u32);
+
+/// Route a click to the picking pass it asked for, as viewport pixels:
+/// the topology pass for a plain click, the part pass for an Alt-click.
+fn pick_requests(
+    pending: Option<PendingPick>,
+    pixels_per_point: f32,
+) -> (Option<PickPixel>, Option<PickPixel>) {
+    let Some(pending) = pending else {
+        return (None, None);
+    };
+    let pixel = (
+        (pending.local.0 * pixels_per_point) as u32,
+        (pending.local.1 * pixels_per_point) as u32,
+    );
+    if pending.whole_part {
+        (None, Some(pixel))
+    } else {
+        (Some(pixel), None)
+    }
 }
 
 /// Which of a freshly executed model's parts start out hidden: the ones
@@ -2935,11 +2955,11 @@ mod tests {
 
     use super::{
         Bounds3, CadmarkApp, ChatPane, CodePanel, HistoryMove, ImagePicker, MeasurementPair,
-        NoRender, OverlayState, ParametersPanel, PartNameDialog, Project, Renderer, SceneHandle,
-        SettingsDialog, SettingsStore, TurnEvent, TurnGeometry, TurnOutcome, TurnRecord,
-        UserSettings, VersionDialog, ai_services, camera_change, candidate_highlight_ids,
-        encode_pick, hidden_part_ids, history_move_note, measurement_pair, measurement_readout,
-        pending_markers, record_tool_start, turn_chat_message,
+        NoRender, OverlayState, ParametersPanel, PartNameDialog, PendingPick, Project, Renderer,
+        SceneHandle, SettingsDialog, SettingsStore, TurnEvent, TurnGeometry, TurnOutcome,
+        TurnRecord, UserSettings, VersionDialog, ai_services, camera_change,
+        candidate_highlight_ids, encode_pick, hidden_part_ids, history_move_note, measurement_pair,
+        measurement_readout, pending_markers, pick_requests, record_tool_start, turn_chat_message,
     };
 
     #[derive(Debug)]
@@ -3105,7 +3125,6 @@ mod tests {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
-            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
@@ -3164,7 +3183,6 @@ mod tests {
             pending_first_message: None,
             pending_camera_bounds: None,
             pending_pick: None,
-            part_selection_mode: false,
             pick_in_flight: None,
             hover_readback_pending: false,
             last_hover_probe: None,
@@ -3692,6 +3710,21 @@ mod tests {
             encode_pick(&face_of(2)),
             "face zero of each part is its own highlight"
         );
+    }
+
+    #[test]
+    fn a_plain_click_asks_for_the_element_and_an_alt_click_for_the_part() {
+        let click = PendingPick {
+            local: (10.0, 20.0),
+            whole_part: false,
+        };
+        assert_eq!(pick_requests(Some(click), 2.0), (Some((20, 40)), None));
+        let alt_click = PendingPick {
+            whole_part: true,
+            ..click
+        };
+        assert_eq!(pick_requests(Some(alt_click), 2.0), (None, Some((20, 40))));
+        assert_eq!(pick_requests(None, 2.0), (None, None));
     }
 
     #[test]
