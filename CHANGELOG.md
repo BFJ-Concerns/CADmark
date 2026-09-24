@@ -37,6 +37,8 @@ All notable changes to this project will be documented in this file.
 - Clicking any part of a multi-part model selects that part's face, edge or
   vertex; before, only the part the script bound last answered a click, and
   the others needed "Pick part" first
+- Alt+click selects the whole part under the cursor; the toolbar's
+  "Pick part" button, which armed the next click for that, is gone
 - Two comment anchors on different parts are no longer offered as a
   distance measurement, since each part numbers its elements on its own
 - Model sessions preserve provider output in order, including encrypted

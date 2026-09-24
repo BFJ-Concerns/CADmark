@@ -31,7 +31,7 @@ The world is Z-up, matching build123d's coordinate system.
 
 ## Selecting geometry
 
-Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. When the script defines several parts, each is drawn in its own colour, and clicking any of them selects that part's face, edge, or vertex; the status bar and the comment overlay then speak in that part's terms. To select a whole part, click its name in the Parts tab of the left panel, or click "Pick part" in the toolbar and then the part in the viewport.
+Click a face, edge, or vertex to select it — the element glows, and its identity appears in the status bar. Edges and vertex markers have smooth, fine outlines. Their invisible click targets are wider, so you can aim near them. Both sizes stay constant on screen however far you zoom. A vertex marker on geometry the section plane has cut away is neither drawn nor pickable. When the script defines several parts, each is drawn in its own colour, and clicking any of them selects that part's face, edge, or vertex; the status bar and the comment overlay then speak in that part's terms. To select a whole part, hold `Alt` and click it, or click its name in the Parts tab of the left panel.
 
 The **Select** menu in the toolbar turns each kind of click target on or off. Three checkboxes — "Faces", "Edges", "Vertices" — start all on. Disabling a kind makes clicks pass through it to whatever is behind. The filter does not affect whole-part picks.
 
@@ -209,5 +209,6 @@ Pictures that define a part, such as a dimensioned drawing or a photo of the ori
 | `F5` | Rebuild |
 | `F` | Fit view |
 | `P` | Toggle projection |
+| `Alt`+click | Select the whole part under the cursor |
 
 Shortcuts that change model state (undo, redo, rebuild, save) are held while the AI is working or a dialog is open.
