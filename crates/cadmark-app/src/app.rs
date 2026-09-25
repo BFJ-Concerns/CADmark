@@ -832,6 +832,7 @@ impl CadmarkApp {
                 summary,
                 model,
                 source,
+                locked_changes,
             } => {
                 for id in turn.comment_ids {
                     conversation.mark_spatial_applied(id);
@@ -842,6 +843,15 @@ impl CadmarkApp {
                     && message.text.trim().is_empty()
                 {
                     message.text = summary.clone();
+                }
+                // A locked parameter the turn moved is said in chat after
+                // the reply, whatever the reply says about it.
+                if !locked_changes.is_empty() {
+                    conversation.push(Message::notice(format!(
+                        "Locked parameters changed this turn: {}. If that was not agreed, \
+                         undo restores the step before it.",
+                        locked_changes.join("; ")
+                    )));
                 }
                 // A failure has already gone to the status; the reply
                 // stands either way, so the turn reads no further.
@@ -2433,6 +2443,12 @@ impl CadmarkApp {
             }
         };
         if rewritten == source {
+            // The padlock showed the executed script; the file already
+            // reads as asked, so it is the file the model needs to catch
+            // up with.
+            if !marker_only && let Some(project) = self.project_mut() {
+                project.request_reload();
+            }
             return;
         }
         if let Err(error) = std::fs::write(&path, &rewritten) {
@@ -3412,6 +3428,7 @@ mod tests {
             summary: "Widen the bracket".to_string(),
             model: Box::new(solid_model()),
             source: "width = 120\ndepth = 40\n".to_string(),
+            locked_changes: Vec::new(),
         });
 
         let message = newest_commit_message(dir.path());
@@ -3540,6 +3557,70 @@ mod tests {
             Ok(crate::orchestrator::OrchestratorCommand::Reload)
         ));
         assert!(newest_commit_message(dir.path()).contains("Locked depth"));
+
+        // The padlock showed a lock the executed script had and an edit
+        // outside CADmark has since removed: the click changes nothing
+        // in the file, so the file is reloaded to catch the panel up.
+        let before = newest_commit_message(dir.path());
+        let project = app.project_mut().unwrap();
+        project.script_source = Some("width = 80  # locked\ndepth = 40  # locked\n".into());
+        project.busy = None;
+        app.apply_parameter_lock("width", false);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80\ndepth = 40  # locked\n"
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::orchestrator::OrchestratorCommand::Reload)
+        ));
+        assert_eq!(
+            newest_commit_message(dir.path()),
+            before,
+            "no step for a no-op"
+        );
+    }
+
+    #[test]
+    fn a_locked_change_is_noticed_after_the_reply_without_a_second_one() {
+        let (dir, mut app) = two_part_project();
+        let response = app
+            .project_mut()
+            .unwrap()
+            .conversation
+            .push(Message::ai_response("Made the wall 3, as you allowed."));
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            steps: Vec::new(),
+            thinking: None,
+            comment_ids: vec![],
+            history_len: 1,
+            model_context: None,
+        });
+        std::fs::write(dir.path().join("bracket.py"), "width = 80\ndepth = 40\n").unwrap();
+
+        app.finish_turn(TurnOutcome::Completed {
+            summary: "Thicken the wall".to_string(),
+            model: Box::new(solid_model()),
+            source: "width = 80\ndepth = 40\n".to_string(),
+            locked_changes: vec!["`wall` changed 2 → 3 while locked".into()],
+        });
+
+        let messages = app.project().unwrap().conversation.messages();
+        let [.., reply, notice] = messages else {
+            panic!("a reply then a notice, got {messages:?}");
+        };
+        assert_eq!(reply.text, "Made the wall 3, as you allowed.");
+        assert!(matches!(
+            notice.kind,
+            MessageKind::Notice { is_error: false }
+        ));
+        assert!(
+            notice.text.contains("`wall` changed 2 → 3 while locked"),
+            "{}",
+            notice.text
+        );
     }
 
     #[test]
