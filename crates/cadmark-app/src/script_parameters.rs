@@ -51,6 +51,16 @@
 // from the original in exactly that span: no reformatting, no
 // reordering, no normalised whitespace, and the literal written back in
 // the notation the author wrote it in.
+//
+// A parameter can be locked: a `# locked` comment at the end of its
+// binding's line (`# locked: why`, optionally) marks it as a hard
+// constraint the user has fixed — a fit, a clearance, a mounting
+// position — which the AI may change only with the user's explicit
+// permission. The marker lives in the script because the script is the
+// design: it survives every rewrite the AI makes, shows in the code
+// panel, and travels with the file. Locking and unlocking are the same
+// kind of surgical edit as a value change: the marker's bytes and
+// nothing else.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -62,6 +72,23 @@ pub struct Parameter {
     /// One-based source line of the binding that decides the value.
     pub line: u32,
     pub binding: Binding,
+    /// The `# locked` marker on the binding's line, when it has one.
+    pub lock: Option<Lock>,
+    /// Byte offset just past the binding statement's last token, where a
+    /// marker is added.
+    statement_end: usize,
+}
+
+/// A `# locked` marker: the declaration that a parameter is a hard
+/// constraint, changed only with the user's explicit permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lock {
+    /// Why it is locked, when the marker says (`# locked: must clear the
+    /// bolt head`).
+    pub reason: Option<String>,
+    /// The bytes the marker occupies, from the whitespace before its `#`
+    /// to the end of the line, so unlocking removes exactly it.
+    span: Range<usize>,
 }
 
 /// How a parameter gets its value.
@@ -113,6 +140,15 @@ impl Parameter {
             Binding::Literal { .. } => None,
         }
     }
+
+    /// The value or expression as the script states it, for telling one
+    /// version of a parameter from another.
+    pub fn stated(&self) -> String {
+        match &self.binding {
+            Binding::Literal { value, .. } => format!("{value}"),
+            Binding::Derived { expression } => expression.clone(),
+        }
+    }
 }
 
 /// Why a value could not be written back.
@@ -149,6 +185,8 @@ pub fn extract(source: &str) -> Vec<Parameter> {
             }
         }
         let line = statement[0].line;
+        let statement_end = statement.last().map_or(0, |token| token.span.end);
+        let lock = trailing_lock(source, statement_end);
         for (name, bound) in bindings {
             let binding = bound.and_then(|tokens| {
                 if let Some((value, span, notation)) = literal(tokens) {
@@ -172,6 +210,8 @@ pub fn extract(source: &str) -> Vec<Parameter> {
                         name: name.to_string(),
                         line,
                         binding,
+                        lock: lock.clone(),
+                        statement_end,
                     };
                     known.insert(name.to_string());
                     match found.iter_mut().find(|existing| existing.name == name) {
@@ -201,18 +241,99 @@ pub fn rewrite(source: &str, name: &str, value: f64) -> Result<String, RewriteEr
     if !value.is_finite() {
         return Err(RewriteError::NotANumber(value));
     }
-    let parameter = extract(source)
-        .into_iter()
-        .find(|parameter| parameter.name == name)
-        .ok_or_else(|| RewriteError::NoSuchParameter(name.to_string()))?;
+    let parameter = find(source, name)?;
     let Binding::Literal { span, notation, .. } = parameter.binding else {
         return Err(RewriteError::NotEditable(name.to_string()));
     };
-    let mut rewritten = String::with_capacity(source.len() + 8);
-    rewritten.push_str(&source[..span.start]);
-    rewritten.push_str(&format_number(value, &notation));
-    rewritten.push_str(&source[span.end..]);
-    Ok(rewritten)
+    Ok(splice(source, span, &format_number(value, &notation)))
+}
+
+/// Return `source` with a `# locked` marker at the end of one parameter's
+/// line — `# locked: reason` when a reason is given — replacing the
+/// marker already there, if any, and leaving every other byte as it is.
+pub fn lock(source: &str, name: &str, reason: Option<&str>) -> Result<String, RewriteError> {
+    let parameter = find(source, name)?;
+    // A reason is one line: a break in it would split the script.
+    let reason = reason
+        .map(|reason| reason.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|reason| !reason.is_empty());
+    let marker = match reason {
+        Some(reason) => format!("  # locked: {reason}"),
+        None => "  # locked".to_string(),
+    };
+    let replaced = match parameter.lock {
+        Some(existing) => existing.span,
+        None => {
+            let end = line_end(source, parameter.statement_end);
+            end..end
+        }
+    };
+    Ok(splice(source, replaced, &marker))
+}
+
+/// Return `source` with the `# locked` marker taken off one parameter's
+/// line; a parameter that is not locked comes back unchanged.
+pub fn unlock(source: &str, name: &str) -> Result<String, RewriteError> {
+    let parameter = find(source, name)?;
+    Ok(match parameter.lock {
+        Some(existing) => splice(source, existing.span, ""),
+        None => source.to_string(),
+    })
+}
+
+fn find(source: &str, name: &str) -> Result<Parameter, RewriteError> {
+    extract(source)
+        .into_iter()
+        .find(|parameter| parameter.name == name)
+        .ok_or_else(|| RewriteError::NoSuchParameter(name.to_string()))
+}
+
+fn splice(source: &str, span: Range<usize>, replacement: &str) -> String {
+    let mut out = String::with_capacity(source.len() + replacement.len());
+    out.push_str(&source[..span.start]);
+    out.push_str(replacement);
+    out.push_str(&source[span.end..]);
+    out
+}
+
+/// The byte offset of the newline ending the physical line `at` is on,
+/// or the end of the source.
+fn line_end(source: &str, at: usize) -> usize {
+    source[at..]
+        .find('\n')
+        .map_or(source.len(), |offset| at + offset)
+}
+
+/// The `# locked` marker ending the physical line a statement ends on,
+/// when there is one. The bytes between a statement's last token and the
+/// newline hold only whitespace and comments — anything else would have
+/// been a token — so the scan is direct. The marker is the last comment
+/// segment on the line whose text begins `locked`, so a comment of the
+/// author's before it (`# mm  # locked`) is left as theirs.
+fn trailing_lock(source: &str, statement_end: usize) -> Option<Lock> {
+    let end = line_end(source, statement_end);
+    let tail = &source[statement_end..end];
+    let mut found = None;
+    for (hash, _) in tail.match_indices('#') {
+        let body = tail[hash + 1..].trim_start();
+        let Some(after) = body
+            .get(.."locked".len())
+            .filter(|head| head.eq_ignore_ascii_case("locked"))
+            .map(|_| &body["locked".len()..])
+        else {
+            continue;
+        };
+        if !(after.is_empty() || after.starts_with(':') || after.starts_with(char::is_whitespace)) {
+            continue;
+        }
+        let reason = after.trim_start_matches(':').trim();
+        let start = statement_end + tail[..hash].trim_end().len();
+        found = Some(Lock {
+            reason: (!reason.is_empty()).then(|| reason.to_string()),
+            span: start..end,
+        });
+    }
+    found
 }
 
 /// A number as the script should carry it: a name the author wrote as an
@@ -1357,6 +1478,86 @@ real = 4
             names(source),
             vec!["real"],
             "an imported name this module cannot know is a number is not a parameter"
+        );
+    }
+
+    fn lock_of(source: &str, name: &str) -> Option<Lock> {
+        extract(source)
+            .into_iter()
+            .find(|parameter| parameter.name == name)
+            .and_then(|parameter| parameter.lock)
+    }
+
+    #[test]
+    fn a_locked_marker_is_read_with_its_reason() {
+        let source = "wall = 2  # locked: must clear the M3 head\n\
+                      depth = 40 # LOCKED\n\
+                      width = 80  # locker\n\
+                      height = (\n    10\n)  # locked\n\
+                      gap = 0.4  # mm  # locked\n\
+                      free = 1\n";
+        assert_eq!(
+            lock_of(source, "wall").unwrap().reason.as_deref(),
+            Some("must clear the M3 head")
+        );
+        assert_eq!(lock_of(source, "depth").unwrap().reason, None);
+        assert!(
+            lock_of(source, "width").is_none(),
+            "`locker` is not `locked`"
+        );
+        assert!(
+            lock_of(source, "height").is_some(),
+            "the marker ends the statement's last line"
+        );
+        assert!(
+            lock_of(source, "gap").is_some(),
+            "a marker after the author's comment"
+        );
+        assert!(lock_of(source, "free").is_none());
+        // A rebinding decides the lock as it decides the value.
+        assert!(lock_of("x = 1  # locked\nx = 2\n", "x").is_none());
+        assert!(lock_of("x = 1\nx = 2  # locked\n", "x").is_some());
+    }
+
+    #[test]
+    fn locking_and_unlocking_change_only_the_marker() {
+        let source = "width = 80\ndepth = 40  # mm\nheight = width * 2\n";
+        let locked = lock(source, "width", None).unwrap();
+        assert_eq!(
+            locked,
+            "width = 80  # locked\ndepth = 40  # mm\nheight = width * 2\n"
+        );
+        // A reason rides on the marker, flattened to one line.
+        let reasoned = lock(&locked, "width", Some(" fits the\nbracket ")).unwrap();
+        assert_eq!(
+            reasoned,
+            "width = 80  # locked: fits the bracket\ndepth = 40  # mm\nheight = width * 2\n"
+        );
+        // The author's own comment stays; the marker goes after it.
+        let depth = lock(&reasoned, "depth", None).unwrap();
+        assert!(depth.contains("depth = 40  # mm  # locked\n"), "{depth}");
+        // A derived parameter locks too: its expression is the constraint.
+        let derived = lock(&depth, "height", None).unwrap();
+        assert!(
+            derived.contains("height = width * 2  # locked\n"),
+            "{derived}"
+        );
+        // Unlocking removes exactly the marker, reason included.
+        let unlocked = unlock(&derived, "width").unwrap();
+        assert!(unlocked.starts_with("width = 80\n"), "{unlocked}");
+        let unlocked = unlock(&unlocked, "depth").unwrap();
+        assert!(unlocked.contains("depth = 40  # mm\n"), "{unlocked}");
+        // Unlocking what is not locked changes nothing.
+        assert_eq!(unlock(source, "width").unwrap(), source);
+        assert_eq!(
+            lock(source, "nothing", None),
+            Err(RewriteError::NoSuchParameter("nothing".into()))
+        );
+        // A value edit leaves the lock where it is.
+        let edited = rewrite(&reasoned, "width", 90.0).unwrap();
+        assert!(
+            edited.starts_with("width = 90  # locked: fits the bracket\n"),
+            "{edited}"
         );
     }
 

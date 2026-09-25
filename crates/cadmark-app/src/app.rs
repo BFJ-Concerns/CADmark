@@ -189,6 +189,15 @@ fn parameter_step_summary(name: &str, value: f64) -> String {
     format!("Set {name} to {value}")
 }
 
+/// The design step and status line for locking or unlocking a parameter.
+fn lock_step_summary(name: &str, locked: bool) -> String {
+    if locked {
+        format!("Locked {name}")
+    } else {
+        format!("Unlocked {name}")
+    }
+}
+
 /// How the user moved through the design history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryMove {
@@ -2200,6 +2209,11 @@ impl CadmarkApp {
                 value: parameter.value(),
                 expression: parameter.expression().unwrap_or_default(),
                 line: parameter.line,
+                locked: parameter.lock.is_some(),
+                lock_reason: parameter
+                    .lock
+                    .as_ref()
+                    .and_then(|lock| lock.reason.as_deref()),
             })
             .collect();
         let mut parameters_action = ParametersAction::None;
@@ -2266,8 +2280,12 @@ impl CadmarkApp {
                     }
                 }
             });
-        if let ParametersAction::Commit { name, value } = parameters_action {
-            self.apply_parameter_edit(&name, value);
+        match parameters_action {
+            ParametersAction::None => {}
+            ParametersAction::Commit { name, value } => self.apply_parameter_edit(&name, value),
+            ParametersAction::SetLocked { name, locked } => {
+                self.apply_parameter_lock(&name, locked)
+            }
         }
         match parts_action {
             PartsAction::None => {}
@@ -2365,6 +2383,71 @@ impl CadmarkApp {
         if let Some(project) = self.project_mut() {
             project.request_reload();
         }
+    }
+
+    /// Lock or unlock a parameter from the panel: the `# locked` marker
+    /// is written into the script, the change is a design step, and the
+    /// conversation records it so the AI's next turn knows the user set
+    /// the constraint. The geometry is unchanged, so nothing rebuilds.
+    fn apply_parameter_lock(&mut self, name: &str, locked: bool) {
+        let Some((path, part)) = self
+            .project()
+            .map(|project| (project.script_path(), project.part_file_name().to_string()))
+        else {
+            return;
+        };
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.status = Some(Status::error(format!("Could not read {part}: {error}")));
+                return;
+            }
+        };
+        let rewritten = if locked {
+            script_parameters::lock(&source, name, None)
+        } else {
+            script_parameters::unlock(&source, name)
+        };
+        let rewritten = match rewritten {
+            Ok(rewritten) => rewritten,
+            Err(error) => {
+                self.status = Some(Status::error(error.to_string()));
+                return;
+            }
+        };
+        if rewritten == source {
+            return;
+        }
+        if let Err(error) = std::fs::write(&path, &rewritten) {
+            self.status = Some(Status::error(format!("Could not write {part}: {error}")));
+            return;
+        }
+        let summary = lock_step_summary(name, locked);
+        let recorded = self.record_design_step(&summary, &summary);
+        if let Some(project) = self.project_mut() {
+            project.script_source = Some(rewritten);
+            project.record_script_state();
+            let consequence = if locked {
+                "the AI may not change it without explicit permission"
+            } else {
+                "the AI may change it again"
+            };
+            project.conversation.push(Message::design_change(format!(
+                "{summary} in the parameters panel of {part}: {consequence}."
+            )));
+        }
+        match recorded {
+            Ok(()) => self.status = Some(Status::info(summary)),
+            Err(reason) => {
+                if let Some(project) = self.project_mut() {
+                    project.conversation.push(Message::error_notice(format!(
+                        "{reason}\n\n{summary} in {part}, but the history has no step for it."
+                    )));
+                }
+            }
+        }
+        self.save_conversation();
+        self.read_parameters();
     }
 
     fn show_code_panel(&mut self, ctx: &egui::Context) {
@@ -3336,6 +3419,59 @@ mod tests {
                 },
             ),
         }
+    }
+
+    #[test]
+    fn locking_a_parameter_marks_it_in_the_script_and_records_a_step() {
+        let (dir, mut app) = two_part_project();
+
+        app.apply_parameter_lock("width", true);
+
+        // The marker is in the open part's script and nowhere else, and
+        // the panel reads it back without a rebuild.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80  # locked\ndepth = 40\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("part.py")).unwrap(),
+            "width = 10\n"
+        );
+        let width = app
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "width")
+            .expect("width is still a parameter");
+        assert!(width.lock.is_some());
+        assert!(app.turn.is_none());
+
+        // A design step against the part, and a conversation note the
+        // AI's next turn reads.
+        let message = newest_commit_message(dir.path());
+        assert!(message.contains("Locked width"), "{message}");
+        assert!(message.contains("part: bracket.py"), "{message}");
+        let last = app
+            .project()
+            .unwrap()
+            .conversation
+            .messages()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last.kind, MessageKind::DesignChange);
+        assert_eq!(
+            last.text,
+            "Locked width in the parameters panel of bracket.py: the AI may not change it \
+             without explicit permission."
+        );
+
+        // Unlocking takes exactly the marker back out.
+        app.apply_parameter_lock("width", false);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80\ndepth = 40\n"
+        );
+        assert!(newest_commit_message(dir.path()).contains("Unlocked width"));
     }
 
     #[test]
