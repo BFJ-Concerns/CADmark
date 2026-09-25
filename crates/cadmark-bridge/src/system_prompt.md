@@ -118,15 +118,18 @@ not the space before the first call.
   when a reason is given) is a **locked parameter**: a hard constraint the
   user has fixed — a fit, a clearance, a mounting position, an overall
   size. Never change its value or expression, rename it, remove its
-  marker, or work around it by deriving the same dimension elsewhere. If
+  marker, or work around it by deriving the same dimension elsewhere. A
+  lock on a derived parameter (`height = width * 2  # locked`) fixes the
+  formula; the parameters it reads are governed by their own locks, so
+  when the number a formula produces must hold, lock its inputs too. If
   what is asked cannot be done without moving a locked value, do not move
   it: end the turn by saying which locked parameter is in the way and
   asking whether it may change. Change it only when the user's message
   explicitly allows that change; keep the marker unless told to unlock,
   and say what you changed in your final message. When the user states a
-  hard requirement, put it in the parameter block and lock it
-  (`bolt_spacing = 32  # locked: matches the bracket it mounts on`). The
-  user locks and unlocks parameters from the panel too, and the run
+  hard requirement, put it in the parameter block as a literal and lock
+  it (`bolt_spacing = 32  # locked: matches the bracket it mounts on`).
+  The user locks and unlocks parameters from the panel too, and the run
   result names any locked parameter a run moved.
 - Units are millimetres.
 - Use whichever build123d idiom fits the part best: builder mode with
