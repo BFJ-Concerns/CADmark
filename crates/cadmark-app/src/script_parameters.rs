@@ -58,9 +58,10 @@
 // position — which the AI may change only with the user's explicit
 // permission. The marker lives in the script because the script is the
 // design: it survives every rewrite the AI makes, shows in the code
-// panel, and travels with the file. Locking and unlocking are the same
-// kind of surgical edit as a value change: the marker's bytes and
-// nothing else.
+// panel, and travels with the file. A comment belongs to the statement
+// that ends its line, so a binding followed by a semicolon has nowhere
+// for a marker of its own. Locking and unlocking are the same kind of
+// surgical edit as a value change: the marker's bytes and nothing else.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -74,9 +75,11 @@ pub struct Parameter {
     pub binding: Binding,
     /// The `# locked` marker on the binding's line, when it has one.
     pub lock: Option<Lock>,
-    /// Byte offset just past the binding statement's last token, where a
-    /// marker is added.
-    statement_end: usize,
+    /// The bytes after the binding statement's last token that are its
+    /// own — the rest of its line, up to the line ending — where its
+    /// marker is or would be. `None` when a semicolon follows the
+    /// statement, so nothing on the line is its comment.
+    tail: Option<Range<usize>>,
 }
 
 /// A `# locked` marker: the declaration that a parameter is a hard
@@ -160,6 +163,10 @@ pub enum RewriteError {
     NotEditable(String),
     #[error("{0} is not a number that can be written into the script")]
     NotANumber(f64),
+    #[error(
+        "{0} shares its line with a later statement, so there is nowhere on it for a `# locked` marker of its own"
+    )]
+    SharedLine(String),
 }
 
 /// Every module-level name the script binds to a number, in source order.
@@ -169,7 +176,7 @@ pub fn extract(source: &str) -> Vec<Parameter> {
     let mut known: HashSet<String> = HashSet::new();
     let mut imports = Imports::default();
 
-    for statement in module_statements(&tokens) {
+    for (statement, terminator) in module_statements(&tokens) {
         note_import(statement, &mut imports);
         let Some((targets, value)) = split_assignment(statement) else {
             continue;
@@ -185,8 +192,8 @@ pub fn extract(source: &str) -> Vec<Parameter> {
             }
         }
         let line = statement[0].line;
-        let statement_end = statement.last().map_or(0, |token| token.span.end);
-        let lock = trailing_lock(source, statement_end);
+        let tail = statement_tail(source, statement, terminator);
+        let lock = tail.clone().and_then(|tail| trailing_lock(source, tail));
         for (name, bound) in bindings {
             let binding = bound.and_then(|tokens| {
                 if let Some((value, span, notation)) = literal(tokens) {
@@ -211,7 +218,7 @@ pub fn extract(source: &str) -> Vec<Parameter> {
                         line,
                         binding,
                         lock: lock.clone(),
-                        statement_end,
+                        tail: tail.clone(),
                     };
                     known.insert(name.to_string());
                     match found.iter_mut().find(|existing| existing.name == name) {
@@ -261,12 +268,12 @@ pub fn lock(source: &str, name: &str, reason: Option<&str>) -> Result<String, Re
         Some(reason) => format!("  # locked: {reason}"),
         None => "  # locked".to_string(),
     };
+    let Some(tail) = parameter.tail else {
+        return Err(RewriteError::SharedLine(name.to_string()));
+    };
     let replaced = match parameter.lock {
         Some(existing) => existing.span,
-        None => {
-            let end = line_end(source, parameter.statement_end);
-            end..end
-        }
+        None => tail.end..tail.end,
     };
     Ok(splice(source, replaced, &marker))
 }
@@ -296,23 +303,35 @@ fn splice(source: &str, span: Range<usize>, replacement: &str) -> String {
     out
 }
 
-/// The byte offset of the newline ending the physical line `at` is on,
-/// or the end of the source.
-fn line_end(source: &str, at: usize) -> usize {
-    source[at..]
-        .find('\n')
-        .map_or(source.len(), |offset| at + offset)
+/// The bytes after a statement's last token that belong to it: up to
+/// its line ending when the statement ends its line, with a `\r` before
+/// the `\n` counted as line ending rather than content. A statement a
+/// semicolon follows owns nothing — the line's comment belongs to the
+/// statement that ends the line — so it has no tail.
+fn statement_tail(
+    source: &str,
+    statement: &[Token<'_>],
+    terminator: &Token<'_>,
+) -> Option<Range<usize>> {
+    if terminator.text == ";" {
+        return None;
+    }
+    let start = statement.last().map_or(0, |token| token.span.end);
+    let mut end = terminator.span.start;
+    if source[start..end].ends_with('\r') {
+        end -= 1;
+    }
+    Some(start..end)
 }
 
-/// The `# locked` marker ending the physical line a statement ends on,
-/// when there is one. The bytes between a statement's last token and the
-/// newline hold only whitespace and comments — anything else would have
+/// The `# locked` marker in a statement's tail, when there is one. The
+/// tail holds only whitespace and comments — anything else would have
 /// been a token — so the scan is direct. The marker is the last comment
-/// segment on the line whose text begins `locked`, so a comment of the
-/// author's before it (`# mm  # locked`) is left as theirs.
-fn trailing_lock(source: &str, statement_end: usize) -> Option<Lock> {
-    let end = line_end(source, statement_end);
-    let tail = &source[statement_end..end];
+/// segment whose text begins `locked`, so a comment of the author's
+/// before it (`# mm  # locked`) is left as theirs.
+fn trailing_lock(source: &str, tail: Range<usize>) -> Option<Lock> {
+    let (statement_end, end) = (tail.start, tail.end);
+    let tail = &source[tail];
     let mut found = None;
     for (hash, _) in tail.match_indices('#') {
         let body = tail[hash + 1..].trim_start();
@@ -706,11 +725,19 @@ fn end_of_replacement_field(bytes: &[u8], from: usize) -> usize {
 // The grammar
 // ---------------------------------------------------------------------
 
-/// The simple statements at module scope, in source order.
-fn module_statements<'t, 'a>(tokens: &'t [Token<'a>]) -> Vec<&'t [Token<'a>]> {
+/// The simple statements at module scope, in source order, each with
+/// the `End` token that closes it: a newline, a semicolon, or the end of
+/// the source.
+fn module_statements<'t, 'a>(tokens: &'t [Token<'a>]) -> Vec<(&'t [Token<'a>], &'t Token<'a>)> {
     tokens
-        .split(|token| token.kind == Kind::End)
-        .filter(|statement| statement.first().is_some_and(|token| token.module_scope))
+        .split_inclusive(|token| token.kind == Kind::End)
+        .filter_map(|run| {
+            let (terminator, statement) = run.split_last()?;
+            statement
+                .first()
+                .is_some_and(|token| token.module_scope)
+                .then_some((statement, terminator))
+        })
         .collect()
 }
 
@@ -1558,6 +1585,48 @@ real = 4
         assert!(
             edited.starts_with("width = 90  # locked: fits the bracket\n"),
             "{edited}"
+        );
+    }
+
+    #[test]
+    fn a_marker_belongs_to_the_statement_that_ends_its_line() {
+        // Two bindings on one line: the comment is the second's, and the
+        // first has nowhere for a marker of its own. A string holding
+        // the marker's text is a value, not a comment.
+        let source = "width = 80; depth = 40  # locked\nwall = 2; note = \"# locked\"\n";
+        assert!(lock_of(source, "width").is_none());
+        assert!(lock_of(source, "depth").is_some());
+        assert!(lock_of(source, "wall").is_none());
+        assert_eq!(
+            lock(source, "width", None),
+            Err(RewriteError::SharedLine("width".into()))
+        );
+        // Toggling the first leaves the second's marker where it is.
+        assert_eq!(unlock(source, "width").unwrap(), source);
+        assert_eq!(
+            unlock(source, "depth").unwrap(),
+            "width = 80; depth = 40\nwall = 2; note = \"# locked\"\n"
+        );
+    }
+
+    #[test]
+    fn lock_edits_keep_crlf_line_endings() {
+        // The marker goes before the line ending, and unlocking takes
+        // the marker alone: the carriage return is not part of it.
+        let source = "width = 80\r\ndepth = 40  # locked: fit\r\n";
+        assert!(lock_of(source, "width").is_none());
+        assert_eq!(
+            lock_of(source, "depth").unwrap().reason.as_deref(),
+            Some("fit")
+        );
+        let locked = lock(source, "width", None).unwrap();
+        assert_eq!(
+            locked,
+            "width = 80  # locked\r\ndepth = 40  # locked: fit\r\n"
+        );
+        assert_eq!(
+            unlock(&locked, "depth").unwrap(),
+            "width = 80  # locked\r\ndepth = 40\r\n"
         );
     }
 
