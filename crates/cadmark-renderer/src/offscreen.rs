@@ -4,10 +4,11 @@
 // against its own texture, sized to whatever the caller asks for, and
 // reads the result back as RGBA bytes.
 //
-// It renders what it is handed — a mesh, uniforms and a clear colour —
+// It renders what it is handed — parts, uniforms and a clear colour —
 // and holds nothing between calls except its GPU resources, so it never
 // touches the live viewport's target, camera or timing.
 
+use cadmark_core::geometry::PartId;
 use cadmark_core::mesh::TessellatedMesh;
 
 use crate::mesh::GpuMesh;
@@ -26,6 +27,15 @@ const BYTES_PER_PIXEL: u32 = 4;
 /// the shader display-encodes its own output: build the uniforms from a
 /// renderer whose `target_is_srgb` is false.
 pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// One part to draw in an offscreen render: its mesh, and the part ID
+/// that chooses its palette colour, so the picture shows each part in the
+/// colour the viewport gives it.
+#[derive(Debug, Clone, Copy)]
+pub struct OffscreenPart<'a> {
+    pub id: PartId,
+    pub mesh: &'a TessellatedMesh,
+}
 
 /// An image rendered off-screen: RGBA rows, top to bottom, no padding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,29 +111,25 @@ impl OffscreenRenderer {
         (self.width, self.height)
     }
 
-    /// Draw `mesh` with `uniforms` and read the result back. Blocks until
-    /// the GPU has finished, so the caller is a worker thread, never the
-    /// frame loop.
+    /// Draw `parts` with `uniforms` and read the result back. Blocks
+    /// until the GPU has finished, so the caller is a worker thread,
+    /// never the frame loop.
     pub fn render(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        mesh: Option<&TessellatedMesh>,
+        parts: &[OffscreenPart<'_>],
         sketch: Option<&cadmark_core::sketch::SketchProfile>,
         uniforms: &MeshUniforms,
         clear_colour: wgpu::Color,
     ) -> Result<RenderedImage, OffscreenError> {
-        // One mesh, uploaded as part zero: this path renders a framed
-        // picture, not a pickable scene, so no part distinction is read
-        // back from it.
-        let gpu_mesh: Vec<GpuMesh> = mesh
-            .map(|mesh| {
-                // No vertex markers: this path renders a framed picture,
-                // and a marker is an aiming aid for a viewport the user
-                // is clicking in.
-                crate::pipeline::upload_mesh(device, mesh, cadmark_core::geometry::PartId(0), &[])
-            })
-            .into_iter()
+        // Each part is uploaded under its own ID so the shader colours it
+        // from the palette as the viewport does. No vertex markers: this
+        // path renders a framed picture, not a pickable scene, and a
+        // marker is an aiming aid for a viewport the user is clicking in.
+        let gpu_mesh: Vec<GpuMesh> = parts
+            .iter()
+            .map(|part| crate::pipeline::upload_mesh(device, part.mesh, part.id, &[]))
             .collect();
         let gpu_sketch = sketch.map(|sketch| crate::pipeline::upload_sketch(device, sketch));
 
@@ -258,6 +264,28 @@ mod tests {
             .expect("the adapter gave no device")
     }
 
+    /// A single-part scene: one mesh as part zero.
+    fn solo(mesh: &TessellatedMesh) -> Vec<OffscreenPart<'_>> {
+        vec![OffscreenPart {
+            id: PartId(0),
+            mesh,
+        }]
+    }
+
+    /// The cube moved along X, for a scene of parts side by side.
+    fn cube_at(x: f32) -> TessellatedMesh {
+        let mut mesh = cube();
+        for vertex in &mut mesh.vertices {
+            vertex.position[0] += x;
+        }
+        for edge in &mut mesh.edges {
+            for point in &mut edge.points {
+                point[0] += x;
+            }
+        }
+        mesh
+    }
+
     /// A unit cube centred on the origin, with its twelve edges as the
     /// wireframe overlay.
     fn cube() -> TessellatedMesh {
@@ -350,7 +378,7 @@ mod tests {
             .render(
                 &device,
                 &queue,
-                Some(&cube()),
+                &solo(&cube()),
                 None,
                 &scene.mesh_uniforms((width, height)),
                 clear,
@@ -429,7 +457,7 @@ mod tests {
             .render(
                 &device,
                 &queue,
-                None,
+                &[],
                 None,
                 &scene.mesh_uniforms((512, 512)),
                 wgpu::Color {
@@ -504,7 +532,7 @@ mod tests {
             .render(
                 &device,
                 &queue,
-                None,
+                &[],
                 Some(&profile),
                 &scene.mesh_uniforms((512, 512)),
                 wgpu::Color {
@@ -576,7 +604,7 @@ mod tests {
                 .render(
                     &device,
                     &queue,
-                    Some(&cube()),
+                    &solo(&cube()),
                     None,
                     &scene.mesh_uniforms((512, 512)),
                     clear,
@@ -655,7 +683,7 @@ mod tests {
                 .render(
                     &device,
                     &queue,
-                    Some(&cube()),
+                    &solo(&cube()),
                     None,
                     &scene.mesh_uniforms((512, 512)),
                     clear,
@@ -761,7 +789,7 @@ mod tests {
             .render(
                 &device,
                 &queue,
-                Some(&cube()),
+                &solo(&cube()),
                 None,
                 &scene.mesh_uniforms((512, 512)),
                 clear,
@@ -772,7 +800,7 @@ mod tests {
             .render(
                 &device,
                 &queue,
-                Some(&cube()),
+                &solo(&cube()),
                 None,
                 &scene.mesh_uniforms((512, 512)),
                 clear,
@@ -800,6 +828,90 @@ mod tests {
         assert!(
             ghosted > lit / 40,
             "the ghosted solid vanished into the background entirely"
+        );
+    }
+
+    #[test]
+    fn each_part_is_drawn_in_its_own_palette_colour() {
+        // Two cubes side by side, seen from the front: the pixel at the
+        // centre of each is that part's palette colour, so the two differ
+        // from each other as well as from the background. One mesh
+        // uploaded as part zero would paint both the same grey.
+        let (device, queue) = gpu();
+        let (width, height) = (240u32, 120u32);
+        let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
+        let (left, right) = (cube_at(-1.5), cube_at(1.5));
+
+        let mut scene = crate::pipeline::Renderer::new();
+        scene.target_is_srgb = false;
+        scene
+            .camera
+            .look_at_standard(crate::camera::StandardView::Front);
+        let bounds = crate::camera::Bounds3::from_positions(
+            left.vertices
+                .iter()
+                .chain(&right.vertices)
+                .map(|vertex| vertex.position),
+        )
+        .expect("bounds");
+        scene
+            .camera
+            .frame_bounds(bounds, width as f32 / height as f32);
+        let background = [40u8, 42, 48];
+        let clear = wgpu::Color {
+            r: f64::from(background[0]) / 255.0,
+            g: f64::from(background[1]) / 255.0,
+            b: f64::from(background[2]) / 255.0,
+            a: 1.0,
+        };
+
+        let image = renderer
+            .render(
+                &device,
+                &queue,
+                &[
+                    OffscreenPart {
+                        id: PartId(0),
+                        mesh: &left,
+                    },
+                    OffscreenPart {
+                        id: PartId(1),
+                        mesh: &right,
+                    },
+                ],
+                None,
+                &scene.mesh_uniforms((width, height)),
+                clear,
+            )
+            .expect("render");
+
+        let pixel = |x: u32, y: u32| {
+            let at = ((y * width + x) * 4) as usize;
+            [image.rgba[at], image.rgba[at + 1], image.rgba[at + 2]]
+        };
+        let apart = |a: [u8; 3], b: [u8; 3]| {
+            a.iter()
+                .zip(b)
+                .map(|(l, r)| u32::from(l.abs_diff(r)))
+                .sum::<u32>()
+        };
+        // The middle of each part's run of drawn pixels along the centre
+        // row: face colour, clear of the dark edge strokes at either end.
+        let middle_of = |half: std::ops::Range<u32>| {
+            let drawn: Vec<u32> = half
+                .filter(|&x| apart(pixel(x, height / 2), background) > 60)
+                .collect();
+            assert!(
+                !drawn.is_empty(),
+                "a part is missing from its half of the image"
+            );
+            pixel(drawn[drawn.len() / 2], height / 2)
+        };
+        let one = middle_of(0..width / 2);
+        let other = middle_of(width / 2..width);
+        assert!(
+            apart(one, other) > 60,
+            "the two parts share a colour: {one:?} against {other:?}"
         );
     }
 
