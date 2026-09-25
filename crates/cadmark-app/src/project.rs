@@ -375,6 +375,20 @@ impl Project {
         Ok(file_name)
     }
 
+    /// Replace the worker with a channel the test holds, so the command
+    /// a path sends can be read back off it.
+    #[cfg(test)]
+    pub(crate) fn stand_in_worker(&mut self) -> mpsc::Receiver<OrchestratorCommand> {
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (_result_tx, result_rx) = mpsc::channel();
+        self.orchestrator = Some(OrchestratorHandle {
+            commands: cmd_tx,
+            results: result_rx,
+            thread: std::thread::spawn(|| {}),
+        });
+        cmd_rx
+    }
+
     /// Hand a command to the worker.
     pub fn send(&mut self, command: OrchestratorCommand) -> Result<(), String> {
         self.orchestrator
