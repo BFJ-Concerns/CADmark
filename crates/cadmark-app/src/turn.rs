@@ -462,7 +462,19 @@ impl<
                             model: model.clone(),
                             source: code.clone(),
                         });
-                        let output = describe_model(&model);
+                        let mut output = describe_model(&model);
+                        // A locked parameter the run moved is put to the
+                        // model at once, while it can still restore it.
+                        let moved = locked_parameter_changes(original.as_deref(), &code);
+                        if !moved.is_empty() {
+                            output.push_str(&format!(
+                                "\n\nLocked parameters: {}. A locked parameter changes only with \
+                                 the user's explicit permission in this conversation. Without \
+                                 it, restore the value (keeping the `# locked` marker) and run \
+                                 again; with it, say so in your final message.",
+                                moved.join("; ")
+                            ));
+                        }
                         executed = Some(code.clone());
                         last_good = Some((code, model, summary));
                         last_failure = None;
@@ -519,6 +531,16 @@ impl<
                     return TurnOutcome::Failed {
                         error: format!("could not write the script: {error}"),
                     };
+                }
+                // The user sees any locked parameter the turn moved, in
+                // chat, whatever the AI's closing message says about it.
+                let moved = locked_parameter_changes(original.as_deref(), &code);
+                if !moved.is_empty() {
+                    emit(TurnEvent::Notice(format!(
+                        "Locked parameters changed this turn: {}. If that was not agreed, \
+                         undo restores the step before it.",
+                        moved.join("; ")
+                    )));
                 }
                 TurnOutcome::Completed {
                     summary,
@@ -1137,6 +1159,48 @@ fn changed_parameter_values(before: &str, after: &str) -> Vec<String> {
                 .find(|earlier| earlier.name == parameter.name)?
                 .value()?;
             (old != new).then(|| format!("{} {old} → {new}", parameter.name))
+        })
+        .collect()
+}
+
+/// What became of the parameters `before` had locked, in `after`: one
+/// entry per locked parameter that was removed, unlocked, or changed while
+/// still locked, in the order `before` lists them. A lock added in `after`
+/// is not a change. Empty when nothing locked was touched, or when there
+/// was no script before.
+fn locked_parameter_changes(before: Option<&str>, after: &str) -> Vec<String> {
+    let Some(before) = before else {
+        return Vec::new();
+    };
+    let after = script_parameters::extract(after);
+    script_parameters::extract(before)
+        .into_iter()
+        .filter_map(|was| {
+            let lock = was.lock.as_ref()?;
+            let name = &was.name;
+            let reason = lock
+                .reason
+                .as_deref()
+                .map(|reason| format!(", locked because: {reason}"))
+                .unwrap_or_default();
+            let now = after.iter().find(|now| now.name == *name);
+            Some(match now {
+                None => format!("`{name}` was removed (it was locked{reason})"),
+                Some(now) if now.lock.is_none() && now.stated() != was.stated() => format!(
+                    "`{name}` was unlocked and changed {} → {}{reason}",
+                    was.stated(),
+                    now.stated()
+                ),
+                Some(now) if now.lock.is_none() => {
+                    format!("`{name}` was unlocked (its `# locked` marker was removed{reason})")
+                }
+                Some(now) if now.stated() != was.stated() => format!(
+                    "`{name}` changed {} → {} while locked{reason}",
+                    was.stated(),
+                    now.stated()
+                ),
+                Some(_) => return None,
+            })
         })
         .collect()
 }
@@ -3765,6 +3829,139 @@ mod tests {
             covered / (info.width * info.height) as f32 > 0.2,
             "the freshly built model fills the frame"
         );
+    }
+
+    #[test]
+    fn a_locked_parameter_the_script_moved_is_named_with_what_happened_to_it() {
+        let before = "wall = 2  # locked: must clear the M3 head\n\
+                      gap = 0.4  # locked\n\
+                      height = wall * 10  # locked\n\
+                      free = 1\n\
+                      keep = 5  # locked\n";
+        let after = "wall = 3  # locked: must clear the M3 head\n\
+                     gap = 0.4\n\
+                     height = wall * 12  # locked\n\
+                     free = 2\n\
+                     keep = 5  # locked\n\
+                     new = 7  # locked\n";
+        let changes = locked_parameter_changes(Some(before), after);
+        assert_eq!(
+            changes,
+            [
+                "`wall` changed 2 → 3 while locked, locked because: must clear the M3 head",
+                "`gap` was unlocked (its `# locked` marker was removed)",
+                "`height` changed wall * 10 → wall * 12 while locked",
+            ]
+        );
+        // A removed one, and an unlock that also moved the value.
+        let changes = locked_parameter_changes(Some(before), "gap = 0.5\nfree = 1\n");
+        assert!(changes[0].starts_with("`wall` was removed"), "{changes:?}");
+        assert_eq!(changes[1], "`gap` was unlocked and changed 0.4 → 0.5");
+        // Nothing locked touched, or no script before: nothing to say.
+        assert!(locked_parameter_changes(Some(before), before).is_empty());
+        assert!(locked_parameter_changes(None, after).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_locked_parameter_the_ai_changes_is_flagged_to_it_and_to_the_user() {
+        let project = tempfile::tempdir().unwrap();
+        let script_path = project.path().join("part.py");
+        std::fs::write(&script_path, "wall = 2  # locked: fit\nfree = 1\n").unwrap();
+        let run = |code: &str, id: &str| {
+            Ok(ModelResponse {
+                output_items: Vec::new(),
+                reached_output_limit: false,
+                usage: None,
+                text: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: id.into(),
+                    name: RUN_SCRIPT.into(),
+                    arguments: serde_json::json!({"code": code, "summary": "Thicker"}),
+                }],
+            })
+        };
+        let model = ScriptedModel::new([
+            run("wall = 3  # locked: fit\nfree = 1\n", "c1"),
+            text("Made the wall 3."),
+        ]);
+        let mut executor = FakeExecutor::new([]);
+        let mut render = NoRender;
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            references: &NoReferences,
+            script_path: script_path.clone(),
+            cancel: CancelFlag::new(),
+        };
+        let mut events = Vec::new();
+        let outcome = runner
+            .run(&Conversation::new(), &chat("thicker wall"), |event| {
+                events.push(event)
+            })
+            .await;
+        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+
+        // The run result the AI read says which locked value moved and
+        // what it owes: a restore, or a word in its final message.
+        let run_output = events
+            .iter()
+            .find_map(|event| match event {
+                TurnEvent::ToolFinished {
+                    call_id, output, ..
+                } if call_id == "c1" => Some(output.clone()),
+                _ => None,
+            })
+            .expect("the run finished");
+        assert!(
+            run_output.contains("`wall` changed 2 → 3 while locked, locked because: fit"),
+            "{run_output}"
+        );
+        assert!(run_output.contains("explicit permission"), "{run_output}");
+        // And the user is told in chat, by CADmark rather than the AI.
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TurnEvent::Notice(text) if text.contains("Locked parameters changed this turn") && text.contains("`wall`")
+            )),
+            "{events:?}"
+        );
+
+        // A turn that leaves every locked parameter alone raises nothing.
+        std::fs::write(&script_path, "wall = 2  # locked: fit\nfree = 1\n").unwrap();
+        let model = ScriptedModel::new([
+            run("wall = 2  # locked: fit\nfree = 9\n", "c2"),
+            text("Changed free."),
+        ]);
+        let mut executor = FakeExecutor::new([]);
+        let mut render = NoRender;
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            references: &NoReferences,
+            script_path,
+            cancel: CancelFlag::new(),
+        };
+        let mut events = Vec::new();
+        runner
+            .run(&Conversation::new(), &chat("more free"), |event| {
+                events.push(event)
+            })
+            .await;
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                TurnEvent::Notice(text) if text.contains("Locked parameters")
+            )),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            TurnEvent::ToolFinished { output, .. } if output.contains("Locked parameters")
+        )));
     }
 
     #[test]

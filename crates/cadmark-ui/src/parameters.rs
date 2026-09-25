@@ -7,6 +7,13 @@
 // expression itself for the ones derived from other parameters.
 // Committing a value is what the application turns into a rewritten
 // script, a rebuild and a design step.
+//
+// Each row also carries a lock. A locked parameter is a hard constraint
+// the user has fixed — a fit, a mounting position, an overall size — which
+// the AI may change only with the user's explicit permission; the lock is
+// a `# locked` comment on the parameter's line in the script, so it shows
+// in the code panel and survives every rewrite. The user's own edits are
+// never blocked by it: the lock binds the AI, not the person who set it.
 
 use crate::theme;
 
@@ -19,6 +26,10 @@ pub struct ParameterRow<'a> {
     pub expression: &'a str,
     /// One-based source line, for the tooltip.
     pub line: u32,
+    /// Whether the script marks this parameter `# locked`.
+    pub locked: bool,
+    /// The reason the marker gives, when it gives one.
+    pub lock_reason: Option<&'a str>,
 }
 
 /// What the panel shows.
@@ -38,6 +49,11 @@ pub enum ParametersAction {
     Commit {
         name: String,
         value: f64,
+    },
+    /// Mark this parameter locked, or unmark it, in the script.
+    SetLocked {
+        name: String,
+        locked: bool,
     },
 }
 
@@ -72,31 +88,34 @@ impl ParametersPanel {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for row in view.parameters {
-                    let committed = self.show_row(ui, row, view.controls_enabled);
-                    if let Some(value) = committed {
-                        action = ParametersAction::Commit {
-                            name: row.name.to_string(),
-                            value,
-                        };
+                    match self.show_row(ui, row, view.controls_enabled) {
+                        RowEdit::None => {}
+                        RowEdit::Value(value) => {
+                            action = ParametersAction::Commit {
+                                name: row.name.to_string(),
+                                value,
+                            };
+                        }
+                        RowEdit::Locked(locked) => {
+                            action = ParametersAction::SetLocked {
+                                name: row.name.to_string(),
+                                locked,
+                            };
+                        }
                     }
                 }
             });
         action
     }
 
-    /// One row; `Some(value)` when the user finished an edit.
-    fn show_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        row: &ParameterRow<'_>,
-        enabled: bool,
-    ) -> Option<f64> {
-        let mut committed = None;
+    /// One row, and what the user did to it.
+    fn show_row(&mut self, ui: &mut egui::Ui, row: &ParameterRow<'_>, enabled: bool) -> RowEdit {
+        let mut edit = RowEdit::None;
         ui.horizontal(|ui| {
             // The row never grows past its column: a name that does not
             // fit is cut short (egui shows the whole of a truncated label
             // on hover), and the value keeps a fixed share at the right.
-            let name_width = (ui.available_width() - VALUE_WIDTH).max(0.0);
+            let name_width = (ui.available_width() - VALUE_WIDTH - LOCK_WIDTH).max(0.0);
             ui.scope(|ui| {
                 ui.set_max_width(name_width);
                 ui.add(
@@ -112,6 +131,43 @@ impl ParametersPanel {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // The lock sits at the row's right edge, past the value.
+                let (glyph, colour, hint) = if row.locked {
+                    (
+                        LOCKED_GLYPH,
+                        theme::TEXT,
+                        match row.lock_reason {
+                            Some(reason) => format!(
+                                "Locked: {reason}. The AI may not change this without your \
+                                 say-so; click to unlock."
+                            ),
+                            None => "Locked: the AI may not change this without your say-so; \
+                                     click to unlock."
+                                .to_string(),
+                        },
+                    )
+                } else {
+                    (
+                        UNLOCKED_GLYPH,
+                        theme::TEXT_MUTED,
+                        "Click to lock: the AI will keep this value unless you allow a change."
+                            .to_string(),
+                    )
+                };
+                let lock = ui.add_enabled(
+                    enabled,
+                    egui::Button::new(
+                        egui::RichText::new(glyph)
+                            .size(theme::SMALL_SIZE)
+                            .color(colour),
+                    )
+                    .frame(false)
+                    .min_size(egui::vec2(LOCK_WIDTH, 0.0)),
+                );
+                if lock.on_hover_text(hint).clicked() {
+                    edit = RowEdit::Locked(!row.locked);
+                }
+
                 let Some(value) = row.value else {
                     ui.add(
                         egui::Label::new(
@@ -148,18 +204,35 @@ impl ParametersPanel {
                 if drafting && (response.drag_stopped() || response.lost_focus()) {
                     let (_, draft) = self.draft.take().unwrap_or((String::new(), value));
                     if draft != value {
-                        committed = Some(draft);
+                        edit = RowEdit::Value(draft);
                     }
                 }
             });
         });
-        committed
+        edit
     }
+}
+
+/// What one row's frame produced.
+enum RowEdit {
+    None,
+    /// The user finished editing the value.
+    Value(f64),
+    /// The user clicked the lock; the new state.
+    Locked(bool),
 }
 
 /// Width kept for the value field at the right of each row, so a long
 /// name is cut short rather than pushing the value out of the panel.
 const VALUE_WIDTH: f32 = 80.0;
+
+/// Width of the lock toggle at the row's edge.
+const LOCK_WIDTH: f32 = 18.0;
+
+/// A closed padlock, from egui's bundled emoji font.
+const LOCKED_GLYPH: &str = "\u{1F512}";
+/// An open padlock.
+const UNLOCKED_GLYPH: &str = "\u{1F513}";
 
 /// A drag step proportional to the value, so a 200 mm plate and a 0.4 mm
 /// clearance are both draggable.
@@ -226,12 +299,16 @@ mod tests {
                 value: Some(250.0),
                 expression: "250.0",
                 line: 3,
+                locked: true,
+                lock_reason: Some("the printer's height"),
             },
             ParameterRow {
                 name: "clip_height",
                 value: None,
                 expression: "printer_build_volume_z - 2 * flange_thickness - mating_flange_thickness",
                 line: 4,
+                locked: false,
+                lock_reason: None,
             },
         ];
         let column_width = 240.0;
