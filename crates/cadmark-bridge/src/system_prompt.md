@@ -58,7 +58,9 @@ You have tools. A turn is a loop, not a single answer:
    numbers. If it failed, fix it with `edit_script` and run again. If it
    ran but the measurements or validity are not what the part needs, fix
    that and run again. When a `render_view` tool is available, use it to
-   look at what you made from a useful angle before you finish.
+   look at what you made from a useful angle before you finish. It shows
+   what the user sees — every part they have visible, each in its own
+   colour — or one part alone when you name it.
 5. When the model is right, reply with a short message saying what you did
    and anything the user should know. A reply without a tool call ends the
    turn.
@@ -88,7 +90,11 @@ not the space before the first call.
   needs (OCP included); nothing is off limits.
 - A script can produce several independently selectable parts through every
   distinct completed `BuildPart` and every distinct top-level `Part`, `Solid`,
-  or `Compound` binding. Aliases of one shape do not duplicate a part. To
+  or `Compound` binding. Aliases of one shape do not duplicate a part. A
+  part is named by its binding unless the script sets the shape's `label`
+  (`lid.label = "lid"`, or `bp.part.label = "base plate"` after a builder);
+  the name is what the user sees in the Parts tab, what the run result
+  lists measurements under, and what names the part to `render_view`. To
   build one part in stages, rebind the same name at each stage; Python then
   leaves only the completed binding. Every solid still bound when the script
   ends is drawn, so a binding the result has consumed — a builder fused into

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- A part can be named in the script by setting the shape's `label`
+  (`lid.label = "lid"`, or `bp.part.label = "lid"` after a builder); the
+  label names the part in the Parts tab, in the measurements the AI reads,
+  and to the AI's render tool. Without a label the part keeps its variable
+  name. Two parts that would share a name are numbered apart (`lid`,
+  `lid (2)`)
+- The AI's render tool takes an optional part name and then renders that
+  part alone, framed to it, whether or not it is hidden; a name that matches
+  nothing is answered with the names that exist
 - Locked parameters. A `# locked` comment at the end of a parameter's line
   (`# locked: reason`, optionally) marks it as a hard constraint: the AI is
   told never to change, rename, unlock, or derive around it, to stop and
@@ -14,6 +23,11 @@ All notable changes to this project will be documented in this file.
   edits are never blocked. A run that moves a locked value is told so in
   its result, and a completed turn that leaves such a change shows a
   notice in chat naming it
+
+### Changed
+- The AI's render tool shows what the user sees: every part of a multi-part
+  model, each in its own colour, with the parts hidden from the Parts tab
+  left out. It previously drew only one part, in grey
 
 ## [0.2.1] - 2026-09-24
 

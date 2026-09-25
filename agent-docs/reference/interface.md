@@ -121,7 +121,8 @@ The AI's tools (`crates/cadmark-bridge/src/tools.rs`, dispatched in `TurnRunner:
 | `read_script` | The script, or a line range, with line numbers. |
 | `run_python` | Runs a snippet after the current script in its namespace (or alone with `standalone`) under the script execution limits, in the confined kernel worker; returns what it printed, the `repr` of a trailing expression, and any traceback. Keeps no model. |
 | `lookup_docs` | Answers a build123d question from the bundled documentation. |
-| `render_view`, `reference_images`, `keep_reference` | Image tools, offered only to a model that reads images. |
+| `render_view` | A shaded PNG of the model with edges, at the viewport's resolution, from a standard view or the user's camera, framed to what it draws. Without `part` it draws every part the user has visible, each in its palette colour, and refuses when every part is hidden; with `part` it draws that one part alone, hidden or not, framed to it. A `part` that matches no name (exact first, then a unique case-insensitive match) is refused with the names that exist. Offered only to a model that reads images. |
+| `reference_images`, `keep_reference` | Reference-library image tools, offered only to a model that reads images. |
 
 A turn keeps only its last successful `run_script`: edits with no successful run after them are discarded and the turn is reported as failed with the script restored. The kernel worker serves snippets through `WorkerRequest::RunSnippet` (`crates/cadmark-kernel/src/protocol.rs`, `execution::run_snippet`), and captures a script's stdout into `ExecutedModel::printed`, cut at `PRINTED_OUTPUT_LIMIT`.
 
@@ -133,9 +134,9 @@ Every request is recorded under `.cadmark/requests/` in the project folder as `<
 
 Every request carries the script on disk in a `<current_script>` block placed before the user's words, whether or not a skill is active. The block states whether the file is unchanged since the last successful `run_script` in the saved conversation (the executed text is recorded on the tool call as `executed_source`, since a run after edits carries no `code`), differs from it (naming each parameter whose literal value changed), or has no run in the conversation at all (a new or condensed chat). An empty part is stated as having no script yet.
 
-A completed turn's reply ends with a change report: face count, volume, and overall size before and after the turn. A single-part model reads as "Model change: …" or "Model unchanged." with both sets of values. A multi-part model reports one line per part under its script binding name, matched to the part of the same name before the turn; a binding no longer produced is "removed", one not produced before is "new". The `run_script` tool result the AI reads carries the same per-part measurements ("Parts: name: …; name: …") when the script completed more than one part.
+A completed turn's closing message is shown as the AI wrote it; nothing is appended to it. The `run_script` tool result the AI reads carries per-part measurements ("Parts: name: …; name: …") under each part's name when the script completed more than one part.
 
-Source: `crates/cadmark-ui/src/chat.rs` (`show_tool_calls`, `tool_group_label`, `tool_call_label`), `crates/cadmark-app/src/app.rs` (`finish_turn`, `record_tool_start`), `crates/cadmark-bridge/src/openai_compatible.rs` (`ResponseAssembly`), `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`, `describe_model`), `crates/cadmark-core/src/geometry.rs` (`describe_model_change`).
+Source: `crates/cadmark-ui/src/chat.rs` (`show_step_run`, `tool_group_label`, `tool_call_label`), `crates/cadmark-app/src/app.rs` (`finish_turn`, `record_tool_start`), `crates/cadmark-bridge/src/openai_compatible.rs` (`ResponseAssembly`), `crates/cadmark-app/src/turn.rs` (`current_script_block`, `last_successful_run`, `describe_model`), `crates/cadmark-core/src/geometry.rs` (`describe_parts`).
 
 The **Skills** menu inserts a built-in command into the draft. Start a message or
 spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
@@ -172,9 +173,11 @@ Source: `crates/cadmark-ui/src/parameters.rs`, `crates/cadmark-app/src/script_pa
 
 One row per `LoadedPart` in binding order: a swatch in the part's palette colour, the name, a visibility tick box, and a warning glyph when the part is not export-ready. The active part's row is raised. Clicking a name selects the whole part (`PartsAction::Select`); the tick box hides or shows it (`PartsAction::SetVisible`).
 
-A hidden part's `GpuMesh::visible` is false, so every renderer pass skips it: it is not shaded, not in the picking texture, and not in the depth prepass. The set of hidden parts is kept on the project by script binding name (`Project::hidden_parts`) and reapplied to each freshly executed model by name, since part ordinals are not stable across executions; it is emptied when another script is opened (`Project::switch_part`), and a new project starts with none. Hiding the active part clears the selection.
+A part's name is the shape's `label` when the script set one (`lid.label = "lid"`, or `bp.part.label = "lid"` after a `BuildPart`), otherwise the binding the shape was found under; an alias does not rename a labelled part. Names are unique within one execution: a later part repeating an earlier name is numbered in script order (`lid`, `lid (2)`). The name is the part's identity across executions, used by the hidden set, the run result's per-part measurements, and `render_view`'s `part` argument (`part_name`, `disambiguate_names` in `crates/cadmark-kernel/src/tessellation.rs`).
 
-Source: `crates/cadmark-ui/src/parts.rs`, `crates/cadmark-app/src/app.rs` (`show_side_panel`, `set_part_visible`, `hidden_part_ids`).
+A hidden part's `GpuMesh::visible` is false, so every renderer pass skips it: it is not shaded, not in the picking texture, and not in the depth prepass. The set of hidden parts is kept on the project by part name (`Project::hidden_parts`) and reapplied to each freshly executed model by name, since part ordinals are not stable across executions; it is emptied when another script is opened (`Project::switch_part`), and a new project starts with none. Hiding the active part clears the selection. The same set is published to the AI's render source (`SceneHandle::set_hidden`), so a `render_view` without `part` draws exactly the parts the viewport shows (`parts_to_draw` in `crates/cadmark-app/src/render_source.rs`).
+
+Source: `crates/cadmark-ui/src/parts.rs`, `crates/cadmark-app/src/app.rs` (`show_side_panel`, `set_part_visible`, `hidden_part_ids`), `crates/cadmark-app/src/render_source.rs`.
 
 ## Code panel
 
