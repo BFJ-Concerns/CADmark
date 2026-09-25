@@ -112,6 +112,10 @@ Lists every module-level numeric name in the current script. Names bound to a li
 
 Changing a value rewrites that one number in the script, rebuilds the model, and records a design step — no AI turn needed.
 
+Each row ends in a padlock. Most parameters are ordinary: numbers the AI named because they might be worth adjusting later. A locked one is a hard constraint — a fit, a clearance, a mounting position, an overall size — that the AI keeps as it is unless you explicitly allow a change. Click the padlock to lock or unlock a parameter; that writes or removes a `# locked` comment on the parameter's line in the script, so the constraint is visible in the code panel and travels with the file, and it is recorded as a design step. You can still change a locked value yourself.
+
+The AI is told the rule: it must not change, rename, or unlock a locked parameter, or route around it, and when what you ask cannot be done without moving one it stops and asks instead. When you state a hard requirement in chat, it puts the value in the parameter block and locks it, and you can ask it to add a reason to the marker (`# locked: matches the bracket it mounts on`), which shows when you hover the padlock. If a turn does move a locked value anyway, the run result tells the AI at once so it can put it back, and the chat shows a notice naming what changed, so a drift in an important value never passes silently; undo restores the step before it.
+
 ### Parts
 
 Lists every completed part the script produced, in the order the script binds them: a colour swatch matching the part in the viewport, the part's name, and a tick box for whether it is drawn. The part the current selection belongs to is highlighted. Hovering a name shows its measurements; clicking it selects the whole part. A part that is not a closed solid carries a warning mark.

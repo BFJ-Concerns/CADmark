@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Locked parameters. A `# locked` comment at the end of a parameter's line
+  (`# locked: reason`, optionally) marks it as a hard constraint: the AI is
+  told never to change, rename, unlock, or derive around it, to stop and
+  ask when a request needs it to move, and to lock hard requirements the
+  user states. Each row of the Parameters panel has a padlock that writes
+  or removes the marker as a design step without a rebuild; the user's own
+  edits are never blocked. A run that moves a locked value is told so in
+  its result, and a completed turn that leaves such a change shows a
+  notice in chat naming it
+
 ## [0.2.1] - 2026-09-24
 
 ### Added

@@ -162,7 +162,11 @@ Lists every module-level numeric name in the open part's script. Names bound to 
 
 Editing a value rewrites that one number in the script, rebuilds the model, and records a design step. No AI turn is involved.
 
-Source: `crates/cadmark-ui/src/parameters.rs`, `crates/cadmark-app/src/script_parameters.rs:1–53`.
+Each row ends in a padlock. A **locked parameter** carries a `# locked` comment at the end of its binding's line in the script (`# locked: reason` optionally; the marker is the last `#` segment of the line whose text begins `locked`, case-insensitive, so an author's comment before it survives). Clicking the padlock writes or removes the marker (`script_parameters::lock`, `unlock`), records a design step ("Locked width" / "Unlocked width"), refreshes the panel from the rewritten text, and adds a design-change note to the conversation; nothing rebuilds, since the geometry is unchanged. The user's own value edits are not blocked by a lock. Derived parameters lock too: the expression is the constraint. A rebinding decides the lock as it decides the value.
+
+The lock binds the AI. The system prompt tells it never to change, rename, unlock, or derive around a locked parameter, to end the turn and ask when a request needs one to move, to change it only on the user's explicit permission in the message, and to lock hard requirements the user states. Mechanically, the turn loop compares the script at turn start with each successful run: a locked parameter that changed, was unlocked, or was removed is named in that run's tool result with the rule restated (`locked_parameter_changes` in `crates/cadmark-app/src/turn.rs`), and a completed turn that leaves any such change emits a `TurnEvent::Notice` listing them in chat. A parameter first locked during the turn is not a change.
+
+Source: `crates/cadmark-ui/src/parameters.rs`, `crates/cadmark-app/src/script_parameters.rs` (`Lock`, `trailing_lock`, `lock`, `unlock`), `crates/cadmark-app/src/app.rs` (`apply_parameter_lock`), `crates/cadmark-app/src/turn.rs` (`locked_parameter_changes`), `crates/cadmark-bridge/src/system_prompt.md`.
 
 ### Parts
 

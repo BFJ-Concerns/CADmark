@@ -55,7 +55,7 @@ A project is a folder holding one or more build123d scripts, each defining a par
 
 Click a face, edge, or vertex to select it and write a spatial comment anchored to that geometry — the AI sees the source line that produced the selected element. The Select menu in the toolbar turns each kind of click target on or off, so a disabled kind's click falls through to what is behind it. Pending comments are sent together with chat text as one turn.
 
-The parameters panel lists every named number in the script; drag a value to change it directly without an AI turn. Every accepted edit is a design step — undo with `Ctrl+Z`, name a version with `Ctrl+S`.
+The parameters panel lists every named number in the script; drag a value to change it directly without an AI turn, or lock it so the AI keeps it as a hard constraint unless you say otherwise. Every accepted edit is a design step — undo with `Ctrl+Z`, name a version with `Ctrl+S`.
 
 Attach, paste, or drop [photos and drawings](docs/reference/interface.md#images-in-chat) onto a chat message for the AI to read. Pictures that define a part are kept in the project's reference library, catalogued for later conversations. The section plane and ghost mode let you inspect internal geometry. Export to STEP, STL, or 3MF from the toolbar.
 
