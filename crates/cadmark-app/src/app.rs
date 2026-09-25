@@ -2397,7 +2397,11 @@ impl CadmarkApp {
     /// Lock or unlock a parameter from the panel: the `# locked` marker
     /// is written into the script, the change is a design step, and the
     /// conversation records it so the AI's next turn knows the user set
-    /// the constraint. The geometry is unchanged, so nothing rebuilds.
+    /// the constraint. A marker on the script the model was built from
+    /// changes no geometry, so nothing rebuilds; a script that already
+    /// differed on disk — edited outside CADmark since its last run — is
+    /// reloaded with the marker in it, as a value edit is, rather than
+    /// taken as run.
     fn apply_parameter_lock(&mut self, name: &str, locked: bool) {
         let Some((path, part)) = self
             .project()
@@ -2412,6 +2416,10 @@ impl CadmarkApp {
                 return;
             }
         };
+        let marker_only = self
+            .project()
+            .and_then(|project| project.script_source.as_deref())
+            == Some(source.as_str());
         let rewritten = if locked {
             script_parameters::lock(&source, name, None)
         } else {
@@ -2434,8 +2442,10 @@ impl CadmarkApp {
         let summary = lock_step_summary(name, locked);
         let recorded = self.record_design_step(&summary, &summary);
         if let Some(project) = self.project_mut() {
-            project.script_source = Some(rewritten);
-            project.record_script_state();
+            if marker_only {
+                project.script_source = Some(rewritten);
+                project.record_script_state();
+            }
             let consequence = if locked {
                 "the AI may not change it without explicit permission"
             } else {
@@ -2457,6 +2467,9 @@ impl CadmarkApp {
         }
         self.save_conversation();
         self.read_parameters();
+        if !marker_only && let Some(project) = self.project_mut() {
+            project.request_reload();
+        }
     }
 
     fn show_code_panel(&mut self, ctx: &egui::Context) {
@@ -3433,6 +3446,12 @@ mod tests {
     #[test]
     fn locking_a_parameter_marks_it_in_the_script_and_records_a_step() {
         let (dir, mut app) = two_part_project();
+        // The script on disk is the one the model was built from, and
+        // nothing is building.
+        let project = app.project_mut().unwrap();
+        project.script_source = Some("width = 80\ndepth = 40\n".into());
+        project.busy = None;
+        let commands = project.stand_in_worker();
 
         app.apply_parameter_lock("width", true);
 
@@ -3453,6 +3472,18 @@ mod tests {
             .expect("width is still a parameter");
         assert!(width.lock.is_some());
         assert!(app.turn.is_none());
+        // The marker changes no geometry: the executed source takes it
+        // and nothing rebuilds.
+        let project = app.project().unwrap();
+        assert_eq!(
+            project.script_source.as_deref(),
+            Some("width = 80  # locked\ndepth = 40\n")
+        );
+        assert!(project.busy.is_none(), "nothing rebuilds for a marker");
+        assert!(
+            commands.try_recv().is_err(),
+            "no command reached the worker"
+        );
 
         // A design step against the part, and a conversation note the
         // AI's next turn reads.
@@ -3481,6 +3512,34 @@ mod tests {
             "width = 80\ndepth = 40\n"
         );
         assert!(newest_commit_message(dir.path()).contains("Unlocked width"));
+    }
+
+    #[test]
+    fn locking_a_script_edited_outside_cadmark_reloads_it_rather_than_adopting_the_edit() {
+        let (dir, mut app) = two_part_project();
+        // The model was built from a shorter script; the file on disk has
+        // since gained a line the viewport does not show.
+        let project = app.project_mut().unwrap();
+        project.script_source = Some("width = 80\n".into());
+        project.busy = None;
+        let commands = project.stand_in_worker();
+
+        app.apply_parameter_lock("depth", true);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80\ndepth = 40  # locked\n"
+        );
+        let project = app.project().unwrap();
+        // The disk edit is not passed off as run: the executed source
+        // stays what the model shows, and a rebuild is under way.
+        assert_eq!(project.script_source.as_deref(), Some("width = 80\n"));
+        assert!(matches!(project.busy, Some(crate::project::Busy::Building)));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::orchestrator::OrchestratorCommand::Reload)
+        ));
+        assert!(newest_commit_message(dir.path()).contains("Locked depth"));
     }
 
     #[test]
