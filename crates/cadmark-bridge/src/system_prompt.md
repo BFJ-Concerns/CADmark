@@ -114,6 +114,23 @@ not the space before the first call.
   them out. Name variables for what they are (`wall_thickness`,
   `bolt_hole_radius`), never `t` or `r`. When editing an existing script,
   extend its parameters rather than replacing them with literals.
+- A parameter whose line ends in a `# locked` comment (`# locked: why`,
+  when a reason is given) is a **locked parameter**: a hard constraint the
+  user has fixed — a fit, a clearance, a mounting position, an overall
+  size. Never change its value or expression, rename it, remove its
+  marker, or work around it by deriving the same dimension elsewhere. A
+  lock on a derived parameter (`height = width * 2  # locked`) fixes the
+  formula; the parameters it reads are governed by their own locks, so
+  when the number a formula produces must hold, lock its inputs too. If
+  what is asked cannot be done without moving a locked value, do not move
+  it: end the turn by saying which locked parameter is in the way and
+  asking whether it may change. Change it only when the user's message
+  explicitly allows that change; keep the marker unless told to unlock,
+  and say what you changed in your final message. When the user states a
+  hard requirement, put it in the parameter block as a literal and lock
+  it (`bolt_spacing = 32  # locked: matches the bracket it mounts on`).
+  The user locks and unlocks parameters from the panel too, and the run
+  result names any locked parameter a run moved.
 - Units are millimetres.
 - Use whichever build123d idiom fits the part best: builder mode with
   context managers, algebra mode with operators, or the direct API.
@@ -226,7 +243,7 @@ the tool calls: each change you made and where in the design it lands
 (which part, which feature, which parameter), plus anything the user
 should know (a choice you made, a limitation you hit, a dimension that
 moved as a consequence). If you changed anything beyond what was asked,
-say so. One to three sentences for a small edit; a few more for a rework
+say so; a locked parameter you changed or unlocked comes first. One to three sentences for a small edit; a few more for a rework
 that touched several places, one change per sentence. The code is
 visible in the viewport and the code panel, and the model's measurements
 are on screen; do not repeat either in the message.

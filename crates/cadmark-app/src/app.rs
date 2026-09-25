@@ -189,6 +189,15 @@ fn parameter_step_summary(name: &str, value: f64) -> String {
     format!("Set {name} to {value}")
 }
 
+/// The design step and status line for locking or unlocking a parameter.
+fn lock_step_summary(name: &str, locked: bool) -> String {
+    if locked {
+        format!("Locked {name}")
+    } else {
+        format!("Unlocked {name}")
+    }
+}
+
 /// How the user moved through the design history.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryMove {
@@ -823,6 +832,7 @@ impl CadmarkApp {
                 summary,
                 model,
                 source,
+                locked_changes,
             } => {
                 for id in turn.comment_ids {
                     conversation.mark_spatial_applied(id);
@@ -833,6 +843,15 @@ impl CadmarkApp {
                     && message.text.trim().is_empty()
                 {
                     message.text = summary.clone();
+                }
+                // A locked parameter the turn moved is said in chat after
+                // the reply, whatever the reply says about it.
+                if !locked_changes.is_empty() {
+                    conversation.push(Message::notice(format!(
+                        "Locked parameters changed this turn: {}. If that was not agreed, \
+                         undo restores the step before it.",
+                        locked_changes.join("; ")
+                    )));
                 }
                 // A failure has already gone to the status; the reply
                 // stands either way, so the turn reads no further.
@@ -2206,6 +2225,11 @@ impl CadmarkApp {
                 value: parameter.value(),
                 expression: parameter.expression().unwrap_or_default(),
                 line: parameter.line,
+                locked: parameter.lock.is_some(),
+                lock_reason: parameter
+                    .lock
+                    .as_ref()
+                    .and_then(|lock| lock.reason.as_deref()),
             })
             .collect();
         let mut parameters_action = ParametersAction::None;
@@ -2272,8 +2296,12 @@ impl CadmarkApp {
                     }
                 }
             });
-        if let ParametersAction::Commit { name, value } = parameters_action {
-            self.apply_parameter_edit(&name, value);
+        match parameters_action {
+            ParametersAction::None => {}
+            ParametersAction::Commit { name, value } => self.apply_parameter_edit(&name, value),
+            ParametersAction::SetLocked { name, locked } => {
+                self.apply_parameter_lock(&name, locked)
+            }
         }
         match parts_action {
             PartsAction::None => {}
@@ -2372,6 +2400,90 @@ impl CadmarkApp {
         }
         self.save_conversation();
         if let Some(project) = self.project_mut() {
+            project.request_reload();
+        }
+    }
+
+    /// Lock or unlock a parameter from the panel: the `# locked` marker
+    /// is written into the script, the change is a design step, and the
+    /// conversation records it so the AI's next turn knows the user set
+    /// the constraint. A marker on the script the model was built from
+    /// changes no geometry, so nothing rebuilds; a script that already
+    /// differed on disk — edited outside CADmark since its last run — is
+    /// reloaded with the marker in it, as a value edit is, rather than
+    /// taken as run.
+    fn apply_parameter_lock(&mut self, name: &str, locked: bool) {
+        let Some((path, part)) = self
+            .project()
+            .map(|project| (project.script_path(), project.part_file_name().to_string()))
+        else {
+            return;
+        };
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.status = Some(Status::error(format!("Could not read {part}: {error}")));
+                return;
+            }
+        };
+        let marker_only = self
+            .project()
+            .and_then(|project| project.script_source.as_deref())
+            == Some(source.as_str());
+        let rewritten = if locked {
+            script_parameters::lock(&source, name, None)
+        } else {
+            script_parameters::unlock(&source, name)
+        };
+        let rewritten = match rewritten {
+            Ok(rewritten) => rewritten,
+            Err(error) => {
+                self.status = Some(Status::error(error.to_string()));
+                return;
+            }
+        };
+        if rewritten == source {
+            // The padlock showed the executed script; the file already
+            // reads as asked, so it is the file the model needs to catch
+            // up with.
+            if !marker_only && let Some(project) = self.project_mut() {
+                project.request_reload();
+            }
+            return;
+        }
+        if let Err(error) = std::fs::write(&path, &rewritten) {
+            self.status = Some(Status::error(format!("Could not write {part}: {error}")));
+            return;
+        }
+        let summary = lock_step_summary(name, locked);
+        let recorded = self.record_design_step(&summary, &summary);
+        if let Some(project) = self.project_mut() {
+            if marker_only {
+                project.script_source = Some(rewritten);
+                project.record_script_state();
+            }
+            let consequence = if locked {
+                "the AI may not change it without explicit permission"
+            } else {
+                "the AI may change it again"
+            };
+            project.conversation.push(Message::design_change(format!(
+                "{summary} in the parameters panel of {part}: {consequence}."
+            )));
+        }
+        match recorded {
+            Ok(()) => self.status = Some(Status::info(summary)),
+            Err(reason) => {
+                if let Some(project) = self.project_mut() {
+                    project.conversation.push(Message::error_notice(format!(
+                        "{reason}\n\n{summary} in {part}, but the history has no step for it."
+                    )));
+                }
+            }
+        }
+        self.save_conversation();
+        self.read_parameters();
+        if !marker_only && let Some(project) = self.project_mut() {
             project.request_reload();
         }
     }
@@ -3316,6 +3428,7 @@ mod tests {
             summary: "Widen the bracket".to_string(),
             model: Box::new(solid_model()),
             source: "width = 120\ndepth = 40\n".to_string(),
+            locked_changes: Vec::new(),
         });
 
         let message = newest_commit_message(dir.path());
@@ -3345,6 +3458,169 @@ mod tests {
                 },
             ),
         }
+    }
+
+    #[test]
+    fn locking_a_parameter_marks_it_in_the_script_and_records_a_step() {
+        let (dir, mut app) = two_part_project();
+        // The script on disk is the one the model was built from, and
+        // nothing is building.
+        let project = app.project_mut().unwrap();
+        project.script_source = Some("width = 80\ndepth = 40\n".into());
+        project.busy = None;
+        let commands = project.stand_in_worker();
+
+        app.apply_parameter_lock("width", true);
+
+        // The marker is in the open part's script and nowhere else, and
+        // the panel reads it back without a rebuild.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80  # locked\ndepth = 40\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("part.py")).unwrap(),
+            "width = 10\n"
+        );
+        let width = app
+            .parameters
+            .iter()
+            .find(|parameter| parameter.name == "width")
+            .expect("width is still a parameter");
+        assert!(width.lock.is_some());
+        assert!(app.turn.is_none());
+        // The marker changes no geometry: the executed source takes it
+        // and nothing rebuilds.
+        let project = app.project().unwrap();
+        assert_eq!(
+            project.script_source.as_deref(),
+            Some("width = 80  # locked\ndepth = 40\n")
+        );
+        assert!(project.busy.is_none(), "nothing rebuilds for a marker");
+        assert!(
+            commands.try_recv().is_err(),
+            "no command reached the worker"
+        );
+
+        // A design step against the part, and a conversation note the
+        // AI's next turn reads.
+        let message = newest_commit_message(dir.path());
+        assert!(message.contains("Locked width"), "{message}");
+        assert!(message.contains("part: bracket.py"), "{message}");
+        let last = app
+            .project()
+            .unwrap()
+            .conversation
+            .messages()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last.kind, MessageKind::DesignChange);
+        assert_eq!(
+            last.text,
+            "Locked width in the parameters panel of bracket.py: the AI may not change it \
+             without explicit permission."
+        );
+
+        // Unlocking takes exactly the marker back out.
+        app.apply_parameter_lock("width", false);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80\ndepth = 40\n"
+        );
+        assert!(newest_commit_message(dir.path()).contains("Unlocked width"));
+    }
+
+    #[test]
+    fn locking_a_script_edited_outside_cadmark_reloads_it_rather_than_adopting_the_edit() {
+        let (dir, mut app) = two_part_project();
+        // The model was built from a shorter script; the file on disk has
+        // since gained a line the viewport does not show.
+        let project = app.project_mut().unwrap();
+        project.script_source = Some("width = 80\n".into());
+        project.busy = None;
+        let commands = project.stand_in_worker();
+
+        app.apply_parameter_lock("depth", true);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80\ndepth = 40  # locked\n"
+        );
+        let project = app.project().unwrap();
+        // The disk edit is not passed off as run: the executed source
+        // stays what the model shows, and a rebuild is under way.
+        assert_eq!(project.script_source.as_deref(), Some("width = 80\n"));
+        assert!(matches!(project.busy, Some(crate::project::Busy::Building)));
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::orchestrator::OrchestratorCommand::Reload)
+        ));
+        assert!(newest_commit_message(dir.path()).contains("Locked depth"));
+
+        // The padlock showed a lock the executed script had and an edit
+        // outside CADmark has since removed: the click changes nothing
+        // in the file, so the file is reloaded to catch the panel up.
+        let before = newest_commit_message(dir.path());
+        let project = app.project_mut().unwrap();
+        project.script_source = Some("width = 80  # locked\ndepth = 40  # locked\n".into());
+        project.busy = None;
+        app.apply_parameter_lock("width", false);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("bracket.py")).unwrap(),
+            "width = 80\ndepth = 40  # locked\n"
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(crate::orchestrator::OrchestratorCommand::Reload)
+        ));
+        assert_eq!(
+            newest_commit_message(dir.path()),
+            before,
+            "no step for a no-op"
+        );
+    }
+
+    #[test]
+    fn a_locked_change_is_noticed_after_the_reply_without_a_second_one() {
+        let (dir, mut app) = two_part_project();
+        let response = app
+            .project_mut()
+            .unwrap()
+            .conversation
+            .push(Message::ai_response("Made the wall 3, as you allowed."));
+        app.turn = Some(TurnRecord {
+            response,
+            tools: None,
+            steps: Vec::new(),
+            thinking: None,
+            comment_ids: vec![],
+            history_len: 1,
+            model_context: None,
+        });
+        std::fs::write(dir.path().join("bracket.py"), "width = 80\ndepth = 40\n").unwrap();
+
+        app.finish_turn(TurnOutcome::Completed {
+            summary: "Thicken the wall".to_string(),
+            model: Box::new(solid_model()),
+            source: "width = 80\ndepth = 40\n".to_string(),
+            locked_changes: vec!["`wall` changed 2 → 3 while locked".into()],
+        });
+
+        let messages = app.project().unwrap().conversation.messages();
+        let [.., reply, notice] = messages else {
+            panic!("a reply then a notice, got {messages:?}");
+        };
+        assert_eq!(reply.text, "Made the wall 3, as you allowed.");
+        assert!(matches!(
+            notice.kind,
+            MessageKind::Notice { is_error: false }
+        ));
+        assert!(
+            notice.text.contains("`wall` changed 2 → 3 while locked"),
+            "{}",
+            notice.text
+        );
     }
 
     #[test]

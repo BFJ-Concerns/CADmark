@@ -51,6 +51,17 @@
 // from the original in exactly that span: no reformatting, no
 // reordering, no normalised whitespace, and the literal written back in
 // the notation the author wrote it in.
+//
+// A parameter can be locked: a `# locked` comment at the end of its
+// binding's line (`# locked: why`, optionally) marks it as a hard
+// constraint the user has fixed — a fit, a clearance, a mounting
+// position — which the AI may change only with the user's explicit
+// permission. The marker lives in the script because the script is the
+// design: it survives every rewrite the AI makes, shows in the code
+// panel, and travels with the file. A comment belongs to the statement
+// that ends its line, so a binding followed by a semicolon has nowhere
+// for a marker of its own. Locking and unlocking are the same kind of
+// surgical edit as a value change: the marker's bytes and nothing else.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -62,6 +73,29 @@ pub struct Parameter {
     /// One-based source line of the binding that decides the value.
     pub line: u32,
     pub binding: Binding,
+    /// The `# locked` marker on the binding's line, when it has one.
+    pub lock: Option<Lock>,
+    /// Whether the binding statement binds another parameter too
+    /// (`width, depth = 80, 40`, `width = depth = 40`), so one marker
+    /// would lock both.
+    shares_statement: bool,
+    /// The bytes after the binding statement's last token that are its
+    /// own — the rest of its line, up to the line ending — where its
+    /// marker is or would be. `None` when a semicolon follows the
+    /// statement, so nothing on the line is its comment.
+    tail: Option<Range<usize>>,
+}
+
+/// A `# locked` marker: the declaration that a parameter is a hard
+/// constraint, changed only with the user's explicit permission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lock {
+    /// Why it is locked, when the marker says (`# locked: must clear the
+    /// bolt head`).
+    pub reason: Option<String>,
+    /// The bytes the marker occupies, from the whitespace before its `#`
+    /// to the end of the line, so unlocking removes exactly it.
+    span: Range<usize>,
 }
 
 /// How a parameter gets its value.
@@ -113,6 +147,15 @@ impl Parameter {
             Binding::Literal { .. } => None,
         }
     }
+
+    /// The value or expression as the script states it, for telling one
+    /// version of a parameter from another.
+    pub fn stated(&self) -> String {
+        match &self.binding {
+            Binding::Literal { value, .. } => format!("{value}"),
+            Binding::Derived { expression } => expression.clone(),
+        }
+    }
 }
 
 /// Why a value could not be written back.
@@ -124,6 +167,14 @@ pub enum RewriteError {
     NotEditable(String),
     #[error("{0} is not a number that can be written into the script")]
     NotANumber(f64),
+    #[error(
+        "{0} shares its line with a later statement, so there is nowhere on it for a `# locked` marker of its own"
+    )]
+    SharedLine(String),
+    #[error(
+        "{0} is bound in one statement with another parameter, so a `# locked` marker there would lock both; give it a line of its own to lock it alone"
+    )]
+    SharedStatement(String),
 }
 
 /// Every module-level name the script binds to a number, in source order.
@@ -133,7 +184,7 @@ pub fn extract(source: &str) -> Vec<Parameter> {
     let mut known: HashSet<String> = HashSet::new();
     let mut imports = Imports::default();
 
-    for statement in module_statements(&tokens) {
+    for (statement, terminator) in module_statements(&tokens) {
         note_import(statement, &mut imports);
         let Some((targets, value)) = split_assignment(statement) else {
             continue;
@@ -149,6 +200,9 @@ pub fn extract(source: &str) -> Vec<Parameter> {
             }
         }
         let line = statement[0].line;
+        let tail = statement_tail(source, statement, terminator);
+        let lock = tail.clone().and_then(|tail| trailing_lock(source, tail));
+        let mut parameters = Vec::new();
         for (name, bound) in bindings {
             let binding = bound.and_then(|tokens| {
                 if let Some((value, span, notation)) = literal(tokens) {
@@ -168,19 +222,15 @@ pub fn extract(source: &str) -> Vec<Parameter> {
 
             match binding {
                 Some(binding) => {
-                    let parameter = Parameter {
+                    parameters.push(Parameter {
                         name: name.to_string(),
                         line,
                         binding,
-                    };
+                        lock: lock.clone(),
+                        shares_statement: false,
+                        tail: tail.clone(),
+                    });
                     known.insert(name.to_string());
-                    match found.iter_mut().find(|existing| existing.name == name) {
-                        // A rebinding decides the value the script runs
-                        // with, but the name keeps the place it first
-                        // appeared.
-                        Some(existing) => *existing = parameter,
-                        None => found.push(parameter),
-                    }
                 }
                 None => {
                     // The name is rebound to something that is not a
@@ -191,8 +241,59 @@ pub fn extract(source: &str) -> Vec<Parameter> {
                 }
             }
         }
+        let shared = parameters.len() > 1;
+        for mut parameter in parameters {
+            parameter.shares_statement = shared;
+            match found
+                .iter_mut()
+                .find(|existing| existing.name == parameter.name)
+            {
+                // A rebinding decides the value the script runs with,
+                // but the name keeps the place it first appeared.
+                Some(existing) => *existing = parameter,
+                None => found.push(parameter),
+            }
+        }
     }
     found
+}
+
+/// A module-level augmented assignment (`wall += 1`) to a name: not a
+/// binding — the name keeps the value its binding gave it — but a change
+/// to what the script runs with, which the lock check needs to see.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Augmentation {
+    pub name: String,
+    /// One-based source line.
+    pub line: u32,
+    /// The statement as the script states it.
+    pub text: String,
+}
+
+/// The operators that change a name in place.
+const AUGMENTED_ASSIGNMENTS: [&str; 13] = [
+    "**=", "//=", ">>=", "<<=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "@=",
+];
+
+/// Every module-level augmented assignment, in source order.
+pub fn augmentations(source: &str) -> Vec<Augmentation> {
+    let tokens = tokenize(source);
+    module_statements(&tokens)
+        .into_iter()
+        .filter_map(|(statement, _)| {
+            let [name, operator, ..] = statement else {
+                return None;
+            };
+            (name.kind == Kind::Name
+                && operator.kind == Kind::Op
+                && AUGMENTED_ASSIGNMENTS.contains(&operator.text))
+            .then(|| Augmentation {
+                name: name.text.to_string(),
+                line: name.line,
+                text: expression_text(source, statement),
+            })
+        })
+        .collect()
 }
 
 /// Return `source` with one parameter's literal replaced by `value`,
@@ -201,18 +302,123 @@ pub fn rewrite(source: &str, name: &str, value: f64) -> Result<String, RewriteEr
     if !value.is_finite() {
         return Err(RewriteError::NotANumber(value));
     }
-    let parameter = extract(source)
-        .into_iter()
-        .find(|parameter| parameter.name == name)
-        .ok_or_else(|| RewriteError::NoSuchParameter(name.to_string()))?;
+    let parameter = find(source, name)?;
     let Binding::Literal { span, notation, .. } = parameter.binding else {
         return Err(RewriteError::NotEditable(name.to_string()));
     };
-    let mut rewritten = String::with_capacity(source.len() + 8);
-    rewritten.push_str(&source[..span.start]);
-    rewritten.push_str(&format_number(value, &notation));
-    rewritten.push_str(&source[span.end..]);
-    Ok(rewritten)
+    Ok(splice(source, span, &format_number(value, &notation)))
+}
+
+/// Return `source` with a `# locked` marker at the end of one parameter's
+/// line — `# locked: reason` when a reason is given — replacing the
+/// marker already there, if any, and leaving every other byte as it is.
+pub fn lock(source: &str, name: &str, reason: Option<&str>) -> Result<String, RewriteError> {
+    let parameter = find(source, name)?;
+    // A reason is one line: a break in it would split the script.
+    let reason = reason
+        .map(|reason| reason.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|reason| !reason.is_empty());
+    let marker = match reason {
+        Some(reason) => format!("  # locked: {reason}"),
+        None => "  # locked".to_string(),
+    };
+    let Some(tail) = parameter.tail else {
+        return Err(RewriteError::SharedLine(name.to_string()));
+    };
+    if parameter.shares_statement {
+        return Err(RewriteError::SharedStatement(name.to_string()));
+    }
+    let replaced = match parameter.lock {
+        Some(existing) => existing.span,
+        // Before any trailing whitespace, which stays the author's.
+        None => {
+            let at = tail.start + source[tail].trim_end().len();
+            at..at
+        }
+    };
+    Ok(splice(source, replaced, &marker))
+}
+
+/// Return `source` with the `# locked` marker taken off one parameter's
+/// line; a parameter that is not locked comes back unchanged.
+pub fn unlock(source: &str, name: &str) -> Result<String, RewriteError> {
+    let parameter = find(source, name)?;
+    if parameter.lock.is_some() && parameter.shares_statement {
+        return Err(RewriteError::SharedStatement(name.to_string()));
+    }
+    Ok(match parameter.lock {
+        Some(existing) => splice(source, existing.span, ""),
+        None => source.to_string(),
+    })
+}
+
+fn find(source: &str, name: &str) -> Result<Parameter, RewriteError> {
+    extract(source)
+        .into_iter()
+        .find(|parameter| parameter.name == name)
+        .ok_or_else(|| RewriteError::NoSuchParameter(name.to_string()))
+}
+
+fn splice(source: &str, span: Range<usize>, replacement: &str) -> String {
+    let mut out = String::with_capacity(source.len() + replacement.len());
+    out.push_str(&source[..span.start]);
+    out.push_str(replacement);
+    out.push_str(&source[span.end..]);
+    out
+}
+
+/// The bytes after a statement's last token that belong to it: up to
+/// its line ending when the statement ends its line, with a `\r` before
+/// the `\n` counted as line ending rather than content. A statement a
+/// semicolon follows owns nothing — the line's comment belongs to the
+/// statement that ends the line — so it has no tail.
+fn statement_tail(
+    source: &str,
+    statement: &[Token<'_>],
+    terminator: &Token<'_>,
+) -> Option<Range<usize>> {
+    if terminator.text == ";" {
+        return None;
+    }
+    let start = statement.last().map_or(0, |token| token.span.end);
+    let mut end = terminator.span.start;
+    if source[start..end].ends_with('\r') {
+        end -= 1;
+    }
+    Some(start..end)
+}
+
+/// The `# locked` marker in a statement's tail, when there is one. The
+/// tail holds only whitespace and comments — anything else would have
+/// been a token — so the scan is direct. The marker is the last comment
+/// segment whose text begins `locked`, so a comment of the author's
+/// before it (`# mm  # locked`) is left as theirs.
+fn trailing_lock(source: &str, tail: Range<usize>) -> Option<Lock> {
+    let statement_end = tail.start;
+    // Whitespace after the marker is the author's, not the marker's.
+    let tail = source[tail].trim_end();
+    let end = statement_end + tail.len();
+    let mut found = None;
+    for (hash, _) in tail.match_indices('#') {
+        let body = tail[hash + 1..].trim_start();
+        let Some(after) = body
+            .get(.."locked".len())
+            .filter(|head| head.eq_ignore_ascii_case("locked"))
+            .map(|_| &body["locked".len()..])
+        else {
+            continue;
+        };
+        if !(after.is_empty() || after.starts_with(':') || after.starts_with(char::is_whitespace)) {
+            continue;
+        }
+        let reason = after.trim_start_matches(':').trim();
+        let start = statement_end + tail[..hash].trim_end().len();
+        found = Some(Lock {
+            reason: (!reason.is_empty()).then(|| reason.to_string()),
+            span: start..end,
+        });
+    }
+    found
 }
 
 /// A number as the script should carry it: a name the author wrote as an
@@ -585,11 +791,19 @@ fn end_of_replacement_field(bytes: &[u8], from: usize) -> usize {
 // The grammar
 // ---------------------------------------------------------------------
 
-/// The simple statements at module scope, in source order.
-fn module_statements<'t, 'a>(tokens: &'t [Token<'a>]) -> Vec<&'t [Token<'a>]> {
+/// The simple statements at module scope, in source order, each with
+/// the `End` token that closes it: a newline, a semicolon, or the end of
+/// the source.
+fn module_statements<'t, 'a>(tokens: &'t [Token<'a>]) -> Vec<(&'t [Token<'a>], &'t Token<'a>)> {
     tokens
-        .split(|token| token.kind == Kind::End)
-        .filter(|statement| statement.first().is_some_and(|token| token.module_scope))
+        .split_inclusive(|token| token.kind == Kind::End)
+        .filter_map(|run| {
+            let (terminator, statement) = run.split_last()?;
+            statement
+                .first()
+                .is_some_and(|token| token.module_scope)
+                .then_some((statement, terminator))
+        })
         .collect()
 }
 
@@ -1357,6 +1571,192 @@ real = 4
             names(source),
             vec!["real"],
             "an imported name this module cannot know is a number is not a parameter"
+        );
+    }
+
+    fn lock_of(source: &str, name: &str) -> Option<Lock> {
+        extract(source)
+            .into_iter()
+            .find(|parameter| parameter.name == name)
+            .and_then(|parameter| parameter.lock)
+    }
+
+    #[test]
+    fn a_locked_marker_is_read_with_its_reason() {
+        let source = "wall = 2  # locked: must clear the M3 head\n\
+                      depth = 40 # LOCKED\n\
+                      width = 80  # locker\n\
+                      height = (\n    10\n)  # locked\n\
+                      gap = 0.4  # mm  # locked\n\
+                      free = 1\n";
+        assert_eq!(
+            lock_of(source, "wall").unwrap().reason.as_deref(),
+            Some("must clear the M3 head")
+        );
+        assert_eq!(lock_of(source, "depth").unwrap().reason, None);
+        assert!(
+            lock_of(source, "width").is_none(),
+            "`locker` is not `locked`"
+        );
+        assert!(
+            lock_of(source, "height").is_some(),
+            "the marker ends the statement's last line"
+        );
+        assert!(
+            lock_of(source, "gap").is_some(),
+            "a marker after the author's comment"
+        );
+        assert!(lock_of(source, "free").is_none());
+        // A rebinding decides the lock as it decides the value.
+        assert!(lock_of("x = 1  # locked\nx = 2\n", "x").is_none());
+        assert!(lock_of("x = 1\nx = 2  # locked\n", "x").is_some());
+    }
+
+    #[test]
+    fn locking_and_unlocking_change_only_the_marker() {
+        let source = "width = 80\ndepth = 40  # mm\nheight = width * 2\n";
+        let locked = lock(source, "width", None).unwrap();
+        assert_eq!(
+            locked,
+            "width = 80  # locked\ndepth = 40  # mm\nheight = width * 2\n"
+        );
+        // A reason rides on the marker, flattened to one line.
+        let reasoned = lock(&locked, "width", Some(" fits the\nbracket ")).unwrap();
+        assert_eq!(
+            reasoned,
+            "width = 80  # locked: fits the bracket\ndepth = 40  # mm\nheight = width * 2\n"
+        );
+        // The author's own comment stays; the marker goes after it.
+        let depth = lock(&reasoned, "depth", None).unwrap();
+        assert!(depth.contains("depth = 40  # mm  # locked\n"), "{depth}");
+        // A derived parameter locks too: its expression is the constraint.
+        let derived = lock(&depth, "height", None).unwrap();
+        assert!(
+            derived.contains("height = width * 2  # locked\n"),
+            "{derived}"
+        );
+        // Unlocking removes exactly the marker, reason included.
+        let unlocked = unlock(&derived, "width").unwrap();
+        assert!(unlocked.starts_with("width = 80\n"), "{unlocked}");
+        let unlocked = unlock(&unlocked, "depth").unwrap();
+        assert!(unlocked.contains("depth = 40  # mm\n"), "{unlocked}");
+        // Unlocking what is not locked changes nothing.
+        assert_eq!(unlock(source, "width").unwrap(), source);
+        assert_eq!(
+            lock(source, "nothing", None),
+            Err(RewriteError::NoSuchParameter("nothing".into()))
+        );
+        // A value edit leaves the lock where it is.
+        let edited = rewrite(&reasoned, "width", 90.0).unwrap();
+        assert!(
+            edited.starts_with("width = 90  # locked: fits the bracket\n"),
+            "{edited}"
+        );
+    }
+
+    #[test]
+    fn a_marker_belongs_to_the_statement_that_ends_its_line() {
+        // Two bindings on one line: the comment is the second's, and the
+        // first has nowhere for a marker of its own. A string holding
+        // the marker's text is a value, not a comment.
+        let source = "width = 80; depth = 40  # locked\nwall = 2; note = \"# locked\"\n";
+        assert!(lock_of(source, "width").is_none());
+        assert!(lock_of(source, "depth").is_some());
+        assert!(lock_of(source, "wall").is_none());
+        assert_eq!(
+            lock(source, "width", None),
+            Err(RewriteError::SharedLine("width".into()))
+        );
+        // Toggling the first leaves the second's marker where it is.
+        assert_eq!(unlock(source, "width").unwrap(), source);
+        assert_eq!(
+            unlock(source, "depth").unwrap(),
+            "width = 80; depth = 40\nwall = 2; note = \"# locked\"\n"
+        );
+    }
+
+    #[test]
+    fn a_marker_shared_by_two_parameters_is_read_but_not_toggled_from_one_row() {
+        // One statement binding two parameters shows both locked, and a
+        // padlock on either row is refused: a marker there is the pair's.
+        for source in [
+            "width, depth = 80, 40  # locked\n",
+            "width = depth = 40  # locked\n",
+        ] {
+            assert!(lock_of(source, "width").is_some(), "{source}");
+            assert!(lock_of(source, "depth").is_some(), "{source}");
+            assert_eq!(
+                unlock(source, "width"),
+                Err(RewriteError::SharedStatement("width".into()))
+            );
+        }
+        let bare = "width, depth = 80, 40\n";
+        assert_eq!(
+            lock(bare, "depth", None),
+            Err(RewriteError::SharedStatement("depth".into()))
+        );
+        // A statement binding one parameter beside a non-parameter is
+        // that parameter's alone.
+        let mixed = "width, label = 80, \"plate\"\n";
+        assert_eq!(
+            lock(mixed, "width", None).unwrap(),
+            "width, label = 80, \"plate\"  # locked\n"
+        );
+    }
+
+    #[test]
+    fn lock_edits_leave_trailing_whitespace_as_it_was() {
+        let source = "width = 1   \ndepth = 2  # locked   \n";
+        let locked = lock(source, "width", None).unwrap();
+        assert_eq!(locked, "width = 1  # locked   \ndepth = 2  # locked   \n");
+        assert_eq!(unlock(&locked, "width").unwrap(), source);
+        assert_eq!(
+            unlock(source, "depth").unwrap(),
+            "width = 1   \ndepth = 2   \n"
+        );
+    }
+
+    #[test]
+    fn augmented_assignments_are_listed_by_name_with_their_text() {
+        let source =
+            "wall = 2\nwall += 1\ntotal = 0\nwith x:\n    total += 1\ntotal  *=  2; free = 1\n";
+        let found = augmentations(source);
+        assert_eq!(
+            found,
+            [
+                Augmentation {
+                    name: "wall".into(),
+                    line: 2,
+                    text: "wall += 1".into()
+                },
+                Augmentation {
+                    name: "total".into(),
+                    line: 6,
+                    text: "total *= 2".into()
+                },
+            ]
+        );
+        assert!(augmentations("a == 1\nb = 2\n").is_empty());
+    }
+
+    #[test]
+    fn lock_edits_keep_crlf_line_endings() {
+        // The marker goes before the line ending, and unlocking takes
+        // the marker alone: the carriage return is not part of it.
+        let source = "width = 80\r\ndepth = 40  # locked: fit\r\n";
+        assert!(lock_of(source, "width").is_none());
+        assert_eq!(
+            lock_of(source, "depth").unwrap().reason.as_deref(),
+            Some("fit")
+        );
+        let locked = lock(source, "width", None).unwrap();
+        assert_eq!(
+            locked,
+            "width = 80  # locked\r\ndepth = 40  # locked: fit\r\n"
+        );
+        assert_eq!(
+            unlock(&locked, "depth").unwrap(),
+            "width = 80  # locked\r\ndepth = 40\r\n"
         );
     }
 
