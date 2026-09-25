@@ -1162,10 +1162,12 @@ fn changed_parameter_values(before: &str, after: &str) -> Vec<String> {
 
 /// What became of the parameters `before` had locked, in `after`: one
 /// entry per locked parameter that was removed, unlocked, changed while
-/// still locked, or newly changed after its binding by an augmented
-/// assignment (`wall += 1`), in the order `before` lists them. A lock
-/// added in `after` is not a change. Empty when nothing locked was
-/// touched, or when there was no script before.
+/// still locked, or changed after its binding by an augmented assignment
+/// (`wall += 1`) added or taken away, in the order `before` lists them.
+/// A lock added in `after` is not a change; nor is a change to an
+/// unlocked input of a locked derived parameter, whose lock fixes its
+/// expression. Empty when nothing locked was touched, or when there was
+/// no script before.
 fn locked_parameter_changes(before: Option<&str>, after: &str) -> Vec<String> {
     let Some(before) = before else {
         return Vec::new();
@@ -1200,15 +1202,25 @@ fn locked_parameter_changes(before: Option<&str>, after: &str) -> Vec<String> {
                     now.stated()
                 ),
                 Some(_) => {
-                    // The binding stands, but a statement the script did
-                    // not have before now changes the name in place.
+                    // The binding stands, but a statement changing the
+                    // name in place has appeared or gone.
                     let added = augmented
                         .iter()
-                        .find(|now| now.name == *name && !was_augmented.contains(now))?;
-                    format!(
-                        "`{name}` is changed after its binding by `{}` (line {}) while locked{reason}",
-                        added.text, added.line
-                    )
+                        .find(|now| now.name == *name && !was_augmented.contains(now));
+                    let taken = was_augmented
+                        .iter()
+                        .find(|was| was.name == *name && !augmented.contains(was));
+                    match (added, taken) {
+                        (Some(added), _) => format!(
+                            "`{name}` is changed after its binding by `{}` (line {}) while locked{reason}",
+                            added.text, added.line
+                        ),
+                        (None, Some(taken)) => format!(
+                            "`{name}` is no longer changed after its binding by `{}` (was line {}) while locked{reason}",
+                            taken.text, taken.line
+                        ),
+                        (None, None) => return None,
+                    }
                 }
             })
         })
@@ -4045,6 +4057,24 @@ mod tests {
             ]
         );
         assert!(locked_parameter_changes(Some(augmented), augmented).is_empty());
+        // Taking an augmentation away moves the value back just as much.
+        assert_eq!(
+            locked_parameter_changes(
+                Some(augmented),
+                "wall = 2  # locked: must clear the M3 head\ngap = 0.4  # locked\n"
+            ),
+            [
+                "`wall` is no longer changed after its binding by `wall += 1` (was line 2) while locked, locked because: must clear the M3 head"
+            ]
+        );
+        // A locked formula reads an unlocked input: the formula stands.
+        assert!(
+            locked_parameter_changes(
+                Some("width = 10\nheight = width * 2  # locked\n"),
+                "width = 12\nheight = width * 2  # locked\n"
+            )
+            .is_empty()
+        );
         // Nothing locked touched, or no script before: nothing to say.
         assert!(locked_parameter_changes(Some(before), before).is_empty());
         assert!(locked_parameter_changes(None, after).is_empty());
