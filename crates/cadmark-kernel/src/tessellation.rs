@@ -245,8 +245,10 @@ pub(crate) fn unwrap_shape<'py>(
 #[derive(Debug)]
 pub(crate) enum ScriptResult<'py> {
     /// Every completed 3D result, in source binding order, each with the
-    /// binding name that names it: a completed `BuildPart`'s part, or a
-    /// `Part`, `Solid`, or `Compound` bound at the top level. Never empty.
+    /// name that names it: the shape's own `label` when the script set
+    /// one, otherwise the binding — a completed `BuildPart`'s part, or a
+    /// `Part`, `Solid`, or `Compound` bound at the top level. Names are
+    /// unique within one result. Never empty.
     Solids(Vec<(String, Bound<'py, PyAny>)>),
     /// A sketch or a line and no solid: the script has drawn a profile and
     /// not yet made anything of it. Its own kind of result, not a failure.
@@ -256,7 +258,8 @@ pub(crate) enum ScriptResult<'py> {
 /// The result of a script, whichever build123d idiom wrote it. Every
 /// distinct completed solid is a part of its own, so a script may leave
 /// several; repeated bindings of the same shape are aliases rather than
-/// extra parts, and the last alias supplies the user-facing name. Python
+/// extra parts, and the last alias supplies the user-facing name unless
+/// the shape carries a `label`, which names it under any binding. Python
 /// has already resolved repeated bindings of one name before this point,
 /// so staged construction should rebind that name rather than leave
 /// intermediate shapes bound. Solids win over sketches however they are
@@ -321,6 +324,7 @@ pub(crate) fn find_result_shape<'py>(
     // Dict iteration is insertion order, so the parts come out in the order
     // the script bound them.
     if !solids.is_empty() {
+        disambiguate_names(&mut solids);
         log::debug!(
             "Result parts: {}",
             solids
@@ -346,9 +350,10 @@ pub(crate) fn find_result_shape<'py>(
 
 fn add_discovered_shape<'py>(
     solids: &mut Vec<(String, Bound<'py, PyAny>)>,
-    name: String,
+    binding: String,
     shape: Bound<'py, PyAny>,
 ) -> Result<(), TessellationError> {
+    let name = part_name(binding, &shape)?;
     for (existing_name, existing_shape) in solids.iter_mut() {
         if same_shape(existing_shape, &shape)? {
             *existing_name = name;
@@ -357,6 +362,42 @@ fn add_discovered_shape<'py>(
     }
     solids.push((name, shape));
     Ok(())
+}
+
+/// The name a part goes by: the `label` build123d lets a script give any
+/// shape, when the script set one, otherwise the binding the shape was
+/// found under. The label is how a script names a part deliberately —
+/// `lid.label = "lid"`, or `bp.part.label = "lid"` after a builder — and
+/// it holds under whatever binding the shape ends up in.
+fn part_name(binding: String, shape: &Bound<'_, PyAny>) -> Result<String, TessellationError> {
+    if let Some(label) = get_non_none_attr(shape, "label")?
+        && let Ok(label) = label.extract::<String>()
+    {
+        let label = label.trim();
+        if !label.is_empty() {
+            return Ok(label.to_string());
+        }
+    }
+    Ok(binding)
+}
+
+/// Make every part's name unique in discovery order: a later part whose
+/// name repeats an earlier one's is numbered (`lid`, `lid (2)`). A name
+/// is a part's identity from one execution to the next — the visibility
+/// the user set and the part the AI asks to render are both kept by it —
+/// so two parts never share one.
+fn disambiguate_names(solids: &mut [(String, Bound<'_, PyAny>)]) {
+    let mut taken = std::collections::HashSet::new();
+    for (name, _) in solids.iter_mut() {
+        if taken.contains(name) {
+            let mut ordinal = 2;
+            while taken.contains(&format!("{name} ({ordinal})")) {
+                ordinal += 1;
+            }
+            *name = format!("{name} ({ordinal})");
+        }
+        taken.insert(name.clone());
+    }
 }
 
 fn same_shape(
