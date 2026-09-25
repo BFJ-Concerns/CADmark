@@ -150,8 +150,14 @@ impl ParametersPanel {
                     (
                         UNLOCKED_GLYPH,
                         theme::TEXT_MUTED,
-                        "Click to lock: the AI will keep this value unless you allow a change."
-                            .to_string(),
+                        format!(
+                            "Click to lock: the AI will keep this {} unless you allow a change.",
+                            if row.value.is_some() {
+                                "value"
+                            } else {
+                                "formula"
+                            }
+                        ),
                     )
                 };
                 let lock = ui.add_enabled(
