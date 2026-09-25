@@ -44,7 +44,7 @@ use crate::orchestrator::OrchestratorResult;
 use crate::parts::{self, OpenPart};
 use crate::project::{Busy, Project, SCRIPT_WATCH_INTERVAL};
 use crate::reference_images::{ImagePicker, stage_file, store_attachment};
-use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
+use crate::render_source::{RenderGpu, SceneHandle, ScenePart, ViewportRender};
 use crate::script_parameters::{self, Parameter};
 use crate::turn::{NoRender, RenderSource, RequestAssembly, TurnEvent, TurnInput, TurnOutcome};
 use crate::user_settings::{CREDENTIAL_ENV, SettingsStore, UserSettings};
@@ -1093,7 +1093,12 @@ impl CadmarkApp {
         self.renderer.ghost_solid = sketch.is_some();
         // A new mesh under a resting cursor must be picked afresh.
         self.last_hover_probe = None;
-        let mesh = std::sync::Arc::new(model.mesh.clone());
+        // What the AI is shown when it asks for a render: the same parts,
+        // named, and the same hidden set the Parts tab keeps.
+        let scene_parts: Vec<ScenePart> = model
+            .solid()
+            .map(|solid| solid.parts.iter().map(ScenePart::from_executed).collect())
+            .unwrap_or_default();
         let first_bounds = self
             .project_mut()
             .and_then(|project| project.install_model(model, source));
@@ -1102,13 +1107,14 @@ impl CadmarkApp {
             .and_then(|project| project.model.as_ref())
             .and_then(|model| model.bounds);
         let (face_plane, frame) = camera_change(sketch.as_ref(), first_bounds, model_bounds);
+        self.scene.set_hidden(hidden_names);
         match &sketch {
             Some(sketch) => self
                 .scene
-                .set_sketch(Some((std::sync::Arc::new(sketch.clone()), frame))),
+                .set_sketch(Some(std::sync::Arc::new(sketch.clone()))),
             None => {
                 self.scene.set_sketch(None);
-                self.scene.set_mesh(Some((mesh, first_bounds)));
+                self.scene.set_parts(scene_parts);
             }
         }
         if let Some(normal) = face_plane {
@@ -1139,7 +1145,7 @@ impl CadmarkApp {
         if let Some(project) = self.project_mut() {
             project.clear_model();
         }
-        self.scene.set_mesh(None);
+        self.scene.set_parts(Vec::new());
         self.scene.set_sketch(None);
         self.has_geometry = false;
         self.renderer.ghost_solid = false;
@@ -2292,6 +2298,9 @@ impl CadmarkApp {
         } else {
             project.hidden_parts.insert(name);
         }
+        let hidden = project.hidden_parts.clone();
+        // The AI's render follows the same visibility as the viewport.
+        self.scene.set_hidden(hidden);
         if let Some(rs) = &self.wgpu_render_state {
             let mut renderer = rs.renderer.write();
             if let Some(res) = renderer.callback_resources.get_mut::<ViewportResources>() {

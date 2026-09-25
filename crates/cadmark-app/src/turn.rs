@@ -186,7 +186,9 @@ pub trait DocSource: Send + Sync {
 /// Produces the render the model asked for. The viewport owns the GPU, so
 /// in production this hands the request to the UI thread and waits.
 pub trait RenderSource: Send {
-    fn render(&mut self, view: RenderView) -> Result<ImageData, String>;
+    /// The model from `view`: every part the user has visible, or the one
+    /// part `part` names alone.
+    fn render(&mut self, view: RenderView, part: Option<&str>) -> Result<ImageData, String>;
 
     /// The model an in-turn execution just produced, solid or sketch.
     /// The viewport puts the same geometry on screen, but only once the
@@ -201,7 +203,7 @@ pub trait RenderSource: Send {
 pub struct NoRender;
 
 impl RenderSource for NoRender {
-    fn render(&mut self, _view: RenderView) -> Result<ImageData, String> {
+    fn render(&mut self, _view: RenderView, _part: Option<&str>) -> Result<ImageData, String> {
         Err("rendering is not available to this model".to_string())
     }
 }
@@ -493,8 +495,8 @@ impl<
                             "The reference image you asked for.".to_string()
                         } else {
                             format!(
-                                "The render you asked for ({}).",
-                                describe_view(render_view_of(&call.arguments))
+                                "The render you asked for, {}.",
+                                describe_render(&render_args_of(&call.arguments))
                             )
                         },
                         images: vec![image],
@@ -727,10 +729,10 @@ impl<
                     Err(error) => return ToolRun::bad_arguments(error),
                 };
                 emit(TurnEvent::Phase(format!(
-                    "looking at the render from the {}",
-                    describe_view(args.view)
+                    "looking at the render {}",
+                    describe_render(&args)
                 )));
-                match self.render.render(args.view) {
+                match self.render.render(args.view, args.part.as_deref()) {
                     Ok(image) => ToolRun::Rendered { image },
                     Err(reason) => ToolRun::Output {
                         output: format!("render unavailable: {reason}"),
@@ -1407,8 +1409,6 @@ fn describe_tool(name: &str) -> &str {
     }
 }
 
-/// The view a render call named, for the caption; a call whose arguments
-/// did not parse never reaches here.
 /// The instructions one turn is run with: the system prompt, plus what
 /// the model is owed about any tool it is not being offered.
 fn instructions_for(accepts_images: bool) -> String {
@@ -1418,10 +1418,22 @@ fn instructions_for(accepts_images: bool) -> String {
     }
 }
 
-fn render_view_of(arguments: &serde_json::Value) -> RenderView {
-    serde_json::from_value::<RenderViewArgs>(arguments.clone())
-        .map(|args| args.view)
-        .unwrap_or(RenderView::Current)
+/// What a render call asked for, for the caption; a call whose arguments
+/// did not parse never reaches here.
+fn render_args_of(arguments: &serde_json::Value) -> RenderViewArgs {
+    serde_json::from_value::<RenderViewArgs>(arguments.clone()).unwrap_or(RenderViewArgs {
+        view: RenderView::Current,
+        part: None,
+    })
+}
+
+/// A render request in words, for the phase line and the image's caption:
+/// "from the front", or "of `lid` alone from the front".
+fn describe_render(args: &RenderViewArgs) -> String {
+    match &args.part {
+        Some(part) => format!("of `{part}` alone from the {}", describe_view(args.view)),
+        None => format!("from the {}", describe_view(args.view)),
+    }
 }
 
 fn describe_view(view: RenderView) -> &'static str {
@@ -1443,7 +1455,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
-    use crate::render_source::{RenderGpu, SceneHandle, ViewportRender};
+    use crate::render_source::{RenderGpu, SceneHandle, ScenePart, ViewportRender};
     use cadmark_bridge::backend::{DeltaSink, ModelResponse};
     use cadmark_core::geometry::{GeometryDescriptors, ModelSummary, SolidValidity};
     use cadmark_core::ledger::ProvenanceLedger;
@@ -1843,7 +1855,7 @@ mod tests {
     struct FakeRender;
 
     impl RenderSource for FakeRender {
-        fn render(&mut self, _view: RenderView) -> Result<ImageData, String> {
+        fn render(&mut self, _view: RenderView, _part: Option<&str>) -> Result<ImageData, String> {
             Ok(ImageData {
                 media_type: "image/png".into(),
                 bytes: vec![1, 2, 3],
@@ -1861,10 +1873,24 @@ mod tests {
             _script_path: &Path,
             _cancel: &CancelFlag,
         ) -> Result<ExecutedModel, WorkerError> {
-            Ok(ExecutedModel {
-                mesh: cube_mesh(),
-                ..sample_model()
-            })
+            // The kernel reports every completed solid as a part, at
+            // least one, and the parts are what a render draws.
+            let mut model = sample_model();
+            model.mesh = cube_mesh();
+            if let ModelForm::Solid(solid) = &mut model.form {
+                solid.parts = vec![cadmark_kernel::protocol::ExecutedPart {
+                    id: 0,
+                    name: "cube".into(),
+                    mesh: cube_mesh(),
+                    ledger: ProvenanceLedger::new(),
+                    sketch_lineage: Default::default(),
+                    descriptors: GeometryDescriptors::default(),
+                    summary: solid.summary.clone(),
+                    validity: solid.validity.clone(),
+                    file: solid.file.clone(),
+                }];
+            }
+            Ok(model)
         }
 
         fn run_snippet(
@@ -3585,13 +3611,15 @@ mod tests {
     async fn the_model_is_shown_a_real_render_of_what_is_on_screen() {
         let (device, queue) = gpu().await;
         let scene = SceneHandle::new();
-        scene.set_mesh(Some((
-            std::sync::Arc::new(cube_mesh()),
-            Some(cadmark_renderer::camera::Bounds3 {
+        scene.set_parts(vec![ScenePart {
+            id: 0,
+            name: "cube".into(),
+            mesh: std::sync::Arc::new(cube_mesh()),
+            bounds: Some(cadmark_renderer::camera::Bounds3 {
                 min: [-0.5, -0.5, -0.5],
                 max: [0.5, 0.5, 0.5],
             }),
-        )));
+        }]);
         scene.set_view(cadmark_renderer::camera::Camera::default(), (800, 600));
         let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
 
@@ -3649,7 +3677,7 @@ mod tests {
         let ModelItem::User { text, images } = &requests[1].items[result_at + 1] else {
             panic!("the render is shown as a user item straight after its result");
         };
-        assert!(text.contains("front"));
+        assert!(text.contains("front") && !text.contains("alone"), "{text}");
         let image = images.first().expect("an image item, not an apology");
         assert_eq!(image.media_type, "image/png");
 
@@ -3764,6 +3792,144 @@ mod tests {
         assert!(
             covered / (info.width * info.height) as f32 > 0.2,
             "the freshly built model fills the frame"
+        );
+    }
+
+    /// The test cube moved along X, as a second part beside the first.
+    fn cube_mesh_at(x: f32) -> cadmark_core::mesh::TessellatedMesh {
+        let mut mesh = cube_mesh();
+        for vertex in &mut mesh.vertices {
+            vertex.position[0] += x;
+        }
+        for edge in &mut mesh.edges {
+            for point in &mut edge.points {
+                point[0] += x;
+            }
+        }
+        mesh
+    }
+
+    /// The share of a PNG's pixels that differ from the render background.
+    fn coverage(image: &ImageData) -> f32 {
+        let decoder = png::Decoder::new(std::io::Cursor::new(&image.bytes));
+        let mut reader = decoder.read_info().expect("PNG header");
+        let mut pixels = vec![0; reader.output_buffer_size().expect("PNG buffer size")];
+        let info = reader.next_frame(&mut pixels).expect("PNG data");
+        let background = [36u8, 38, 43];
+        let covered = pixels[..info.buffer_size()]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| {
+                [p[0], p[1], p[2]]
+                    .iter()
+                    .zip(background)
+                    .any(|(got, base)| got.abs_diff(base) > 8)
+            })
+            .count() as f32;
+        covered / (info.width * info.height) as f32
+    }
+
+    #[tokio::test]
+    async fn a_named_part_is_rendered_alone_and_framed_to_itself() {
+        // Two parts far apart. A render of the model frames both, so each
+        // is a speck; a render of `peg` alone frames the peg, which then
+        // fills the image. The captions say which is which.
+        let (device, queue) = gpu().await;
+        let scene = SceneHandle::new();
+        let bounds = |x: f32| cadmark_renderer::camera::Bounds3 {
+            min: [x - 0.5, -0.5, -0.5],
+            max: [x + 0.5, 0.5, 0.5],
+        };
+        scene.set_parts(vec![
+            ScenePart {
+                id: 0,
+                name: "base".into(),
+                mesh: std::sync::Arc::new(cube_mesh()),
+                bounds: Some(bounds(0.0)),
+            },
+            ScenePart {
+                id: 1,
+                name: "peg".into(),
+                mesh: std::sync::Arc::new(cube_mesh_at(100.0)),
+                bounds: Some(bounds(100.0)),
+            },
+        ]);
+        scene.set_view(cadmark_renderer::camera::Camera::default(), (400, 300));
+        let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
+
+        let look_twice = Ok(ModelResponse {
+            output_items: Vec::new(),
+            reached_output_limit: false,
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "c1".into(),
+                    name: RENDER_VIEW.into(),
+                    arguments: serde_json::json!({"view": "front"}),
+                },
+                ToolCall {
+                    id: "c2".into(),
+                    name: RENDER_VIEW.into(),
+                    arguments: serde_json::json!({"view": "front", "part": "peg"}),
+                },
+            ],
+        });
+        let mut model = ScriptedModel::new([look_twice, text("Looks right.")]);
+        model.accepts_images = true;
+        let project = tempfile::tempdir().unwrap();
+        let mut executor = FakeExecutor::new([]);
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            references: &NoReferences,
+            script_path: project.path().join("part.py"),
+            cancel: CancelFlag::new(),
+        };
+        let mut events = Vec::new();
+        let outcome = runner
+            .run(&Conversation::new(), &chat("check the peg"), |event| {
+                events.push(event)
+            })
+            .await;
+        assert_eq!(outcome, TurnOutcome::Answered);
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TurnEvent::Phase(phase) if phase.contains("`peg` alone") && phase.contains("front")
+            )),
+            "the phase line names the part, got {events:?}"
+        );
+
+        let requests = model.requests.lock().unwrap();
+        let image_after = |call_id: &str| {
+            let at = requests[1]
+                .items
+                .iter()
+                .position(
+                    |item| matches!(item, ModelItem::ToolResult { call_id: id, .. } if id == call_id),
+                )
+                .expect("the render call is answered");
+            let ModelItem::User { text, images } = &requests[1].items[at + 1] else {
+                panic!("the render is shown as a user item straight after its result");
+            };
+            (text.clone(), images.first().expect("an image").clone())
+        };
+        let (whole_caption, whole) = image_after("c1");
+        let (peg_caption, peg) = image_after("c2");
+        assert!(!whole_caption.contains("peg"), "{whole_caption}");
+        assert!(peg_caption.contains("`peg` alone"), "{peg_caption}");
+        let (whole, peg) = (coverage(&whole), coverage(&peg));
+        assert!(
+            peg > 0.2,
+            "the named part fills its own frame, covered {peg:.3}"
+        );
+        assert!(
+            whole < peg / 4.0,
+            "the whole model frames both parts, so each is small: whole {whole:.3} against peg {peg:.3}"
         );
     }
 
