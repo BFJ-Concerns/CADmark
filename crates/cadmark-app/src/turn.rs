@@ -143,6 +143,10 @@ pub enum TurnOutcome {
         summary: String,
         model: Box<ExecutedModel>,
         source: String,
+        /// What became of each locked parameter the turn moved, unlocked,
+        /// or removed, for the user to see in chat after the AI's closing
+        /// message whatever that message says about it.
+        locked_changes: Vec<String>,
     },
     /// The model answered without changing the script (a question, a
     /// refusal, an explanation). Nothing to commit.
@@ -534,19 +538,10 @@ impl<
                         error: format!("could not write the script: {error}"),
                     };
                 }
-                // The user sees any locked parameter the turn moved, in
-                // chat, whatever the AI's closing message says about it.
-                let moved = locked_parameter_changes(original.as_deref(), &code);
-                if !moved.is_empty() {
-                    emit(TurnEvent::Notice(format!(
-                        "Locked parameters changed this turn: {}. If that was not agreed, \
-                         undo restores the step before it.",
-                        moved.join("; ")
-                    )));
-                }
                 TurnOutcome::Completed {
                     summary,
                     model,
+                    locked_changes: locked_parameter_changes(original.as_deref(), &code),
                     source: code,
                 }
             }
@@ -1166,14 +1161,17 @@ fn changed_parameter_values(before: &str, after: &str) -> Vec<String> {
 }
 
 /// What became of the parameters `before` had locked, in `after`: one
-/// entry per locked parameter that was removed, unlocked, or changed while
-/// still locked, in the order `before` lists them. A lock added in `after`
-/// is not a change. Empty when nothing locked was touched, or when there
-/// was no script before.
+/// entry per locked parameter that was removed, unlocked, changed while
+/// still locked, or newly changed after its binding by an augmented
+/// assignment (`wall += 1`), in the order `before` lists them. A lock
+/// added in `after` is not a change. Empty when nothing locked was
+/// touched, or when there was no script before.
 fn locked_parameter_changes(before: Option<&str>, after: &str) -> Vec<String> {
     let Some(before) = before else {
         return Vec::new();
     };
+    let was_augmented = script_parameters::augmentations(before);
+    let augmented = script_parameters::augmentations(after);
     let after = script_parameters::extract(after);
     script_parameters::extract(before)
         .into_iter()
@@ -1201,7 +1199,17 @@ fn locked_parameter_changes(before: Option<&str>, after: &str) -> Vec<String> {
                     was.stated(),
                     now.stated()
                 ),
-                Some(_) => return None,
+                Some(_) => {
+                    // The binding stands, but a statement the script did
+                    // not have before now changes the name in place.
+                    let added = augmented
+                        .iter()
+                        .find(|now| now.name == *name && !was_augmented.contains(now))?;
+                    format!(
+                        "`{name}` is changed after its binding by `{}` (line {}) while locked{reason}",
+                        added.text, added.line
+                    )
+                }
             })
         })
         .collect()
@@ -4023,6 +4031,20 @@ mod tests {
         let changes = locked_parameter_changes(Some(before), "gap = 0.5\nfree = 1\n");
         assert!(changes[0].starts_with("`wall` was removed"), "{changes:?}");
         assert_eq!(changes[1], "`gap` was unlocked and changed 0.4 → 0.5");
+        // An augmented assignment leaves the binding as it was and still
+        // moves the value; one the script already had is not a change.
+        let augmented =
+            "wall = 2  # locked: must clear the M3 head\nwall += 1\ngap = 0.4  # locked\n";
+        assert_eq!(
+            locked_parameter_changes(
+                Some("wall = 2  # locked: must clear the M3 head\ngap = 0.4  # locked\n"),
+                augmented
+            ),
+            [
+                "`wall` is changed after its binding by `wall += 1` (line 2) while locked, locked because: must clear the M3 head"
+            ]
+        );
+        assert!(locked_parameter_changes(Some(augmented), augmented).is_empty());
         // Nothing locked touched, or no script before: nothing to say.
         assert!(locked_parameter_changes(Some(before), before).is_empty());
         assert!(locked_parameter_changes(None, after).is_empty());
@@ -4067,7 +4089,15 @@ mod tests {
                 events.push(event)
             })
             .await;
-        assert!(matches!(outcome, TurnOutcome::Completed { .. }));
+        // The user is told through the outcome, after the AI's closing
+        // message, by CADmark rather than the AI.
+        let TurnOutcome::Completed { locked_changes, .. } = outcome else {
+            panic!("the turn completed");
+        };
+        assert_eq!(
+            locked_changes,
+            ["`wall` changed 2 → 3 while locked, locked because: fit"]
+        );
 
         // The run result the AI read says which locked value moved and
         // what it owes: a restore, or a word in its final message.
@@ -4085,11 +4115,44 @@ mod tests {
             "{run_output}"
         );
         assert!(run_output.contains("explicit permission"), "{run_output}");
-        // And the user is told in chat, by CADmark rather than the AI.
+
+        // A script that keeps the binding and adds `wall += 1` has moved
+        // the value just the same.
+        std::fs::write(&script_path, "wall = 2  # locked: fit\nfree = 1\n").unwrap();
+        let model = ScriptedModel::new([
+            run("wall = 2  # locked: fit\nwall += 1\nfree = 1\n", "c3"),
+            text("Nudged the wall."),
+        ]);
+        let mut executor = FakeExecutor::new([]);
+        let mut render = NoRender;
+        let mut runner = TurnRunner {
+            model: &model,
+            executor: &mut executor,
+            docs: &FakeDocs,
+            render: &mut render,
+            references: &NoReferences,
+            script_path: script_path.clone(),
+            cancel: CancelFlag::new(),
+        };
+        let mut events = Vec::new();
+        let outcome = runner
+            .run(&Conversation::new(), &chat("thicker wall"), |event| {
+                events.push(event)
+            })
+            .await;
+        let TurnOutcome::Completed { locked_changes, .. } = outcome else {
+            panic!("the turn completed");
+        };
+        assert_eq!(
+            locked_changes,
+            [
+                "`wall` is changed after its binding by `wall += 1` (line 2) while locked, locked because: fit"
+            ]
+        );
         assert!(
             events.iter().any(|event| matches!(
                 event,
-                TurnEvent::Notice(text) if text.contains("Locked parameters changed this turn") && text.contains("`wall`")
+                TurnEvent::ToolFinished { call_id, output, .. } if call_id == "c3" && output.contains("`wall += 1`")
             )),
             "{events:?}"
         );
@@ -4112,18 +4175,15 @@ mod tests {
             cancel: CancelFlag::new(),
         };
         let mut events = Vec::new();
-        runner
+        let outcome = runner
             .run(&Conversation::new(), &chat("more free"), |event| {
                 events.push(event)
             })
             .await;
-        assert!(
-            !events.iter().any(|event| matches!(
-                event,
-                TurnEvent::Notice(text) if text.contains("Locked parameters")
-            )),
-            "{events:?}"
-        );
+        assert!(matches!(
+            outcome,
+            TurnOutcome::Completed { locked_changes, .. } if locked_changes.is_empty()
+        ));
         assert!(!events.iter().any(|event| matches!(
             event,
             TurnEvent::ToolFinished { output, .. } if output.contains("Locked parameters")
