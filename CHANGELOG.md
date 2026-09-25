@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- A part can be named in the script by setting the shape's `label`
+  (`lid.label = "lid"`, or `bp.part.label = "lid"` after a builder); the
+  label names the part in the Parts tab, in the measurements the AI reads,
+  and to the AI's render tool. Without a label the part keeps its variable
+  name. Two parts that would share a name are numbered apart (`lid`,
+  `lid (2)`)
+- The AI's render tool takes an optional part name and then renders that
+  part alone, framed to it, whether or not it is hidden; a name that matches
+  nothing is answered with the names that exist
+
+### Changed
+- The AI's render tool shows what the user sees: every part of a multi-part
+  model, each in its own colour, with the parts hidden from the Parts tab
+  left out. It previously drew only one part, in grey
+
 ## [0.2.1] - 2026-09-24
 
 ### Added

@@ -545,6 +545,37 @@ fn a_part_used_for_relative_placement_remains_a_second_part() {
 }
 
 #[test]
+fn a_labelled_shape_is_named_by_its_label_under_any_binding() {
+    // A builder's part and an algebra-mode solid, each given a label:
+    // the label names the part, and a later alias does not rename it.
+    let source = "from build123d import *\n\nwith BuildPart() as bp:\n    Box(10, 10, 2)\nbp.part.label = \"base plate\"\n\ncap = Part() + Pos(30, 0, 0) * Cylinder(3, 5)\ncap.label = \"lid\"\nresult = cap\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let parts = &executed.solid().expect("a solid result").parts;
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].name, "base plate");
+    assert_eq!(parts[1].name, "lid");
+}
+
+#[test]
+fn parts_sharing_a_name_are_numbered_apart() {
+    // Two labels the same, and a third part whose binding repeats the
+    // label: every part still has a name of its own, in script order.
+    let source = "from build123d import *\n\na = Part() + Box(10, 10, 2)\na.label = \"lid\"\nb = Part() + Pos(30, 0, 0) * Box(10, 10, 2)\nb.label = \"lid\"\nlid = Part() + Pos(60, 0, 0) * Box(10, 10, 2)\n";
+    let (_project, script, mut worker) = project_with_script(source);
+    let executed = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+
+    let parts = &executed.solid().expect("a solid result").parts;
+    let names: Vec<&str> = parts.iter().map(|part| part.name.as_str()).collect();
+    assert_eq!(names, ["lid", "lid (2)", "lid (3)"]);
+}
+
+#[test]
 fn an_alias_of_one_shape_is_one_part() {
     let source = "from build123d import *\n\npart = Part() + Box(10, 10, 2)\nalias = part\n";
     let (_project, script, mut worker) = project_with_script(source);

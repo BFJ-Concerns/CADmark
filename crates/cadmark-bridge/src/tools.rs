@@ -106,10 +106,14 @@ pub enum RenderView {
     Isometric,
 }
 
-/// Arguments of `render_view`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Arguments of `render_view`: where to look from, and optionally one
+/// part to look at alone. Without a part the render shows every part the
+/// user has visible, as the viewport does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RenderViewArgs {
     pub view: RenderView,
+    #[serde(default)]
+    pub part: Option<String>,
 }
 
 /// Arguments of `reference_images`: no file lists the library; a file
@@ -251,7 +255,9 @@ pub fn render_view_spec() -> ToolSpec {
     ToolSpec {
         name: RENDER_VIEW.to_string(),
         description: "See the current model as a shaded image with edges, framed to the model, \
-                      from a standard view or the user's current camera. Use to check what you \
+                      from a standard view or the user's current camera. By default it shows \
+                      what the user sees: every part they have visible, each in its own colour. \
+                      Name a part to see that part alone, framed to it. Use to check what you \
                       made; it never replaces the geometry the user pointed at."
             .to_string(),
         parameters: json!({
@@ -260,6 +266,10 @@ pub fn render_view_spec() -> ToolSpec {
                 "view": {
                     "type": "string",
                     "enum": ["current", "front", "back", "left", "right", "top", "bottom", "isometric"]
+                },
+                "part": {
+                    "type": "string",
+                    "description": "One part to render alone, by the name the run result lists it under. Omit to render every visible part together."
                 }
             },
             "required": ["view"],
@@ -397,6 +407,10 @@ mod tests {
         assert!(alone.standalone);
         let render: RenderViewArgs = serde_json::from_value(json!({"view": "top"})).unwrap();
         assert_eq!(render.view, RenderView::Top);
+        assert_eq!(render.part, None);
+        let one_part: RenderViewArgs =
+            serde_json::from_value(json!({"view": "front", "part": "lid"})).unwrap();
+        assert_eq!(one_part.part.as_deref(), Some("lid"));
         assert!(serde_json::from_value::<RenderViewArgs>(json!({"view": "sideways"})).is_err());
         let list: ReferenceImagesArgs = serde_json::from_value(json!({})).unwrap();
         assert_eq!(list.file, None);
