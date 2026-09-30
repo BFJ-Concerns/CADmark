@@ -27,7 +27,7 @@ just bootstrap       # One-off: create .venv with build123d + OCP
 just check           # Type-check
 just test            # Run all tests (kernel tests need the .venv)
 just verify          # Formatting, lints, and tests
-just run [dir]       # Run with a project directory (defaults to cwd)
+just run [dir]       # Run; with a folder named, open it directly
 just install         # Build release and install as a desktop application
 ```
 

@@ -162,6 +162,9 @@ pub struct SketchResult {
 }
 
 impl SketchResult {
+    /// A drawn profile kept at `file`. Both are what a sketch result is, so
+    /// this takes both; a test builds on it all the same, so a field added
+    /// later is filled here and nowhere else.
     pub fn new(profile: SketchProfile, file: ModelFile) -> Self {
         Self { profile, file }
     }

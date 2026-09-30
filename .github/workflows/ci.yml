@@ -15,7 +15,9 @@
 # runner kernel to enforce Landlock, which Ubuntu's does.
 #
 # Every action is pinned to a commit, with the release that commit is in a
-# trailing comment, so a moved tag cannot change what runs here.
+# trailing comment (or, for an action that publishes no releases, the tag
+# and the date the commit was taken), so a moved tag cannot change what
+# runs here.
 name: CI
 
 on:
@@ -28,6 +30,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  UV_VERSION: "0.12.13"
   PYTHON_VERSION: "3.12.13"
 
 jobs:
@@ -47,7 +50,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libegl1 libgl1-mesa-dri
 
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      # This action publishes no releases; its `stable` tag moves with the
+      # toolchain. The commit is the one that tag named on 2026-09-30.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-30
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -61,10 +66,12 @@ jobs:
           # Red runs still warm the cache, or every retry rebuilds from cold.
           cache-on-failure: true
 
-      # uv fetches the pinned CPython build; the interpreter pin keeps the
+      # uv is pinned so the installer fetches that release, not whatever is
+      # newest; uv then fetches the pinned CPython build, which keeps the
       # exact patch release part of the runtime contract.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
+          version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PYTHON_VERSION }}
 
       # The venv is keyed on everything that decides its contents, so a
