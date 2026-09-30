@@ -12,6 +12,12 @@
 //! device is acquired once, before any check runs, and the checks are
 //! listed and selected the way both test runners expect.
 
+// An integration test compiles outside `cfg(test)`, so it carries the
+// allowance the crate roots grant test modules: boundary-crossing types are
+// built on their base even when every field is named (see
+// crates/cadmark-core/tests/boundary_type_construction.rs).
+#![allow(clippy::needless_update)]
+
 use cadmark_core::geometry::{
     EdgeId, FaceId, PartId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
     VertexId,
@@ -971,7 +977,7 @@ fn main() {
 
     let mut failed = 0;
     for (name, check) in &selected {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(&gpu)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(gpu)));
         if outcome.is_ok() {
             println!("test {name} ... ok");
         } else {
