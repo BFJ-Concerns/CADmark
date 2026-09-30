@@ -6,8 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - STEP, STL and 3MF exports are read back and compared with the part. A file
-  that does not reproduce it is refused and removed; the refusal names the
-  lost faces and their surface or curve kinds
+  that does not reproduce it is refused and removed; the refusal says what
+  the file got wrong (solid or shell count, volume, size) and, for STEP,
+  names the lost faces and their surface or curve kinds
 - STEP faces on offset curves are converted to B-splines when needed to
   reproduce the part, with the volume deviation stated in the export message
 - The AI can run the same export check inside a turn with `check_export`
