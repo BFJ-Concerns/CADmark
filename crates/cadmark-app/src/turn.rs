@@ -1128,9 +1128,6 @@ fn numbered_lines(source: &str, start_line: Option<u32>, end_line: Option<u32>) 
         .join("\n")
 }
 
-/// What the model reads after a snippet: what it printed, the value of
-/// its final expression, and the traceback if it raised, each only when
-/// present.
 /// The check's answer: the verdict the export would give, then the cause
 /// the report carries — the same sentences the user's export shows.
 fn describe_export_check(subject: &str, report: &ExportReport) -> String {
@@ -1171,6 +1168,9 @@ fn list_labels<T: std::fmt::Display>(labels: impl IntoIterator<Item = T>) -> Str
         .join(", ")
 }
 
+/// What the model reads after a snippet: what it printed, the value of
+/// its final expression, and the traceback if it raised, each only when
+/// present.
 fn describe_snippet(outcome: &SnippetOutcome) -> String {
     let mut parts = Vec::new();
     if !outcome.printed.trim().is_empty() {

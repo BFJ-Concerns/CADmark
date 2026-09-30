@@ -168,8 +168,9 @@ they are: an ellipse or spline grown with `offset` in a sketch, or a wire's
 `offset_2d`, then extruded or revolved, gives faces over `Geom_OffsetCurve`
 geometry, which OCCT's STEP writer omits while reporting success. CADmark
 converts those faces to B-splines before writing, states the volume the
-conversion moved in the export message (below 0.01 percent in practice),
-and judges the file at the mesh tolerance of 1 percent. Offsets of lines
+conversion moved in the export message (a fraction of a percent: about
+0.1 percent on a real duct piece, far less on a simple rim), and judges
+the file at the mesh tolerance of 1 percent. Offsets of lines
 and arcs simplify to lines and arcs and need no conversion; STL and 3MF
 carry offset geometry as triangles and need none either.
 

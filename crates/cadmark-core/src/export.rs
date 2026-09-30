@@ -274,12 +274,16 @@ impl ExportReport {
     }
 }
 
-/// Whether `actual` sits within `tolerance` of `expected`, relatively, with
-/// an absolute floor of one unit so a zero expectation (a sketch's volume,
-/// a plate's thin axis) does not demand exact zero of a floating-point
-/// read-back.
+/// The length below which two positions are the same point to the kernel
+/// (OCCT's confusion precision, in millimetres). It floors the relative
+/// comparisons so a zero expectation — a sketch's volume, a flat profile's
+/// thin axis — tolerates floating-point noise without a sub-millimetre
+/// feature escaping its percentage.
+pub const GEOMETRIC_CONFUSION: f64 = 1e-7;
+
+/// Whether `actual` sits within `tolerance` of `expected`, relatively.
 fn within(actual: f64, expected: f64, tolerance: f64) -> bool {
-    (actual - expected).abs() <= tolerance * expected.abs().max(1.0)
+    (actual - expected).abs() <= tolerance * expected.abs().max(GEOMETRIC_CONFUSION)
 }
 
 fn count(n: usize, noun: &str) -> String {
@@ -489,10 +493,13 @@ mod tests {
 
     #[test]
     fn a_zero_expectation_tolerates_floating_point_noise_but_not_a_real_difference() {
-        assert!(within(1e-9, 0.0, EXACT_TOLERANCE));
+        assert!(within(1e-12, 0.0, EXACT_TOLERANCE));
         assert!(!within(0.5, 0.0, EXACT_TOLERANCE));
         assert!(within(10_001.0, 10_000.0, EXACT_TOLERANCE));
         assert!(!within(10_002.0, 10_000.0, EXACT_TOLERANCE));
+        // A sub-millimetre feature is held to its percentage, not to a unit.
+        assert!(!within(0.109, 0.1, APPROXIMATE_TOLERANCE));
+        assert!(within(0.1005, 0.1, APPROXIMATE_TOLERANCE));
     }
 
     #[test]
