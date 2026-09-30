@@ -1790,35 +1790,26 @@ mod tests {
     }
 
     fn sample_sketch() -> ExecutedModel {
-        ExecutedModel {
-            mesh: TessellatedMesh::default(),
-            ledger: ProvenanceLedger::new(),
-            sketch_lineage: Default::default(),
-            descriptors: GeometryDescriptors::default(),
-            printed: String::new(),
-            form: ModelForm::Sketch(cadmark_kernel::protocol::SketchResult {
-                profile: cadmark_core::sketch::SketchProfile {
+        ExecutedModel::of(ModelForm::Sketch(
+            cadmark_kernel::protocol::SketchResult::new(
+                cadmark_core::sketch::SketchProfile {
                     plane: cadmark_core::sketch::SketchPlane {
                         origin: [0.0; 3],
                         normal: [0.0, 0.0, 1.0],
                         x_axis: [1.0, 0.0, 0.0],
                     },
                     curves: vec![cadmark_core::sketch::SketchCurve {
-                        curve_id: 0,
                         points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
                         curve_type: "line".to_string(),
                         length: 1.0,
-                        radius: None,
+                        ..cadmark_core::sketch::SketchCurve::default()
                     }],
-                    corners: vec![cadmark_core::sketch::SketchCorner {
-                        corner_id: 0,
-                        position: [0.0; 3],
-                    }],
-                    regions: Vec::new(),
+                    corners: vec![cadmark_core::sketch::SketchCorner::default()],
+                    ..cadmark_core::sketch::SketchProfile::default()
                 },
-                file: ModelFile(PathBuf::from("/scratch/model-2.brep")),
-            }),
-        }
+                ModelFile(PathBuf::from("/scratch/model-2.brep")),
+            ),
+        ))
     }
 
     #[test]
@@ -1828,18 +1819,12 @@ mod tests {
             unreachable!("sample model is a solid");
         };
         let part = |id: u32, name: &str, volume: f64| cadmark_kernel::protocol::ExecutedPart {
-            id,
-            name: name.to_string(),
-            mesh: TessellatedMesh::default(),
-            ledger: ProvenanceLedger::new(),
-            sketch_lineage: Default::default(),
-            descriptors: GeometryDescriptors::default(),
             summary: ModelSummary {
                 volume,
                 ..solid.summary.clone()
             },
             validity: solid.validity.clone(),
-            file: solid.file.clone(),
+            ..cadmark_kernel::protocol::ExecutedPart::new(id, name.to_string(), solid.file.clone())
         };
         solid.parts = vec![part(0, "bracket", 1000.0), part(1, "lid", 200.0)];
         solid.validity = vec![solid.validity[0], solid.validity[0]];
@@ -1879,25 +1864,25 @@ mod tests {
         ExecutedModel {
             mesh: TessellatedMesh::default(),
             ledger: ProvenanceLedger::new(),
-            sketch_lineage: Default::default(),
             descriptors: GeometryDescriptors::default(),
-            printed: String::new(),
-            form: ModelForm::Solid(cadmark_kernel::protocol::SolidResult {
-                summary: ModelSummary {
-                    volume: 1000.0,
-                    bounds_min: [0.0; 3],
-                    bounds_max: [10.0; 3],
-                    face_count: 6,
-                    edge_count: 12,
-                    vertex_count: 8,
-                },
+            ..ExecutedModel::of(ModelForm::Solid(cadmark_kernel::protocol::SolidResult {
                 validity: vec![SolidValidity {
                     closed: true,
                     valid: true,
+                    ..SolidValidity::default()
                 }],
-                file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
-                parts: Vec::new(),
-            }),
+                ..cadmark_kernel::protocol::SolidResult::new(
+                    ModelSummary {
+                        volume: 1000.0,
+                        bounds_max: [10.0; 3],
+                        face_count: 6,
+                        edge_count: 12,
+                        vertex_count: 8,
+                        ..ModelSummary::default()
+                    },
+                    ModelFile(PathBuf::from("/scratch/model-1.brep")),
+                )
+            }))
         }
     }
 
@@ -1963,15 +1948,10 @@ mod tests {
             model.mesh = cube_mesh();
             if let ModelForm::Solid(solid) = &mut model.form {
                 solid.parts = vec![cadmark_kernel::protocol::ExecutedPart {
-                    id: 0,
-                    name: "cube".into(),
                     mesh: cube_mesh(),
-                    ledger: ProvenanceLedger::new(),
-                    sketch_lineage: Default::default(),
-                    descriptors: GeometryDescriptors::default(),
                     summary: solid.summary.clone(),
                     validity: solid.validity.clone(),
-                    file: solid.file.clone(),
+                    ..cadmark_kernel::protocol::ExecutedPart::new(0, "cube", solid.file.clone())
                 }];
             }
             Ok(model)
@@ -3344,14 +3324,13 @@ mod tests {
     /// with its arguments and a successful result.
     fn recorded_run(call_id: &str, code: &str) -> Message {
         Message::tool_calls(vec![ToolActivity {
-            call_id: call_id.into(),
-            tool: RUN_SCRIPT.into(),
-            arguments: serde_json::json!({"code": code, "summary": "Built"}),
             output: Some("ran".into()),
-            failed: false,
-            started: chrono::Utc::now(),
             finished: Some(chrono::Utc::now()),
-            executed_source: None,
+            ..ToolActivity::begin(
+                call_id,
+                RUN_SCRIPT,
+                serde_json::json!({"code": code, "summary": "Built"}),
+            )
         }])
     }
 
@@ -3458,14 +3437,14 @@ mod tests {
         let mut history = Conversation::new();
         history.push(recorded_run("c1", good));
         history.push(Message::tool_calls(vec![ToolActivity {
-            call_id: "c2".into(),
-            tool: RUN_SCRIPT.into(),
-            arguments: serde_json::json!({"code": "BROKEN =", "summary": "Oops"}),
             output: Some("The script failed".into()),
             failed: true,
-            started: chrono::Utc::now(),
             finished: Some(chrono::Utc::now()),
-            executed_source: None,
+            ..ToolActivity::begin(
+                "c2",
+                RUN_SCRIPT,
+                serde_json::json!({"code": "BROKEN =", "summary": "Oops"}),
+            )
         }]));
         let model = ScriptedModel::new([text("Same as before.")]);
         let mut harness = Harness::with_script(Some(good), FakeExecutor::new([]));
@@ -3511,15 +3490,8 @@ mod tests {
             EdgeId, FaceId, GeometryContext, PickedElement, TopologyElement,
         };
         use cadmark_core::ledger::LedgerValue;
-        let anchor = |element: TopologyElement| GeometryContext {
-            part: None,
-            sketch: Default::default(),
-            element: PickedElement::Solid(element),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
+        let anchor = |element: TopologyElement| {
+            GeometryContext::new(PickedElement::Solid(element), LedgerValue::Untraced)
         };
         let input = TurnInput {
             chat: Some("and make it taller".into()),
@@ -4208,14 +4180,12 @@ mod tests {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("make a box"));
         conversation.push(Message::tool_calls(vec![ToolActivity {
-            call_id: "c1".into(),
-            tool: RUN_SCRIPT.into(),
-            arguments: serde_json::json!({"code": "X = 1", "summary": "Box"}),
             output: Some("Executed successfully.".into()),
-            failed: false,
-            started: chrono::Utc::now(),
-            finished: None,
-            executed_source: None,
+            ..ToolActivity::begin(
+                "c1",
+                RUN_SCRIPT,
+                serde_json::json!({"code": "X = 1", "summary": "Box"}),
+            )
         }]));
         conversation.push(Message::ai_response("Made a box."));
         conversation.push(Message::error_notice("not for the model"));
@@ -4477,14 +4447,10 @@ mod tests {
         let mut conversation = Conversation::new();
         conversation.push(Message::user_chat("make x two"));
         conversation.push(Message::tool_calls(vec![ToolActivity {
-            call_id: "c1".into(),
-            tool: RUN_SCRIPT.into(),
-            arguments: serde_json::json!({"summary": "Two"}),
             output: Some("ran".into()),
-            failed: false,
-            started: chrono::Utc::now(),
             finished: Some(chrono::Utc::now()),
             executed_source: Some("x = 2\n".into()),
+            ..ToolActivity::begin("c1", RUN_SCRIPT, serde_json::json!({"summary": "Two"}))
         }]));
         let model = ScriptedModel::new([text("Still two.")]);
         let mut harness = Harness::with_script(Some("x = 2\n"), FakeExecutor::new([]));

@@ -189,6 +189,7 @@ fn rectangle_sketch() -> SketchProfile {
             .map(|(index, &position)| SketchCorner {
                 corner_id: index as u32,
                 position,
+                ..SketchCorner::default()
             })
             .collect(),
         regions: vec![SketchRegion {
@@ -197,6 +198,7 @@ fn rectangle_sketch() -> SketchProfile {
             indices: vec![0, 1, 2, 0, 2, 3],
             ..SketchRegion::default()
         }],
+        ..SketchProfile::default()
     }
 }
 
