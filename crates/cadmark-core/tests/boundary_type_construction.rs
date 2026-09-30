@@ -355,8 +355,10 @@ fn comments_and_literal_contents_are_blanked_but_lines_are_kept() {
     // the lines they span are still counted.
     let spanning = "/* GeometryContext {\n   a: 1 } */ x\ny = \"GeometryContext {\n  b\";\nz";
     let stripped = code_only(spanning);
-    assert_eq!(stripped.lines().count(), 4);
+    assert_eq!(stripped.lines().count(), 5);
     assert!(!stripped.contains("GeometryContext"));
     assert_eq!(stripped.lines().nth(1), Some(" x"));
-    assert_eq!(stripped.lines().nth(3), Some("z"));
+    assert_eq!(stripped.lines().nth(2), Some("y = \""));
+    assert_eq!(stripped.lines().nth(3), Some("\";"));
+    assert_eq!(stripped.lines().nth(4), Some("z"));
 }
