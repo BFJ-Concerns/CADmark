@@ -205,10 +205,27 @@ fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-/// Whether the word before a `Type {` makes it a declaration or a
-/// signature rather than a value: `struct Type {`, `impl Type {`,
-/// `impl Trait for Type {`, `fn f() -> Type {`.
+/// Whether what precedes a `Type {` makes it something other than a
+/// value to build on: a declaration (`struct Type {`, `impl Type {`,
+/// `impl Trait for Type {`), a signature (`fn f() -> path::Type {`), or
+/// the initialiser of a `const` or `static` item, where no struct update
+/// is possible and a full literal is the only form.
 fn is_declaration(before: &str) -> bool {
+    let statement = before
+        .rsplit(|ch| ch == ';' || ch == '{' || ch == '}')
+        .next()
+        .unwrap_or("")
+        .trim_start();
+    if statement.starts_with("const ") || statement.starts_with("static ") {
+        return true;
+    }
+    let before = before.trim_end();
+    // A qualified path (`protocol::Type`) stands for the type alone.
+    let before = if before.ends_with("::") {
+        before.trim_end_matches(|ch: char| ch.is_alphanumeric() || ch == '_' || ch == ':')
+    } else {
+        before
+    };
     let Some(last) = before.split_whitespace().next_back() else {
         return false;
     };
@@ -270,7 +287,7 @@ fn a_literal_on_its_base_passes_and_a_bare_one_fails() {
 
 #[test]
 fn declarations_ranges_and_strings_are_not_read_as_bare_literals() {
-    let declarations = "pub struct SolidValidity {\n closed: bool }\nimpl SolidValidity {\n fn f() {} }\nimpl Default for SolidValidity {\n fn default() -> Self { todo!() } }\nimpl<T> From<T> for SolidValidity {}\nfn fixture() -> SolidValidity {\n todo!() }";
+    let declarations = "pub struct SolidValidity {\n closed: bool }\nimpl SolidValidity {\n fn f() {} }\nimpl Default for SolidValidity {\n fn default() -> Self { todo!() } }\nimpl<T> From<T> for SolidValidity {}\nfn fixture() -> SolidValidity {\n todo!() }\nfn qualified() -> cadmark_core::geometry::SolidValidity {\n todo!() }\nconst GOOD: SolidValidity = SolidValidity { closed: true, valid: true };\nstatic ALSO: SolidValidity = SolidValidity { closed: true, valid: true };";
     assert_eq!(
         bare_literal_lines(declarations, "SolidValidity"),
         Vec::<usize>::new()

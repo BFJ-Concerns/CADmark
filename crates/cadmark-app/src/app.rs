@@ -3432,23 +3432,14 @@ mod tests {
 
     /// The plainest successful execution: a solid with nothing to draw.
     fn solid_model() -> cadmark_kernel::protocol::ExecutedModel {
-        cadmark_kernel::protocol::ExecutedModel {
-            mesh: cadmark_core::mesh::TessellatedMesh::default(),
-            ledger: cadmark_core::ledger::ProvenanceLedger::new(),
-            sketch_lineage: Default::default(),
-            descriptors: GeometryDescriptors::default(),
-            printed: String::new(),
-            form: cadmark_kernel::protocol::ModelForm::Solid(
-                cadmark_kernel::protocol::SolidResult {
-                    summary: summary(1000.0, 6),
-                    validity: vec![],
-                    file: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(
-                        "/scratch/model-1.brep",
-                    )),
-                    parts: Vec::new(),
-                },
+        cadmark_kernel::protocol::ExecutedModel::of(cadmark_kernel::protocol::ModelForm::Solid(
+            cadmark_kernel::protocol::SolidResult::new(
+                summary(1000.0, 6),
+                cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(
+                    "/scratch/model-1.brep",
+                )),
             ),
-        }
+        ))
     }
 
     #[test]
@@ -3656,11 +3647,9 @@ mod tests {
     fn summary(volume: f64, faces: usize) -> ModelSummary {
         ModelSummary {
             volume,
-            bounds_min: [0.0; 3],
             bounds_max: [10.0, 10.0, 10.0],
             face_count: faces,
-            edge_count: 0,
-            vertex_count: 0,
+            ..ModelSummary::default()
         }
     }
 
@@ -3671,36 +3660,27 @@ mod tests {
             .enumerate()
             .map(
                 |(id, (name, volume, faces))| cadmark_kernel::protocol::ExecutedPart {
-                    id: id as u32 + 1,
-                    name: name.to_string(),
-                    mesh: cadmark_core::mesh::TessellatedMesh::default(),
-                    ledger: cadmark_core::ledger::ProvenanceLedger::new(),
-                    sketch_lineage: Default::default(),
-                    descriptors: GeometryDescriptors::default(),
                     summary: summary(*volume, *faces),
-                    validity: vec![],
-                    file: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(format!(
-                        "/scratch/part-{id}.brep"
-                    ))),
+                    ..cadmark_kernel::protocol::ExecutedPart::new(
+                        id as u32 + 1,
+                        name.to_string(),
+                        cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(format!(
+                            "/scratch/part-{id}.brep"
+                        ))),
+                    )
                 },
             )
             .collect();
         let whole = parts.last().expect("at least one part");
-        cadmark_kernel::protocol::ExecutedModel {
-            mesh: cadmark_core::mesh::TessellatedMesh::default(),
-            ledger: cadmark_core::ledger::ProvenanceLedger::new(),
-            sketch_lineage: Default::default(),
-            descriptors: GeometryDescriptors::default(),
-            printed: String::new(),
-            form: cadmark_kernel::protocol::ModelForm::Solid(
-                cadmark_kernel::protocol::SolidResult {
-                    summary: whole.summary.clone(),
-                    validity: vec![],
-                    file: whole.file.clone(),
-                    parts,
-                },
-            ),
-        }
+        cadmark_kernel::protocol::ExecutedModel::of(cadmark_kernel::protocol::ModelForm::Solid(
+            cadmark_kernel::protocol::SolidResult {
+                parts: parts.clone(),
+                ..cadmark_kernel::protocol::SolidResult::new(
+                    whole.summary.clone(),
+                    whole.file.clone(),
+                )
+            },
+        ))
     }
 
     /// A pending comment anchored to a sketch element marks that element
@@ -3713,16 +3693,7 @@ mod tests {
             kind: SketchElementKind::Curve,
             index: 2,
         };
-        let anchor = GeometryContext {
-            part: None,
-            element: PickedElement::Sketch(curve),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: vec![],
-            chosen_candidate: None,
-            sketch: Default::default(),
-        };
+        let anchor = GeometryContext::new(PickedElement::Sketch(curve), LedgerValue::Untraced);
         let mut pending = PendingComments::default();
         pending.add("make this longer".into(), vec![anchor]);
 
@@ -3971,15 +3942,11 @@ mod tests {
 
     #[test]
     fn exactly_two_comment_anchors_become_the_measurement_pair() {
-        let anchor = |id| GeometryContext {
-            part: None,
-            element: PickedElement::Solid(TopologyElement::Face(FaceId(id))),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: vec![],
-            chosen_candidate: None,
-            sketch: Default::default(),
+        let anchor = |id| {
+            GeometryContext::new(
+                PickedElement::Solid(TopologyElement::Face(FaceId(id))),
+                LedgerValue::Untraced,
+            )
         };
         let first = anchor(1);
         let second = anchor(4);
@@ -4082,7 +4049,7 @@ mod tests {
                 points: vec![[0.0; 3], [8.0, 0.0, 0.0]],
                 curve_type: "line".into(),
                 length: 8.0,
-                radius: None,
+                ..cadmark_core::sketch::SketchCurve::default()
             }],
             ..Default::default()
         };
@@ -4166,21 +4133,20 @@ mod tests {
             descriptors: GeometryDescriptors::default(),
             bounds: None,
             form: cadmark_kernel::protocol::ModelForm::Sketch(
-                cadmark_kernel::protocol::SketchResult {
-                    profile: cadmark_core::sketch::SketchProfile {
+                cadmark_kernel::protocol::SketchResult::new(
+                    cadmark_core::sketch::SketchProfile {
                         curves: vec![cadmark_core::sketch::SketchCurve {
-                            curve_id: 0,
                             points: vec![[0.0; 3], [10.0, 0.0, 0.0]],
                             curve_type: "line".to_string(),
                             length: 10.0,
-                            radius: None,
+                            ..cadmark_core::sketch::SketchCurve::default()
                         }],
                         ..Default::default()
                     },
-                    file: cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(
+                    cadmark_kernel::protocol::ModelFile(std::path::PathBuf::from(
                         "/scratch/sketch-1.brep",
                     )),
-                },
+                ),
             ),
         });
         let mut app = app_around(project);
@@ -4224,9 +4190,7 @@ mod tests {
                 normal: [1.0, 0.0, 0.0],
                 x_axis: [0.0, 1.0, 0.0],
             },
-            curves: Vec::new(),
-            corners: Vec::new(),
-            regions: Vec::new(),
+            ..cadmark_core::sketch::SketchProfile::default()
         };
         let profile_bounds = Bounds3::from_positions([[0.0, -5.0, -5.0], [0.0, 5.0, 5.0]]);
 
@@ -4512,16 +4476,7 @@ mod tests {
     }
 
     fn activity(call_id: &str, tool: &str) -> ToolActivity {
-        ToolActivity {
-            call_id: call_id.into(),
-            tool: tool.into(),
-            arguments: serde_json::Value::Null,
-            output: None,
-            failed: false,
-            started: chrono::Utc::now(),
-            finished: None,
-            executed_source: None,
-        }
+        ToolActivity::begin(call_id, tool, serde_json::Value::Null)
     }
 
     fn kinds_and_text(conversation: &Conversation) -> Vec<(MessageKind, String)> {

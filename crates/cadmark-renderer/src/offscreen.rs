@@ -466,7 +466,6 @@ mod tests {
             [-2.0, 1.0, 0.0],
         ];
         SketchProfile {
-            plane: Default::default(),
             curves: (0..4)
                 .map(|index| SketchCurve {
                     curve_id: index as u32,
@@ -480,6 +479,7 @@ mod tests {
                 .map(|(index, &position)| SketchCorner {
                     corner_id: index as u32,
                     position,
+                    ..SketchCorner::default()
                 })
                 .collect(),
             regions: vec![SketchRegion {
@@ -488,6 +488,7 @@ mod tests {
                 indices: vec![0, 1, 2, 0, 2, 3],
                 ..SketchRegion::default()
             }],
+            ..SketchProfile::default()
         }
     }
 

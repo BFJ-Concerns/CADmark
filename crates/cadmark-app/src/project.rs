@@ -817,19 +817,17 @@ mod tests {
     use super::*;
 
     fn sketch_form() -> ModelForm {
-        ModelForm::Sketch(SketchResult {
-            profile: SketchProfile {
+        ModelForm::Sketch(SketchResult::new(
+            SketchProfile {
                 plane: cadmark_core::sketch::SketchPlane {
                     origin: [0.0; 3],
                     normal: [0.0, 1.0, 0.0],
                     x_axis: [1.0, 0.0, 0.0],
                 },
-                curves: Vec::new(),
-                corners: Vec::new(),
-                regions: Vec::new(),
+                ..SketchProfile::default()
             },
-            file: ModelFile(PathBuf::from("/scratch/sketch-1.brep")),
-        })
+            ModelFile(PathBuf::from("/scratch/sketch-1.brep")),
+        ))
     }
 
     #[test]
@@ -843,20 +841,22 @@ mod tests {
             descriptors: GeometryDescriptors::default(),
             bounds: None,
             form: ModelForm::Solid(SolidResult {
-                summary: ModelSummary {
-                    volume: 1000.0,
-                    bounds_min: [0.0; 3],
-                    bounds_max: [10.0; 3],
-                    face_count: 6,
-                    edge_count: 12,
-                    vertex_count: 8,
-                },
                 validity: vec![SolidValidity {
                     closed: true,
                     valid: true,
+                    ..SolidValidity::default()
                 }],
-                file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
-                parts: Vec::new(),
+                ..SolidResult::new(
+                    ModelSummary {
+                        volume: 1000.0,
+                        bounds_max: [10.0; 3],
+                        face_count: 6,
+                        edge_count: 12,
+                        vertex_count: 8,
+                        ..ModelSummary::default()
+                    },
+                    ModelFile(PathBuf::from("/scratch/model-1.brep")),
+                )
             }),
         };
 
@@ -1001,11 +1001,11 @@ mod tests {
             name: "bracket".to_string(),
             summary: ModelSummary {
                 volume: 1.0,
-                bounds_min: [0.0; 3],
                 bounds_max: [1.0; 3],
                 face_count: 1,
                 edge_count: 1,
                 vertex_count: 1,
+                ..ModelSummary::default()
             },
             ledger: ProvenanceLedger::new(),
             sketch_lineage: SketchLineageLedger::new(),
@@ -1140,6 +1140,7 @@ mod tests {
             vec![SolidValidity {
                 valid: true,
                 closed: true,
+                ..SolidValidity::default()
             }],
         ));
 
@@ -1172,6 +1173,7 @@ mod tests {
         let valid = vec![SolidValidity {
             valid: true,
             closed: true,
+            ..SolidValidity::default()
         }];
         let mut box_part = part_for_export_test(
             ModelFile(PathBuf::from("/worker-scratch/box.brep")),
@@ -1190,17 +1192,18 @@ mod tests {
             descriptors: GeometryDescriptors::default(),
             bounds: None,
             form: ModelForm::Solid(SolidResult {
-                summary: ModelSummary {
-                    volume: 1.0,
-                    bounds_min: [0.0; 3],
-                    bounds_max: [1.0; 3],
-                    face_count: 6,
-                    edge_count: 12,
-                    vertex_count: 8,
-                },
                 validity: valid,
-                file: ModelFile(PathBuf::from("/worker-scratch/lid.brep")),
-                parts: Vec::new(),
+                ..SolidResult::new(
+                    ModelSummary {
+                        volume: 1.0,
+                        bounds_max: [1.0; 3],
+                        face_count: 6,
+                        edge_count: 12,
+                        vertex_count: 8,
+                        ..ModelSummary::default()
+                    },
+                    ModelFile(PathBuf::from("/worker-scratch/lid.brep")),
+                )
             }),
         });
         project.select_model_part(0);
@@ -1261,6 +1264,7 @@ mod tests {
             vec![SolidValidity {
                 valid: true,
                 closed: false,
+                ..SolidValidity::default()
             }],
         ));
 

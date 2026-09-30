@@ -2369,7 +2369,6 @@ mod tests {
         use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchRegion};
 
         SketchProfile {
-            plane: Default::default(),
             curves: vec![SketchCurve {
                 curve_id: 0,
                 // Three points, so two segments, so four line vertices.
@@ -2377,8 +2376,8 @@ mod tests {
                 ..SketchCurve::default()
             }],
             corners: vec![SketchCorner {
-                corner_id: 0,
                 position: [4.0, 0.0, 0.0],
+                ..SketchCorner::default()
             }],
             regions: vec![SketchRegion {
                 region_id: 0,
@@ -2386,6 +2385,7 @@ mod tests {
                 indices: vec![0, 1, 2],
                 ..SketchRegion::default()
             }],
+            ..SketchProfile::default()
         }
     }
 
