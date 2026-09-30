@@ -705,6 +705,7 @@ version = "0.2.1"
 dependencies = [
  "bytemuck",
  "cadmark-core",
+ "cadmark-renderer",
  "log",
  "naga",
  "pollster",

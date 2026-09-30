@@ -11,7 +11,16 @@ pollster = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# The shared test device (`test_device`), for other crates' tests to draw
+# with; the renderer's own tests see the module under `cfg(test)`.
+test-device = []
+
 [dev-dependencies]
+# The integration test acquires its device through `test_device`, which
+# only a feature exposes to a build outside `cfg(test)`; a package may
+# name itself as a dev-dependency to turn one on for its own tests.
+cadmark-renderer = { path = ".", features = ["test-device"] }
 # Already in the lockfile as wgpu's own shader front end; used here to
 # compile the shaders and read back their uniform layout without a GPU.
 naga = { version = "24.0.0", features = ["wgsl-in"] }

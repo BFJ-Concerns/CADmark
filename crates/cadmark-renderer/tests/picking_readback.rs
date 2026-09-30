@@ -3,14 +3,14 @@
 //! marker pipelines put the IDs on screen where the sizing says they are:
 //! the plain-data tests can only show what is fed to the GPU.
 //!
-//! The adapter is forced to the fallback (CPU) one, so the result holds on
-//! a machine with no GPU and does not depend on this one's driver. A
-//! missing software adapter fails the run: a pass earned by the named
-//! instrument being absent would record nothing at all.
+//! The device is the software adapter or nothing (`test_device::software`),
+//! so the result holds on a machine with no GPU and does not depend on
+//! this one's driver. A missing software adapter fails the run: a pass
+//! earned by the named instrument being absent would record nothing at all.
 //!
-//! The harness is this file's own `main` rather than libtest's, because
-//! the loader has to be pointed at a software rasteriser before any driver
-//! opens, and `main` is the only place that ordering is guaranteed.
+//! The harness is this file's own `main` rather than libtest's, so the
+//! device is acquired once, before any check runs, and the checks are
+//! listed and selected the way both test runners expect.
 
 use cadmark_core::geometry::{
     EdgeId, FaceId, PartId, PickedElement, SketchElement, SketchElementKind, TopologyElement,
@@ -23,6 +23,7 @@ use cadmark_renderer::mesh::GpuMesh;
 use cadmark_renderer::picking::{PickingPass, SelectionFilter};
 use cadmark_renderer::pipeline::{RenderPipelines, Renderer, upload_mesh, upload_sketch};
 use cadmark_renderer::section::{Axis, SectionPlane};
+use cadmark_renderer::test_device::TestGpu as Gpu;
 use cadmark_renderer::viewport::{copy_pick_pixel, decode_pick_result, render_picking};
 
 const WIDTH: u32 = 256;
@@ -30,77 +31,6 @@ const HEIGHT: u32 = 256;
 const EDGE_ID: u32 = 3;
 const SECOND_EDGE_ID: u32 = 7;
 const SECOND_FACE_ID: u32 = 1;
-
-struct Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    adapter_name: String,
-}
-
-/// Point the GL loader at a software rasteriser.
-///
-/// wgpu can only force a fallback adapter when the loader offers a CPU
-/// one. Where a proprietary vendor's EGL library is installed it answers
-/// first and reports that vendor's GPU, so no fallback exists in the list
-/// to force; naming Mesa's EGL vendor file instead puts llvmpipe back in
-/// it. On a machine with no GPU the loader already resolves to Mesa, where
-/// this is redundant rather than wrong, and a value the operator set is
-/// left alone.
-///
-/// # Safety
-///
-/// Writes the process environment, so the caller must still be
-/// single-threaded and must not have opened a driver yet.
-unsafe fn prefer_software_loader() {
-    const VENDOR_VARIABLE: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
-    const MESA_VENDOR_FILES: [&str; 2] = [
-        "/usr/share/glvnd/egl_vendor.d/50_mesa.json",
-        "/etc/glvnd/egl_vendor.d/50_mesa.json",
-    ];
-
-    if std::env::var_os(VENDOR_VARIABLE).is_some() {
-        return;
-    }
-    let Some(mesa) = MESA_VENDOR_FILES
-        .iter()
-        .find(|path| std::path::Path::new(path).exists())
-    else {
-        return;
-    };
-    unsafe { std::env::set_var(VENDOR_VARIABLE, mesa) };
-}
-
-/// The software adapter, or a failure saying so. There is no skip branch
-/// on purpose: this rung's proof is specified on the software adapter, so
-/// its absence is an unavailability to report rather than a run to pass.
-fn software_adapter() -> Gpu {
-    let instance = wgpu::Instance::default();
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::None,
-        force_fallback_adapter: true,
-        compatible_surface: None,
-    }))
-    .expect(
-        "no software adapter: wgpu offers no fallback (CPU) adapter on this machine. \
-         Install a software rasteriser — Mesa's llvmpipe (GL) or lavapipe (Vulkan) — \
-         and re-run.",
-    );
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("picking_readback_test"),
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            memory_hints: wgpu::MemoryHints::default(),
-        },
-        None,
-    ))
-    .expect("the software adapter would not give a device");
-    Gpu {
-        device,
-        queue,
-        adapter_name: adapter.get_info().name,
-    }
-}
 
 /// A camera looking straight at the XZ plane: screen right is +X and
 /// screen up is +Z, so a segment along X is a horizontal line on screen.
@@ -932,8 +862,7 @@ type Check = (&'static str, fn(&Gpu));
 /// is), positional names select checks by substring or, with `--exact`,
 /// by whole name, and `--nocapture` is accepted and ignored because the
 /// output is never captured. Nextest lists the binary once and then runs
-/// each check in its own process, so every check still starts from a
-/// single-threaded `main` that has set the loader up first.
+/// each check in its own process, each acquiring the device afresh.
 fn main() {
     let checks: [Check; 13] = [
         (
@@ -1031,15 +960,11 @@ fn main() {
         return;
     }
 
-    // Sound only while the process is single-threaded, which is why this
-    // is `main` and not a lazily-initialised helper inside a check.
-    unsafe { prefer_software_loader() };
-
-    let gpu = software_adapter();
+    let gpu = cadmark_renderer::test_device::software();
     println!(
         "\nrunning {} tests on software adapter: {}",
         selected.len(),
-        gpu.adapter_name
+        gpu.adapter.name
     );
 
     let mut failed = 0;
