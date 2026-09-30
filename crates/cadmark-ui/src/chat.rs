@@ -1309,30 +1309,17 @@ mod tests {
 
     #[test]
     fn chip_names_element_and_known_lines() {
-        let resolved = GeometryContext {
-            part: None,
-            sketch: Default::default(),
-            element: PickedElement::Solid(TopologyElement::Face(FaceId(1))),
-            provenance: LedgerValue::Resolved(entry(7)),
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
-        };
+        let resolved = GeometryContext::new(
+            PickedElement::Solid(TopologyElement::Face(FaceId(1))),
+            LedgerValue::Resolved(entry(7)),
+        );
         assert_eq!(spatial_chip(&resolved), "face 1 · line 7");
-        let ambiguous = GeometryContext {
-            part: None,
-            sketch: Default::default(),
-            element: PickedElement::Solid(TopologyElement::Edge(EdgeId(2))),
-            provenance: LedgerValue::Ambiguous(vec![entry(3), entry(9)]),
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
-        };
+        let ambiguous = GeometryContext::new(
+            PickedElement::Solid(TopologyElement::Edge(EdgeId(2))),
+            LedgerValue::Ambiguous(vec![entry(3), entry(9)]),
+        );
         assert_eq!(spatial_chip(&ambiguous), "edge 2 · lines 3/9");
         let drawn = GeometryContext {
-            part: None,
             sketch: cadmark_core::sketch_lineage::SketchLineage::Resolved(
                 cadmark_core::sketch_lineage::SketchSource {
                     source: cadmark_core::ledger::SourceRef {
@@ -1342,41 +1329,34 @@ mod tests {
                     object: "Rectangle".into(),
                 },
             ),
-            element: PickedElement::Sketch(cadmark_core::geometry::SketchElement {
-                kind: cadmark_core::geometry::SketchElementKind::Region,
-                index: 0,
-            }),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
+            ..GeometryContext::new(
+                PickedElement::Sketch(cadmark_core::geometry::SketchElement {
+                    kind: cadmark_core::geometry::SketchElementKind::Region,
+                    index: 0,
+                }),
+                LedgerValue::Untraced,
+            )
         };
         assert_eq!(spatial_chip(&drawn), "sketch region 0 · line 4");
-        let untraced = GeometryContext {
-            part: None,
-            sketch: Default::default(),
-            element: PickedElement::Solid(TopologyElement::Edge(EdgeId(2))),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
-        };
+        let untraced = GeometryContext::new(
+            PickedElement::Solid(TopologyElement::Edge(EdgeId(2))),
+            LedgerValue::Untraced,
+        );
         assert_eq!(spatial_chip(&untraced), "edge 2 · untraced");
     }
 
     fn activity(tool: &str, output: Option<&str>, failed: bool) -> ToolActivity {
         let started = chrono::Utc::now();
         ToolActivity {
-            call_id: format!("call-{tool}"),
-            tool: tool.into(),
-            arguments: serde_json::json!({"code": "X = 1"}),
             output: output.map(str::to_string),
             failed,
             started,
             finished: output.map(|_| started + chrono::Duration::milliseconds(1500)),
-            executed_source: None,
+            ..ToolActivity::begin(
+                format!("call-{tool}"),
+                tool,
+                serde_json::json!({"code": "X = 1"}),
+            )
         }
     }
 
@@ -1648,16 +1628,10 @@ mod tests {
     }
 
     fn untraced_face(face: u32) -> GeometryContext {
-        GeometryContext {
-            part: None,
-            sketch: Default::default(),
-            element: PickedElement::Solid(TopologyElement::Face(FaceId(face))),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
-        }
+        GeometryContext::new(
+            PickedElement::Solid(TopologyElement::Face(FaceId(face))),
+            LedgerValue::Untraced,
+        )
     }
 
     #[test]
