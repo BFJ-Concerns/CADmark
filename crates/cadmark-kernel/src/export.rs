@@ -19,7 +19,9 @@
 
 use std::path::Path;
 
-use cadmark_core::export::{Conversion, ExportFormat, ExportReport, LostFace, ShapeFigures};
+use cadmark_core::export::{
+    Conversion, ExportFormat, ExportReport, GEOMETRIC_CONFUSION, LostFace, ShapeFigures,
+};
 use cadmark_core::sketch::SketchPlane;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -249,17 +251,21 @@ pub fn export_model(
                     .as_ref()
                     .map_or(0.0, |figures| figures.volume);
                 report.conversion = Some(Conversion {
-                    volume_deviation: (written - retained) / retained.abs().max(1.0),
+                    volume_deviation: (written - retained)
+                        / retained.abs().max(GEOMETRIC_CONFUSION),
                 });
             }
             Ok(report)
         };
 
-        let report = prove(format, attempt)?;
-        if report.refused() {
+        // Whatever went wrong, nothing that failed the proof stays at the
+        // path: a refused file, or the first attempt's file when the
+        // converted second attempt did not get as far as a report.
+        let outcome = prove(format, attempt);
+        if outcome.as_ref().map_or(true, ExportReport::refused) && path.exists() {
             std::fs::remove_file(path).map_err(|error| ExportError::RemoveFailed(file, error))?;
         }
-        Ok(report)
+        outcome
     })
 }
 

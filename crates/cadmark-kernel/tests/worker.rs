@@ -43,12 +43,12 @@ fn project_with_script(source: &str) -> (tempfile::TempDir, PathBuf, KernelWorke
     (project, script, worker)
 }
 
-/// Generous ceilings for scripts expected to finish.
 /// Every solid closed and valid: what the export gate asks of a result.
 fn printable(validity: &[SolidValidity]) -> bool {
     !validity.is_empty() && validity.iter().all(|solid| solid.is_printable())
 }
 
+/// Generous ceilings for scripts expected to finish.
 fn roomy() -> ExecutionLimits {
     ExecutionLimits {
         wall_clock: Duration::from_secs(120),
@@ -296,6 +296,12 @@ fn assert_report_agrees_with_reader(report: &ExportReport, imported: &ImportedMo
         written.volume,
         imported.volume
     );
+    for (axis, (kernel, reader)) in written.size.iter().zip(imported.size).enumerate() {
+        assert!(
+            (kernel - reader).abs() <= 1e-6 * reader.abs().max(1.0),
+            "the kernel read back a size of {kernel} on axis {axis} where the reader read {reader}"
+        );
+    }
     if let Some(faces) = imported.faces {
         assert_eq!(
             written.faces, faces,
