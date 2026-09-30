@@ -375,31 +375,22 @@ impl Project {
         Ok(file_name)
     }
 
-    /// Replace the worker with a channel the test holds, so the command
-    /// a path sends can be read back off it.
+    /// Replace the worker with channels the test holds for commands and results.
     #[cfg(test)]
-    pub(crate) fn stand_in_worker(&mut self) -> mpsc::Receiver<OrchestratorCommand> {
+    pub(crate) fn stand_in_worker(
+        &mut self,
+    ) -> (
+        mpsc::Receiver<OrchestratorCommand>,
+        mpsc::Sender<OrchestratorResult>,
+    ) {
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (_result_tx, result_rx) = mpsc::channel();
-        self.orchestrator = Some(OrchestratorHandle {
-            commands: cmd_tx,
-            results: result_rx,
-            thread: std::thread::spawn(|| {}),
-        });
-        cmd_rx
-    }
-
-    /// Replace the worker with a channel supplying results to the real polling path.
-    #[cfg(test)]
-    pub(crate) fn stand_in_worker_results(&mut self) -> mpsc::Sender<OrchestratorResult> {
-        let (cmd_tx, _cmd_rx) = mpsc::channel();
         let (result_tx, result_rx) = mpsc::channel();
         self.orchestrator = Some(OrchestratorHandle {
             commands: cmd_tx,
             results: result_rx,
             thread: std::thread::spawn(|| {}),
         });
-        result_tx
+        (cmd_rx, result_tx)
     }
 
     /// Hand a command to the worker.

@@ -1417,7 +1417,10 @@ fn settle_unanswered_calls(items: &mut Vec<ModelItem>) {
 /// attached images ride with it again, so a picture the user gave three
 /// turns ago is still in front of the model; a model that cannot read
 /// images is shown the text alone.
-fn history_items(messages: &[Message], accepts_images: bool) -> Vec<ModelItem> {
+fn history_items<'a>(
+    messages: impl IntoIterator<Item = &'a Message>,
+    accepts_images: bool,
+) -> Vec<ModelItem> {
     let mut items = Vec::new();
     for message in messages {
         let images = if accepts_images {
@@ -4836,6 +4839,44 @@ mod tests {
             if text.starts_with("Note from CADmark: STEP export refused:") && text.ends_with(&cause))),
             "first request lacks refusal and explain() cause: {items:?}");
         assert_eq!(&items[..prefix.len()], prefix.as_slice());
+    }
+
+    #[tokio::test]
+    async fn export_refusal_during_a_turn_reaches_the_next_request() {
+        for more_turn_output in [false, true] {
+            let (conversation, cause) =
+                crate::app::tests::conversation_after_in_flight_refusal(more_turn_output);
+            let model = ScriptedModel::new([text("I will repair the lost face.")]);
+            let mut harness = Harness::with_script(Some("x = 1\n"), FakeExecutor::new([]));
+            let outcome = harness
+                .run_with_conversation(
+                    &model,
+                    &conversation,
+                    TurnInput {
+                        chat: Some("Repair the part.".into()),
+                        ..Default::default()
+                    },
+                    CancelFlag::new(),
+                )
+                .await;
+            assert_eq!(outcome, TurnOutcome::Answered);
+            let requests = model.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].items.iter().any(|item| matches!(item,
+                ModelItem::User { text, .. } if text.starts_with("Note from CADmark: STEP export refused:")
+                    && text.ends_with(&cause))),
+                "first request lacks the in-flight refusal: {:?}", requests[0].items);
+            assert_eq!(
+                requests[0]
+                    .items
+                    .iter()
+                    .filter(|item| matches!(item,
+                ModelItem::Assistant { text } if text == "The part is ready."))
+                    .count(),
+                1,
+                "turn output must not be replayed twice"
+            );
+        }
     }
 
     #[tokio::test]
