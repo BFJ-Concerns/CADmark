@@ -2005,39 +2005,13 @@ mod tests {
         assert!(renderer.mesh_uniforms((800, 600)).mesh_alpha < 1.0);
     }
 
-    /// A device for the tests that must actually run a pass. The software
-    /// adapter is asked for first, because a host that has one gives every
-    /// seat the same instrument; where none is installed the host's own
-    /// adapter is taken instead, which is what the marker-layout test beside
-    /// this one has always done. An adapter is required either way — a test
-    /// that quietly skips reads green while proving nothing, which is the
-    /// failure this whole readback exists to stop.
-    fn verification_device() -> (wgpu::Device, wgpu::Queue) {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: true,
-            compatible_surface: None,
-        };
-        let adapter = pollster::block_on(instance.request_adapter(&options))
-            .or_else(|| {
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    force_fallback_adapter: false,
-                    ..options
-                }))
-            })
-            .expect("a wgpu adapter is required for renderer verification");
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
-            .expect("the verification adapter must yield a device")
-    }
-
     #[test]
     fn every_pass_builds_against_a_real_device() {
         // WGSL is compiled when a pipeline is created, not when the crate
         // is: a shader that does not parse, a uniform struct the shader
         // declares differently, or a binding whose visibility does not cover
         // the stage that reads it all surface here and nowhere earlier.
-        let (device, _queue) = verification_device();
+        let (device, _queue) = crate::test_device::shared().handles();
 
         let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = errors.clone();
@@ -2065,7 +2039,7 @@ mod tests {
     /// what this renders and reads.
     #[test]
     fn the_section_plane_makes_a_clipped_face_unpickable_in_the_readback() {
-        let (device, queue) = verification_device();
+        let (device, queue) = crate::test_device::shared().handles();
 
         const SIZE: u32 = 64;
         let pipelines =
@@ -2247,7 +2221,7 @@ mod tests {
     /// face.
     #[test]
     fn a_face_revealed_by_the_section_is_pickable_behind_the_cut_away_one() {
-        let (device, queue) = verification_device();
+        let (device, queue) = crate::test_device::shared().handles();
 
         const SIZE: u32 = 64;
         let pipelines =
@@ -2593,28 +2567,7 @@ mod tests {
 
     #[test]
     fn pipeline_accepts_marker_layout_with_initially_cleared_markers() {
-        let instance = wgpu::Instance::default();
-        let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: None,
-            force_fallback_adapter: true,
-        };
-        let adapter = pollster::block_on(instance.request_adapter(&options))
-            .or_else(|| {
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    force_fallback_adapter: false,
-                    ..options
-                }))
-            })
-            .expect("a wgpu adapter is required for renderer verification");
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("renderer-pipeline-test"),
-                ..Default::default()
-            },
-            None,
-        ))
-        .expect("software adapter device is available");
+        let (device, queue) = crate::test_device::shared().handles();
         let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Bgra8Unorm, 4, 4);
 
         let mesh = GpuMesh {

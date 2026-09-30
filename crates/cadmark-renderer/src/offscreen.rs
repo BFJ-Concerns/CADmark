@@ -239,31 +239,6 @@ mod tests {
         assert_eq!(padded_bytes_per_row(1), 256);
     }
 
-    /// A device for the rendering tests: the real adapter where there is
-    /// one, the software fallback otherwise. A runner with neither fails
-    /// the test rather than passing without rendering anything.
-    fn gpu() -> (wgpu::Device, wgpu::Queue) {
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(async {
-            for force_fallback_adapter in [false, true] {
-                let adapter = instance
-                    .request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::LowPower,
-                        compatible_surface: None,
-                        force_fallback_adapter,
-                    })
-                    .await;
-                if adapter.is_some() {
-                    return adapter;
-                }
-            }
-            None
-        })
-        .expect("no GPU adapter and no software fallback: install a Vulkan ICD or lavapipe");
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
-            .expect("the adapter gave no device")
-    }
-
     /// A single-part scene: one mesh as part zero.
     fn solo(mesh: &TessellatedMesh) -> Vec<OffscreenPart<'_>> {
         vec![OffscreenPart {
@@ -352,7 +327,7 @@ mod tests {
 
     #[test]
     fn a_rendered_model_fills_the_image_and_is_shaded() {
-        let (device, queue) = gpu();
+        let (device, queue) = crate::test_device::shared().handles();
         let (width, height) = (320u32, 240u32);
         let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
 
@@ -450,7 +425,7 @@ mod tests {
 
     #[test]
     fn an_empty_render_is_the_clear_colour_alone() {
-        let (device, queue) = gpu();
+        let (device, queue) = crate::test_device::shared().handles();
         let renderer = OffscreenRenderer::new(&device, 64, 64).expect("offscreen renderer");
         let scene = crate::pipeline::Renderer::new();
         let image = renderer
@@ -518,7 +493,7 @@ mod tests {
 
     #[test]
     fn a_sketch_only_model_draws_its_profile_where_the_solid_would_be() {
-        let (device, queue) = gpu();
+        let (device, queue) = crate::test_device::shared().handles();
         let (width, height) = (200u32, 200u32);
         let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
 
@@ -579,7 +554,7 @@ mod tests {
     /// "the opaque pass ran anyway".
     #[test]
     fn a_see_through_solid_lets_the_background_through() {
-        let (device, queue) = gpu();
+        let (device, queue) = crate::test_device::shared().handles();
         let (width, height) = (160u32, 160u32);
         let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
 
@@ -658,7 +633,7 @@ mod tests {
     /// nothing, or discarded everywhere, fails both halves of this.
     #[test]
     fn a_section_plane_stops_half_the_solid_being_drawn() {
-        let (device, queue) = gpu();
+        let (device, queue) = crate::test_device::shared().handles();
         let (width, height) = (160u32, 160u32);
         let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
 
@@ -765,7 +740,7 @@ mod tests {
 
     #[test]
     fn a_ghosted_solid_fades_towards_the_background() {
-        let (device, queue) = gpu();
+        let (device, queue) = crate::test_device::shared().handles();
         let (width, height) = (160u32, 160u32);
         let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
 
@@ -837,7 +812,7 @@ mod tests {
         // centre of each is that part's palette colour, so the two differ
         // from each other as well as from the background. One mesh
         // uploaded as part zero would paint both the same grey.
-        let (device, queue) = gpu();
+        let (device, queue) = crate::test_device::shared().handles();
         let (width, height) = (240u32, 120u32);
         let renderer = OffscreenRenderer::new(&device, width, height).expect("offscreen renderer");
         let (left, right) = (cube_at(-1.5), cube_at(1.5));

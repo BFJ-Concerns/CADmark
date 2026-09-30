@@ -3665,35 +3665,9 @@ mod tests {
         mesh
     }
 
-    /// A device for the rendering tests: the real adapter where there is
-    /// one, the software fallback otherwise. A runner with neither fails
-    /// the test rather than passing without rendering anything.
-    async fn gpu() -> (wgpu::Device, wgpu::Queue) {
-        let instance = wgpu::Instance::default();
-        let mut found = None;
-        for force_fallback_adapter in [false, true] {
-            found = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::LowPower,
-                    compatible_surface: None,
-                    force_fallback_adapter,
-                })
-                .await;
-            if found.is_some() {
-                break;
-            }
-        }
-        let adapter = found
-            .expect("no GPU adapter and no software fallback: install a Vulkan ICD or lavapipe");
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
-            .await
-            .expect("the adapter gave no device")
-    }
-
     #[tokio::test]
     async fn the_model_is_shown_a_real_render_of_what_is_on_screen() {
-        let (device, queue) = gpu().await;
+        let (device, queue) = cadmark_renderer::test_device::shared().handles();
         let scene = SceneHandle::new();
         scene.set_parts(vec![ScenePart {
             id: 0,
@@ -3799,7 +3773,7 @@ mod tests {
         // has not run a frame since the script executed, which is the
         // normal case when the model asks to run and to look in one
         // response.
-        let (device, queue) = gpu().await;
+        let (device, queue) = cadmark_renderer::test_device::shared().handles();
         let scene = SceneHandle::new();
         scene.set_view(cadmark_renderer::camera::Camera::default(), (400, 300));
         let mut render = ViewportRender::new(scene, RenderGpu { device, queue });
@@ -3919,7 +3893,7 @@ mod tests {
         // Two parts far apart. A render of the model frames both, so each
         // is a speck; a render of `peg` alone frames the peg, which then
         // fills the image. The captions say which is which.
-        let (device, queue) = gpu().await;
+        let (device, queue) = cadmark_renderer::test_device::shared().handles();
         let scene = SceneHandle::new();
         let bounds = |x: f32| cadmark_renderer::camera::Bounds3 {
             min: [x - 0.5, -0.5, -0.5],

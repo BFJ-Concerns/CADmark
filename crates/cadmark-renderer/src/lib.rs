@@ -10,4 +10,6 @@ pub mod offscreen;
 pub mod picking;
 pub mod pipeline;
 pub mod section;
+#[cfg(any(test, feature = "test-device"))]
+pub mod test_device;
 pub mod viewport;

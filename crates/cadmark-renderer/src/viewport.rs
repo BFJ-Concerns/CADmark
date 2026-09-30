@@ -444,26 +444,6 @@ mod tests {
     use super::*;
     use crate::pipeline::{MeshUniforms, SimpleUniforms, upload_mesh};
 
-    fn gpu_device() -> (wgpu::Device, wgpu::Queue) {
-        let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        }))
-        .expect("renderer unit test requires a software or hardware adapter");
-        pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("renderer_viewport_test_device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                memory_hints: wgpu::MemoryHints::MemoryUsage,
-            },
-            None,
-        ))
-        .expect("renderer unit test requires a device")
-    }
-
     fn triangle(depth: f32) -> TessellatedMesh {
         TessellatedMesh {
             vertices: vec![
@@ -543,7 +523,7 @@ mod tests {
         // other. A pick must name the near part's face zero, not the far
         // part's; and once the near part is hidden it neither answers nor
         // occludes, so the same pixel names the far part's face.
-        let (device, queue) = gpu_device();
+        let (device, queue) = crate::test_device::shared().handles();
         let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8Unorm, 64, 64);
         queue.write_buffer(
             &pipelines.picking_uniform_buffer,
@@ -606,7 +586,7 @@ mod tests {
 
     #[test]
     fn main_scene_depth_keeps_a_near_surface_in_front_of_a_later_far_surface() {
-        let (device, queue) = gpu_device();
+        let (device, queue) = crate::test_device::shared().handles();
         let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8Unorm, 64, 64);
         queue.write_buffer(
             &pipelines.mesh_uniform_buffer,
@@ -712,7 +692,7 @@ mod tests {
 
     #[test]
     fn every_part_of_a_multi_part_scene_reaches_the_frame() {
-        let (device, queue) = gpu_device();
+        let (device, queue) = crate::test_device::shared().handles();
         let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8Unorm, 64, 64);
         queue.write_buffer(
             &pipelines.mesh_uniform_buffer,
