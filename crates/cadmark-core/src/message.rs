@@ -49,6 +49,28 @@ pub struct ToolActivity {
     pub executed_source: Option<String>,
 }
 
+impl ToolActivity {
+    /// A call the model has just made: started now, not yet answered. The
+    /// turn fills in the answer as it arrives; a test builds on this naming
+    /// only the fields it reads.
+    pub fn begin(
+        call_id: impl Into<String>,
+        tool: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            call_id: call_id.into(),
+            tool: tool.into(),
+            arguments,
+            output: None,
+            failed: false,
+            started: Utc::now(),
+            finished: None,
+            executed_source: None,
+        }
+    }
+}
+
 /// An image the model reads, already encoded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImageData {
@@ -490,11 +512,9 @@ mod tests {
     };
 
     fn sample_geometry_context() -> GeometryContext {
-        GeometryContext {
-            part: None,
-            sketch: Default::default(),
-            element: PickedElement::Solid(TopologyElement::Face(FaceId(5))),
-            provenance: LedgerValue::Resolved(ProvenanceEntry {
+        GeometryContext::new(
+            PickedElement::Solid(TopologyElement::Face(FaceId(5))),
+            LedgerValue::Resolved(ProvenanceEntry {
                 source: SourceRef {
                     line: 10,
                     code: "box = Box(10, 10, 10)".to_string(),
@@ -503,11 +523,7 @@ mod tests {
                 operation_id: 1,
                 relation: ProvenanceRelation::Generated,
             }),
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
-        }
+        )
     }
 
     #[test]
@@ -572,14 +588,10 @@ mod tests {
         let mut conv = Conversation::new();
         conv.push(Message::user_chat("make a box"));
         conv.push(Message::tool_calls(vec![ToolActivity {
-            call_id: "call_1".into(),
-            tool: "run_script".into(),
-            arguments: serde_json::json!({"code": "x = 1"}),
             output: Some("ok".into()),
-            failed: false,
-            started: Utc::now(),
             finished: Some(Utc::now()),
             executed_source: Some("x = 1".into()),
+            ..ToolActivity::begin("call_1", "run_script", serde_json::json!({"code": "x = 1"}))
         }]));
         conv.push(Message::error_notice("part.py failed to run"));
         let json = serde_json::to_string(&conv).unwrap();

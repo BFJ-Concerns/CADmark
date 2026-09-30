@@ -7,6 +7,13 @@
 // measurement, export — runs inside that child. No type crossing the
 // boundary names build123d, OCP, or Python.
 
+// Tests build every boundary-crossing type on its shared base with
+// struct-update syntax, even when they name every field, so a field added
+// later is filled in one place (crates/cadmark-core/tests/
+// boundary_type_construction.rs holds them to it); clippy's complaint that
+// such an update is redundant today is the point.
+#![cfg_attr(test, allow(clippy::needless_update))]
+
 mod bounds;
 pub mod execution;
 pub mod export;

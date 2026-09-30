@@ -7,6 +7,13 @@
 // strip, the status bar, the start view shown before a project is chosen,
 // the part-naming prompt, the version-naming dialog, and the settings dialog.
 
+// Tests build every boundary-crossing type on its shared base with
+// struct-update syntax, even when they name every field, so a field added
+// later is filled in one place (crates/cadmark-core/tests/
+// boundary_type_construction.rs holds them to it); clippy's complaint that
+// such an update is redundant today is the point.
+#![cfg_attr(test, allow(clippy::needless_update))]
+
 pub mod chat;
 pub mod code_panel;
 pub mod overlay;

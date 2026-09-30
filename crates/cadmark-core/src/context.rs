@@ -134,14 +134,9 @@ pub fn resolve_context(
 
     // Step 3: Package into the stable output format.
     Ok(GeometryContext {
-        part: None,
-        element: PickedElement::Solid(element.clone()),
-        provenance,
         identification,
-        source_context: String::new(),
         neighbours,
-        chosen_candidate: None,
-        sketch: SketchLineage::default(),
+        ..GeometryContext::new(PickedElement::Solid(element.clone()), provenance)
     })
 }
 
@@ -180,17 +175,12 @@ pub fn resolve_sketch_context(
 ) -> GeometryContext {
     let sketch = lineage.lookup_element(&element);
     GeometryContext {
-        part: None,
-        element: PickedElement::Sketch(element),
-        // Nothing the kernel built claims a sketch element, so its ledger
-        // provenance is honestly empty; the sketch route below carries the
-        // line that drew it.
-        provenance: LedgerValue::Untraced,
         identification: profile.identification(&element),
-        source_context: String::new(),
-        neighbours: Vec::new(),
-        chosen_candidate: None,
         sketch,
+        // Nothing the kernel built claims a sketch element, so its ledger
+        // provenance is honestly empty; the sketch route above carries the
+        // line that drew it.
+        ..GeometryContext::new(PickedElement::Sketch(element), LedgerValue::Untraced)
     }
 }
 
@@ -485,16 +475,7 @@ mod tests {
             }),
         );
 
-        let context = |element| GeometryContext {
-            part: None,
-            sketch: SketchLineage::default(),
-            element,
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
-        };
+        let context = |element| GeometryContext::new(element, LedgerValue::Untraced);
 
         let drawn = with_sketch_route(
             context(PickedElement::Solid(TopologyElement::Face(FaceId(1)))),
@@ -537,7 +518,7 @@ mod tests {
                 points: vec![[0.0; 3], [20.0, 0.0, 0.0]],
                 curve_type: "line".to_string(),
                 length: 20.0,
-                radius: None,
+                ..Default::default()
             }],
             ..SketchProfile::default()
         };
