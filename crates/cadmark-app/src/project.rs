@@ -389,6 +389,19 @@ impl Project {
         cmd_rx
     }
 
+    /// Replace the worker with a channel supplying results to the real polling path.
+    #[cfg(test)]
+    pub(crate) fn stand_in_worker_results(&mut self) -> mpsc::Sender<OrchestratorResult> {
+        let (cmd_tx, _cmd_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        self.orchestrator = Some(OrchestratorHandle {
+            commands: cmd_tx,
+            results: result_rx,
+            thread: std::thread::spawn(|| {}),
+        });
+        result_tx
+    }
+
     /// Hand a command to the worker.
     pub fn send(&mut self, command: OrchestratorCommand) -> Result<(), String> {
         self.orchestrator

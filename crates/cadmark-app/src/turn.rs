@@ -1463,7 +1463,7 @@ fn history_items(messages: &[Message], accepts_images: bool) -> Vec<ModelItem> {
                     });
                 }
             }
-            MessageKind::DesignChange => items.push(ModelItem::User {
+            MessageKind::DesignChange | MessageKind::ExportRefusal => items.push(ModelItem::User {
                 text: format!("Note from CADmark: {}", message.text),
                 images: Vec::new(),
             }),
@@ -4786,6 +4786,66 @@ mod tests {
             ],
             formats: &ExportFormat::SOLID,
         }
+    }
+
+    async fn assert_export_refusal_reaches_next_request(recorded_session: bool) {
+        let report = ExportReport {
+            retained: cadmark_core::export::ShapeFigures {
+                solids: 1,
+                faces: 7,
+                ..Default::default()
+            },
+            written: Some(cadmark_core::export::ShapeFigures::default()),
+            lost_faces: vec![cadmark_core::export::LostFace {
+                surface: "extrusion".into(),
+                curves: vec!["offset".into()],
+                ..Default::default()
+            }],
+            ..ExportReport::new(ExportFormat::Step)
+        };
+        let cause = report.explain();
+        let mut conversation = Conversation::new();
+        conversation.push(Message::ai_response("The part is ready."));
+        let prefix = vec![ModelItem::Assistant {
+            text: "The part is ready.".into(),
+        }];
+        if recorded_session {
+            conversation.record_session(prefix.clone());
+        }
+        conversation.push(Message::export_refusal(format!(
+            "STEP export refused: the file did not reproduce the part and was not kept. {cause}"
+        )));
+        let model = ScriptedModel::new([text("I will repair the lost face.")]);
+        let mut harness = Harness::with_script(Some("x = 1\n"), FakeExecutor::new([]));
+        let outcome = harness
+            .run_with_conversation(
+                &model,
+                &conversation,
+                TurnInput {
+                    chat: Some("Repair the part.".into()),
+                    ..Default::default()
+                },
+                CancelFlag::new(),
+            )
+            .await;
+        assert_eq!(outcome, TurnOutcome::Answered);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let items = &requests[0].items;
+        assert!(items.iter().any(|item| matches!(item, ModelItem::User { text, .. }
+            if text.starts_with("Note from CADmark: STEP export refused:") && text.ends_with(&cause))),
+            "first request lacks refusal and explain() cause: {items:?}");
+        assert_eq!(&items[..prefix.len()], prefix.as_slice());
+    }
+
+    #[tokio::test]
+    async fn export_refusal_reaches_next_request_from_fresh_history() {
+        assert_export_refusal_reaches_next_request(false).await;
+    }
+
+    #[tokio::test]
+    async fn export_refusal_reaches_next_request_after_recorded_session() {
+        assert_export_refusal_reaches_next_request(true).await;
     }
 
     #[tokio::test]

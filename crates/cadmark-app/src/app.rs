@@ -974,13 +974,20 @@ impl CadmarkApp {
                     result,
                 } => {
                     project.exports_in_flight = project.exports_in_flight.saturating_sub(1);
+                    let refused = result.as_ref().is_ok_and(|report| report.refused());
                     self.status = Some(match result {
-                        Ok(report) if report.refused() => Status::error(format!(
-                            "{} export refused: the file did not reproduce the part and was \
-                             not kept. {}",
-                            format.label(),
-                            report.explain()
-                        )),
+                        Ok(report) if report.refused() => {
+                            let refusal = format!(
+                                "{} export refused: the file did not reproduce the part and was \
+                                 not kept. {}",
+                                format.label(),
+                                report.explain()
+                            );
+                            project
+                                .conversation
+                                .push(Message::export_refusal(refusal.clone()));
+                            Status::error(refusal)
+                        }
                         Ok(report) => {
                             let explanation = report.explain();
                             Status::info(format!(
@@ -994,6 +1001,9 @@ impl CadmarkApp {
                             Status::error(format!("{} export failed: {error}", format.label()))
                         }
                     });
+                    if refused {
+                        self.save_conversation();
+                    }
                 }
                 OrchestratorResult::MinimumDistanceMeasured {
                     model,
@@ -4247,6 +4257,89 @@ mod tests {
         store.save(&settings).unwrap();
         let services = ai_services(&store.load().unwrap(), Some(&store)).unwrap();
         assert_eq!(services.model.model_name(), "hosted-cad-model");
+    }
+
+    #[test]
+    fn export_refusal_records_only_refused_reports_and_saves_the_exact_status() {
+        use cadmark_core::export::{
+            Conversion, ExportFormat, ExportReport, LostFace, ShapeFigures,
+        };
+        let figures = ShapeFigures {
+            solids: 1,
+            faces: 7,
+            ..Default::default()
+        };
+        let reproduced = ExportReport {
+            retained: figures.clone(),
+            written: Some(figures.clone()),
+            ..ExportReport::new(ExportFormat::Step)
+        };
+        let converted = ExportReport {
+            conversion: Some(Conversion {
+                volume_deviation: 0.001,
+            }),
+            ..reproduced.clone()
+        };
+        let refused = ExportReport {
+            retained: figures,
+            written: Some(ShapeFigures::default()),
+            lost_faces: vec![LostFace {
+                surface: "extrusion".into(),
+                curves: vec!["offset".into()],
+                ..Default::default()
+            }],
+            ..ExportReport::new(ExportFormat::Step)
+        };
+        let cause = refused.explain();
+        for (result, should_record) in [
+            (Ok(refused), true),
+            (Ok(reproduced), false),
+            (Ok(converted), false),
+            (Err("writer failed".into()), false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut app = app_with_pending_response(dir.path().to_path_buf());
+            let before = app.project().unwrap().conversation.len();
+            let sender = app.project_mut().unwrap().stand_in_worker_results();
+            app.project_mut().unwrap().exports_in_flight = 1;
+            sender
+                .send(crate::orchestrator::OrchestratorResult::Exported {
+                    format: ExportFormat::Step,
+                    path: dir.path().join("part.step"),
+                    result,
+                })
+                .unwrap();
+            app.poll_results(&egui::Context::default());
+            let project = app.project().unwrap();
+            assert_eq!(project.exports_in_flight, 0);
+            assert_eq!(
+                project.conversation.len(),
+                before + usize::from(should_record)
+            );
+            if should_record {
+                let note = project.conversation.messages().last().unwrap();
+                assert_eq!(note.kind, MessageKind::ExportRefusal);
+                assert_eq!(note.text, app.status.as_ref().unwrap().text);
+                assert!(note.text.ends_with(&cause));
+                let saved: Conversation = serde_json::from_slice(
+                    &std::fs::read(dir.path().join(".cadmark/conversation.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(saved, project.conversation);
+                drop(app);
+                let reopened = app_with_pending_response(dir.path().to_path_buf());
+                assert!(
+                    reopened
+                        .project()
+                        .unwrap()
+                        .conversation
+                        .messages()
+                        .iter()
+                        .any(|message| message.kind == MessageKind::ExportRefusal
+                            && message.text.ends_with(&cause))
+                );
+            }
+        }
     }
 
     #[test]

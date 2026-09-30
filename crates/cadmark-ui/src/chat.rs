@@ -891,7 +891,9 @@ fn show_message(
         }
         MessageKind::Thinking { finished } => show_thinking(ui, message, *finished, width, live),
         MessageKind::Notice { is_error } => show_notice(ui, &message.text, *is_error, width),
-        MessageKind::DesignChange => show_notice(ui, &message.text, false, width),
+        MessageKind::DesignChange | MessageKind::ExportRefusal => {
+            show_notice(ui, &message.text, false, width)
+        }
     }
 }
 

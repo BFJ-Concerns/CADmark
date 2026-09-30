@@ -167,6 +167,8 @@ pub enum MessageKind {
     /// recorded where it happened so the AI's next turn knows when and why
     /// the script moved, not only that it differs from its last run.
     DesignChange,
+    /// A refused export, recorded for the user and the model’s next turn.
+    ExportRefusal,
 }
 
 /// A single message in the conversation.
@@ -254,6 +256,11 @@ impl Message {
     /// as the user.
     pub fn design_change(text: impl Into<String>) -> Self {
         Self::new(MessageKind::DesignChange, text)
+    }
+
+    /// The export gate’s refusal, with its cause unchanged.
+    pub fn export_refusal(text: impl Into<String>) -> Self {
+        Self::new(MessageKind::ExportRefusal, text)
     }
 
     /// Mark a spatial comment as applied (AI has acted on it).
@@ -581,6 +588,33 @@ mod tests {
         assert_eq!(conv.messages()[0].text, "Made a box.");
         conv.remove(id);
         assert!(conv.is_empty());
+    }
+
+    #[test]
+    fn export_refusal_survives_conversation_json_round_trip() {
+        let mut conversation = Conversation::new();
+        conversation.push(Message::export_refusal(
+            "STEP export refused: missing extrusion face.",
+        ));
+        let json = serde_json::to_string(&conversation).unwrap();
+        let decoded = serde_json::from_str::<Conversation>(&json);
+        assert!(decoded.is_ok(), "refusal could not be read: {decoded:?}");
+        assert_eq!(decoded.unwrap(), conversation);
+    }
+
+    #[test]
+    fn export_refusal_kind_preserves_loading_older_conversation_files() {
+        let json = r#"{"messages":[{"id":"00000000-0000-0000-0000-000000000001","kind":"UserChat","text":"make a box","timestamp":"2026-09-01T12:00:00Z"}]}"#;
+        let decoded = serde_json::from_str::<Conversation>(json);
+        assert!(
+            decoded.is_ok(),
+            "older conversation could not be read: {decoded:?}"
+        );
+        let conversation = decoded.unwrap();
+        assert_eq!(conversation.messages()[0].kind, MessageKind::UserChat);
+        assert_eq!(conversation.messages()[0].text, "make a box");
+        assert!(conversation.messages()[0].attachments.is_empty());
+        assert!(conversation.session().is_empty());
     }
 
     #[test]
