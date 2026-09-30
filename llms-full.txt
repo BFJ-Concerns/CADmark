@@ -385,7 +385,7 @@ The credential is stored separately from settings in `$XDG_CONFIG_HOME/cadmark/c
 
 The environment variable `CADMARK_AI_API_KEY`, when set and non-empty, overrides the stored credential. Resolution order: environment variable → stored file → none.
 
-An empty credential value in the dialog removes the stored file. The dialog shows which source is active ("set by the environment variable", "stored", or prompts for an API key).
+An empty credential value in the dialog leaves the stored file as it is; the dialog offers no way to remove a stored credential, so deleting the file is how one is removed. The dialog shows which source is active ("set by the environment variable", "stored", or prompts for an API key).
 
 Source: `crates/cadmark-app/src/user_settings.rs:20–21`, `crates/cadmark-app/src/user_settings.rs:139–193`.
 

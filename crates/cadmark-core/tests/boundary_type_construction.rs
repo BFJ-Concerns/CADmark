@@ -132,47 +132,64 @@ fn test_side_region<'a>(path: &Path, source: &'a str) -> Option<(usize, &'a str)
     Some((source[..start].lines().count() + 1, &source[start..]))
 }
 
-/// The code with every `//` comment cut and every string and character
-/// literal emptied, line structure kept, so a mention of a type in prose
-/// is not read as a literal and a brace inside a string does not end one.
+/// The code with every comment cut (line and block alike) and every string
+/// and character literal emptied, line structure kept, so a mention of a
+/// type in prose is not read as a literal and a brace inside a string does
+/// not end one. Strings and block comments may span lines; newlines inside
+/// them are kept so line numbers stay true.
 fn code_only(code: &str) -> String {
-    code.lines()
-        .map(|line| {
-            let chars: Vec<char> = line.chars().collect();
-            let mut out = String::new();
-            let mut index = 0;
-            while index < chars.len() {
-                match chars[index] {
-                    '"' => {
-                        out.push('"');
-                        index += 1;
-                        while index < chars.len() && chars[index] != '"' {
-                            if chars[index] == '\\' {
-                                index += 1;
-                            }
-                            index += 1;
-                        }
-                        out.push('"');
-                    }
-                    '\'' if chars.get(index + 2) == Some(&'\'') => {
-                        out.push_str("''");
-                        index += 2;
-                    }
-                    '\'' if chars.get(index + 1) == Some(&'\\')
-                        && chars.get(index + 3) == Some(&'\'') =>
-                    {
-                        out.push_str("''");
-                        index += 3;
-                    }
-                    '/' if chars.get(index + 1) == Some(&'/') => break,
-                    ch => out.push(ch),
+    let chars: Vec<char> = code.chars().collect();
+    let mut out = String::with_capacity(code.len());
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        let next = chars.get(index + 1).copied();
+        match ch {
+            '/' if next == Some('/') => {
+                while index < chars.len() && chars[index] != '\n' {
+                    index += 1;
                 }
-                index += 1;
+                continue;
             }
-            out
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+            '/' if next == Some('*') => {
+                index += 2;
+                while index < chars.len()
+                    && !(chars[index] == '*' && chars.get(index + 1) == Some(&'/'))
+                {
+                    if chars[index] == '\n' {
+                        out.push('\n');
+                    }
+                    index += 1;
+                }
+                index += 2;
+                continue;
+            }
+            '"' => {
+                out.push('"');
+                index += 1;
+                while index < chars.len() && chars[index] != '"' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    } else if chars[index] == '\n' {
+                        out.push('\n');
+                    }
+                    index += 1;
+                }
+                out.push('"');
+            }
+            '\'' if chars.get(index + 2) == Some(&'\'') => {
+                out.push_str("''");
+                index += 2;
+            }
+            '\'' if next == Some('\\') && chars.get(index + 3) == Some(&'\'') => {
+                out.push_str("''");
+                index += 3;
+            }
+            _ => out.push(ch),
+        }
+        index += 1;
+    }
+    out
 }
 
 /// Zero-based line offsets, within `code`, of every `Type {` struct
@@ -333,4 +350,13 @@ fn comments_and_literal_contents_are_blanked_but_lines_are_kept() {
     assert_eq!(stripped.lines().count(), 3);
     assert!(!stripped.contains("GeometryContext"));
     assert_eq!(stripped.lines().nth(1), Some("\"\" b '' c"));
+
+    // A block comment and a string spanning lines are blanked whole, and
+    // the lines they span are still counted.
+    let spanning = "/* GeometryContext {\n   a: 1 } */ x\ny = \"GeometryContext {\n  b\";\nz";
+    let stripped = code_only(spanning);
+    assert_eq!(stripped.lines().count(), 4);
+    assert!(!stripped.contains("GeometryContext"));
+    assert_eq!(stripped.lines().nth(1), Some(" x"));
+    assert_eq!(stripped.lines().nth(3), Some("z"));
 }
