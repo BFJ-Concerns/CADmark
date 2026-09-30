@@ -269,7 +269,7 @@ A file that does not reproduce the part within its tolerance is removed, and the
 
 For STEP, the cause names the faces the format lost with their surface and curve kinds (e.g. "5 faces on extrusion surfaces bounded by line, and offset curves"), built from `lost_faces` via `describe_lost_faces`. For STL and 3MF, the cause names the discrepancies: shell count, volume and size differences. Both formats report the discrepancies built by `ExportReport::discrepancies`.
 
-A refused export is also recorded in the conversation as a `Message::export_refusal` (`MessageKind::ExportRefusal` in `crates/cadmark-core/src/message.rs`). This message appears in the chat as a red notice and is replayed to the AI's next turn as a `"Note from CADmark: …"` user item (`crates/cadmark-app/src/turn.rs`), so the AI reads the refusal and its cause. A refusal that arrives while a turn is already running reaches the next turn that assembles a request after it (`crates/cadmark-app/src/app.rs`, `Exported` arm; the conversation is saved immediately on refusal).
+A refused export is also recorded in the conversation as a `Message::export_refusal` (`MessageKind::ExportRefusal` in `crates/cadmark-core/src/message.rs`). This message appears in the chat as a muted CADmark note and is replayed to the AI's next turn as a `"Note from CADmark: …"` user item (`crates/cadmark-app/src/turn.rs`), so the AI reads the refusal and its cause. A refusal that arrives while a turn is already running reaches the next turn that assembles a request after it (`crates/cadmark-app/src/app.rs`, `Exported` arm; the conversation is saved immediately on refusal).
 
 ### STEP offset-curve conversion
 
