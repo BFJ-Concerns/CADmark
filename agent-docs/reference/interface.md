@@ -122,6 +122,7 @@ The AI's tools (`crates/cadmark-bridge/src/tools.rs`, dispatched in `TurnRunner:
 | `run_python` | Runs a snippet after the current script in its namespace (or alone with `standalone`) under the script execution limits, in the confined kernel worker; returns what it printed, the `repr` of a trailing expression, and any traceback. Keeps no model. |
 | `lookup_docs` | Answers a build123d question from the bundled documentation. |
 | `render_view` | A shaded PNG of the model with edges, at the viewport's resolution, from a standard view or the user's camera, framed to what it draws. Without `part` it draws every part the user has visible, each in its palette colour, and refuses when every part is hidden; with `part` it draws that one part alone, hidden or not, framed to it. A `part` that matches no name (exact first, then a unique case-insensitive match) is refused with the names that exist. Offered only to a model that reads images. |
+| `check_export` | Proves whether exporting a part in a solid format would reproduce it: writes the file, reads it back, compares retained and written figures — solids and faces for STEP, closed shells for STL and 3MF, volume and size for both — and discards the file. The verdict and cause match what the user's own export would give: the faces the format lost (STEP only) with their surface and curve kinds, the discrepancies for a mesh, or the B-spline conversion STEP needed and the volume it moved. Accepts `format` (`step`, `stl`, `3mf`) and optional `part` (by name; the whole model when absent). |
 | `reference_images`, `keep_reference` | Reference-library image tools, offered only to a model that reads images. |
 
 A turn keeps only its last successful `run_script`: edits with no successful run after them are discarded and the turn is reported as failed with the script restored. The kernel worker serves snippets through `WorkerRequest::RunSnippet` (`crates/cadmark-kernel/src/protocol.rs`, `execution::run_snippet`), and captures a script's stdout into `ExecutedModel::printed`, cut at `PRINTED_OUTPUT_LIMIT`.
@@ -244,7 +245,45 @@ Export menu in the toolbar. Available when a model is loaded. The formats offere
 
 Export writes the file next to the part script from the BREP the worker retained for the result, without re-running the script. A drawing format carries the sketch's plane (`SketchPlane`) across the worker boundary and flattens the shape onto it with build123d's `Plane.to_local_coords` before `ExportSVG` or `ExportDXF` writes it. Multi-part models offer per-part and "Export all" options; the top-level entries write the selected part (`Project::request_export` routes to the active part when several exist) and the menu names it. An open or invalid solid shows a non-blocking warning before export.
 
-Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-kernel/src/export.rs`, `crates/cadmark-app/src/project.rs`, `crates/cadmark-ui/src/toolbar.rs`.
+### Read-back proof
+
+Every solid export is proven by reading the written file back and comparing it with the retained model. The comparison is format-specific:
+
+- **STEP**: solids, faces, volume and size.
+- **STL and 3MF**: closed shells (not solids — an STL of two bodies reads back as one solid of two shells), volume and size.
+
+Two tolerances govern the comparison (`crates/cadmark-core/src/export.rs`):
+
+| Tolerance | Value | Applies to |
+|-----------|-------|------------|
+| `EXACT_TOLERANCE` | 0.01 % | STEP without conversion |
+| `APPROXIMATE_TOLERANCE` | 1 % | STL, 3MF, and STEP after B-spline conversion |
+
+A relative comparison below `GEOMETRIC_CONFUSION` (1e-7 mm) uses the absolute floor, so a zero-valued expectation (a sketch's volume, a flat profile's thin axis) tolerates floating-point noise without a sub-millimetre feature escaping its percentage.
+
+Drawing formats (SVG, DXF) carry a profile, not a part, and are written without a reproduction check.
+
+### Refusal
+
+A file that does not reproduce the part within its tolerance is removed, and the export is refused. The status bar shows the refusal with its cause from `ExportReport::explain` (`crates/cadmark-core/src/export.rs`).
+
+For STEP, the cause names the faces the format lost with their surface and curve kinds (e.g. "5 faces on extrusion surfaces bounded by line, and offset curves"), built from `lost_faces` via `describe_lost_faces`. For STL and 3MF, the cause names the discrepancies: shell count, volume and size differences. Both formats report the discrepancies built by `ExportReport::discrepancies`.
+
+A refused export is also recorded in the conversation as a `Message::export_refusal` (`MessageKind::ExportRefusal` in `crates/cadmark-core/src/message.rs`). This message appears in the chat as a red notice and is replayed to the AI's next turn as a `"Note from CADmark: …"` user item (`crates/cadmark-app/src/turn.rs`), so the AI reads the refusal and its cause. A refusal that arrives while a turn is already running reaches the next turn that assembles a request after it (`crates/cadmark-app/src/app.rs`, `Exported` arm; the conversation is saved immediately on refusal).
+
+### STEP offset-curve conversion
+
+OCCT's STEP writer omits faces built on offset curves (`Geom_OffsetCurve`) and reports success. When a plain STEP write loses geometry, the kernel converts those faces to B-splines with `ShapeCustom::BSplineRestriction` and writes the file again (`_cadmark_convert` in `crates/cadmark-kernel/src/export.rs`). The conversion only rewrites offset curves and the extrusion and offset surfaces built on them; planes, conics and ordinary B-splines pass through untouched.
+
+The export message states the volume deviation the conversion introduced (a fraction of a percent), and the file is judged at `APPROXIMATE_TOLERANCE` (1 %) rather than `EXACT_TOLERANCE` (`ExportReport::tolerance`). If the converted file still does not reproduce the part, it is removed and the refusal says "converting them to B-splines did not recover the file either."
+
+Offsets of lines and arcs simplify to lines and arcs and need no conversion. STL and 3MF carry offset geometry as triangles and need no conversion either; a mesh gets no second attempt (`prove` in `crates/cadmark-kernel/src/export.rs`).
+
+### Validity gate versus reproduction gate
+
+The validity gate (`describe_validity` in `crates/cadmark-app/src/validity.rs`) reports whether the solid is closed and valid after each build. The reproduction gate (this export proof) reports whether the written file reads back as the part. A part can be valid but not reproducible in a given format (faces the writer cannot carry), or reproducible but flagged as invalid (an open shell that meshes faithfully).
+
+Source: `crates/cadmark-core/src/export.rs`, `crates/cadmark-kernel/src/export.rs`, `crates/cadmark-app/src/app.rs` (`Exported` arm), `crates/cadmark-core/src/message.rs`, `crates/cadmark-app/src/turn.rs`.
 
 ## Solid validity
 
