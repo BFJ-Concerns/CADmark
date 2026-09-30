@@ -1,4 +1,4 @@
-# CI on Forgejo Actions.
+# CI on Forgejo Actions: the development gate.
 #
 # This workflow runs `just verify` — the same command a dev box runs — in the
 # forge-ci/rust image, which bakes in the Rust toolchain with rustfmt and
@@ -45,7 +45,7 @@ jobs:
     # A hang costs one runner slot for this long, not Forgejo's 3 h default.
     timeout-minutes: 60
     container:
-      # Built locally on the runner; its default
+      # Built on the runner host and not published; its default
       # toolchain is what the workspace builds with, since the repository
       # pins no rust-toolchain.toml.
       image: forge-ci/rust:latest

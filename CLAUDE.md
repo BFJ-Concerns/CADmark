@@ -53,9 +53,9 @@ cannot execute scripts.
   selects the endpoint and model; the credential is read from
   `CADMARK_AI_API_KEY` when set, otherwise from the owner-only credential
   file beside the settings. No project folder carries AI configuration.
-- **Provenance via OCP instrumentation** (ADR-0002): Wraps OCP builder
+- **Provenance via OCP instrumentation**: Wraps OCP builder
   classes to capture which source lines generated which geometry.
-- **Geometry context as experimental layer** (ADR-0003): Three-layer
+- **Geometry context as experimental layer**: Three-layer
   architecture — provenance (foundation), identification (modular/experimental),
   stable output format. `IdentificationStrategy` trait for pluggable strategies.
 
