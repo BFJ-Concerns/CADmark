@@ -109,6 +109,23 @@ pub struct ExecutedPart {
 }
 
 impl ExecutedPart {
+    /// A part named by the script and kept at `file`, with empty geometry,
+    /// ledgers, measurements and validity: the base a test builds on,
+    /// naming only what it reads.
+    pub fn new(id: u32, name: impl Into<String>, file: ModelFile) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            mesh: TessellatedMesh::default(),
+            ledger: ProvenanceLedger::new(),
+            sketch_lineage: SketchLineageLedger::new(),
+            descriptors: GeometryDescriptors::default(),
+            summary: ModelSummary::default(),
+            validity: Vec::new(),
+            file,
+        }
+    }
+
     /// The part's measurements under the name the script gave it.
     pub fn measurements(&self) -> PartMeasurements {
         PartMeasurements::new(self.name.clone(), self.summary.clone())
@@ -116,6 +133,17 @@ impl ExecutedPart {
 }
 
 impl SolidResult {
+    /// A solid measured as `summary` and kept at `file`, with no validity
+    /// entries and no parts yet.
+    pub fn new(summary: ModelSummary, file: ModelFile) -> Self {
+        Self {
+            summary,
+            validity: Vec::new(),
+            file,
+            parts: Vec::new(),
+        }
+    }
+
     /// Every part's measurements, in source binding order.
     pub fn part_measurements(&self) -> Vec<PartMeasurements> {
         self.parts.iter().map(ExecutedPart::measurements).collect()
@@ -131,6 +159,12 @@ pub struct SketchResult {
     pub profile: SketchProfile,
     /// The placed sketch shape, retained for export.
     pub file: ModelFile,
+}
+
+impl SketchResult {
+    pub fn new(profile: SketchProfile, file: ModelFile) -> Self {
+        Self { profile, file }
+    }
 }
 
 /// What kind of result a script reached: a solid, or a profile it has
@@ -167,6 +201,20 @@ pub struct ExecutedModel {
 }
 
 impl ExecutedModel {
+    /// A model in the given form with empty geometry, ledgers, descriptors
+    /// and printed output: what a result is before the kernel fills it in,
+    /// and the base a test builds on, naming only what it reads.
+    pub fn of(form: ModelForm) -> Self {
+        Self {
+            mesh: TessellatedMesh::default(),
+            ledger: ProvenanceLedger::new(),
+            sketch_lineage: SketchLineageLedger::new(),
+            descriptors: GeometryDescriptors::default(),
+            form,
+            printed: String::new(),
+        }
+    }
+
     /// The solid this execution produced, or `None` when it reached only a
     /// sketch.
     pub fn solid(&self) -> Option<&SolidResult> {
@@ -274,27 +322,23 @@ mod tests {
             .record_face(FaceId(0), LedgerValue::Untraced)
             .unwrap();
         let reply = WorkerReply::Executed(Box::new(ExecutedModel {
-            mesh: TessellatedMesh::default(),
             ledger,
-            sketch_lineage: SketchLineageLedger::new(),
-            descriptors: GeometryDescriptors::default(),
-            printed: String::new(),
-            form: ModelForm::Solid(SolidResult {
-                summary: ModelSummary {
-                    volume: 1.0,
-                    bounds_min: [0.0; 3],
-                    bounds_max: [1.0; 3],
-                    face_count: 1,
-                    edge_count: 0,
-                    vertex_count: 0,
-                },
+            ..ExecutedModel::of(ModelForm::Solid(SolidResult {
                 validity: vec![SolidValidity {
                     closed: true,
                     valid: true,
+                    ..Default::default()
                 }],
-                file: ModelFile(PathBuf::from("/scratch/model-1.brep")),
-                parts: Vec::new(),
-            }),
+                ..SolidResult::new(
+                    ModelSummary {
+                        volume: 1.0,
+                        bounds_max: [1.0; 3],
+                        face_count: 1,
+                        ..Default::default()
+                    },
+                    ModelFile(PathBuf::from("/scratch/model-1.brep")),
+                )
+            }))
         }));
         let line = serde_json::to_string(&reply).unwrap();
         assert!(!line.contains('\n'));
@@ -329,34 +373,18 @@ mod tests {
 
     #[test]
     fn printable_needs_every_solid_closed_and_valid() {
-        let model = |validity: Vec<SolidValidity>| ExecutedModel {
-            mesh: TessellatedMesh::default(),
-            ledger: ProvenanceLedger::new(),
-            sketch_lineage: SketchLineageLedger::new(),
-            descriptors: GeometryDescriptors::default(),
-            printed: String::new(),
-            form: ModelForm::Solid(SolidResult {
-                summary: ModelSummary {
-                    volume: 0.0,
-                    bounds_min: [0.0; 3],
-                    bounds_max: [0.0; 3],
-                    face_count: 0,
-                    edge_count: 0,
-                    vertex_count: 0,
-                },
+        let model = |validity: Vec<SolidValidity>| {
+            ExecutedModel::of(ModelForm::Solid(SolidResult {
                 validity,
-                file: ModelFile(PathBuf::new()),
-                parts: Vec::new(),
-            }),
+                ..SolidResult::new(ModelSummary::default(), ModelFile(PathBuf::new()))
+            }))
         };
         let good = SolidValidity {
             closed: true,
             valid: true,
+            ..Default::default()
         };
-        let open = SolidValidity {
-            closed: false,
-            valid: false,
-        };
+        let open = SolidValidity::default();
         assert!(model(vec![good, good]).is_printable());
         assert!(!model(vec![good, open]).is_printable());
         assert!(!model(Vec::new()).is_printable());
@@ -366,31 +394,19 @@ mod tests {
     fn a_sketch_result_crosses_the_boundary_carrying_no_solid() {
         use cadmark_core::sketch::{SketchCorner, SketchCurve, SketchProfile};
 
-        let executed = ExecutedModel {
-            mesh: TessellatedMesh::default(),
-            ledger: ProvenanceLedger::new(),
-            sketch_lineage: SketchLineageLedger::new(),
-            descriptors: GeometryDescriptors::default(),
-            printed: String::new(),
-            form: ModelForm::Sketch(SketchResult {
-                profile: SketchProfile {
-                    plane: SketchPlane::default(),
-                    curves: vec![SketchCurve {
-                        curve_id: 0,
-                        points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
-                        curve_type: "line".to_string(),
-                        length: 1.0,
-                        radius: None,
-                    }],
-                    corners: vec![SketchCorner {
-                        corner_id: 0,
-                        position: [0.0; 3],
-                    }],
-                    regions: Vec::new(),
-                },
-                file: ModelFile(PathBuf::from("/scratch/model-2.brep")),
-            }),
-        };
+        let executed = ExecutedModel::of(ModelForm::Sketch(SketchResult::new(
+            SketchProfile {
+                curves: vec![SketchCurve {
+                    points: vec![[0.0; 3], [1.0, 0.0, 0.0]],
+                    curve_type: "line".to_string(),
+                    length: 1.0,
+                    ..Default::default()
+                }],
+                corners: vec![SketchCorner::default()],
+                ..Default::default()
+            },
+            ModelFile(PathBuf::from("/scratch/model-2.brep")),
+        )));
 
         // Nothing about a sketch may read as a solid: no solid export gate
         // opens, and the solid accessor states its absence rather than a

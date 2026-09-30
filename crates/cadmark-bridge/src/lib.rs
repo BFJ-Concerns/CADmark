@@ -10,6 +10,13 @@
 //! build123d corpus; `sketch_route` reads back the sketch-or-solid route
 //! the prompt asks the model to announce before it edits.
 
+// Tests build every boundary-crossing type on its shared base with
+// struct-update syntax, even when they name every field, so a field added
+// later is filled in one place (crates/cadmark-core/tests/
+// boundary_type_construction.rs holds them to it); clippy's complaint that
+// such an update is redundant today is the point.
+#![cfg_attr(test, allow(clippy::needless_update))]
+
 pub mod backend;
 pub mod config;
 pub mod doc_lookup;

@@ -140,17 +140,14 @@ mod tests {
         GroundedComment {
             text: "round this".into(),
             anchors: vec![GeometryContext {
-                part: None,
-                element: PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
-                provenance: LedgerValue::Ambiguous(vec![
-                    entry(2, SemanticOperation::Box),
-                    entry(3, SemanticOperation::Fillet),
-                ]),
-                identification: Default::default(),
-                source_context: String::new(),
-                neighbours: Vec::new(),
                 chosen_candidate: chosen,
-                sketch: Default::default(),
+                ..GeometryContext::new(
+                    PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
+                    LedgerValue::Ambiguous(vec![
+                        entry(2, SemanticOperation::Box),
+                        entry(3, SemanticOperation::Fillet),
+                    ]),
+                )
             }],
         }
     }
@@ -195,41 +192,36 @@ mod tests {
             text: "round this".into(),
             anchors: vec![
                 GeometryContext {
-                    part: None,
-                    sketch: Default::default(),
-                    element: PickedElement::Solid(TopologyElement::Face(FaceId(3))),
-                    provenance: LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
                     identification,
                     source_context: "lines 3-7:\n3 | with BuildPart():\n5 | Box(10, 10, 2)".into(),
                     neighbours: vec![TopologyElement::Edge(EdgeId(1))],
-                    chosen_candidate: None,
+                    ..GeometryContext::new(
+                        PickedElement::Solid(TopologyElement::Face(FaceId(3))),
+                        LedgerValue::Resolved(entry(5, SemanticOperation::Box)),
+                    )
                 },
                 GeometryContext {
-                    part: None,
-                    sketch: Default::default(),
-                    element: PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
-                    provenance: LedgerValue::Ambiguous(vec![
-                        entry(2, SemanticOperation::Box),
-                        entry(3, SemanticOperation::Fillet),
-                    ]),
-                    identification: Default::default(),
                     source_context: "lines 1-5:\n2 | Box(10, 10, 2)\n3 | fillet(...)".into(),
                     neighbours: vec![
                         TopologyElement::Face(FaceId(0)),
                         TopologyElement::Vertex(VertexId(2)),
                     ],
-                    chosen_candidate: None,
+                    ..GeometryContext::new(
+                        PickedElement::Solid(TopologyElement::Edge(EdgeId(4))),
+                        LedgerValue::Ambiguous(vec![
+                            entry(2, SemanticOperation::Box),
+                            entry(3, SemanticOperation::Fillet),
+                        ]),
+                    )
                 },
                 GeometryContext {
-                    part: None,
-                    sketch: Default::default(),
-                    element: PickedElement::Solid(TopologyElement::Edge(EdgeId(9))),
-                    provenance: LedgerValue::Untraced,
-                    identification: Default::default(),
                     source_context:
                         "lines 1-3:\n1 | from build123d import *\n2 | part = imported_shape".into(),
                     neighbours: vec![TopologyElement::Edge(EdgeId(8))],
-                    chosen_candidate: None,
+                    ..GeometryContext::new(
+                        PickedElement::Solid(TopologyElement::Edge(EdgeId(9))),
+                        LedgerValue::Untraced,
+                    )
                 },
             ],
         };
@@ -252,14 +244,12 @@ mod tests {
     #[test]
     fn an_anchor_carries_its_sketch_route_or_says_there_is_none() {
         let anchor = |sketch: cadmark_core::sketch_lineage::SketchLineage| GeometryContext {
-            part: None,
             sketch,
-            element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
             source_context: "1 | from build123d import *".into(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
+            ..GeometryContext::new(
+                PickedElement::Solid(TopologyElement::Face(FaceId(0))),
+                LedgerValue::Untraced,
+            )
         };
 
         let drawn = render_comment(&GroundedComment {
@@ -301,16 +291,10 @@ mod tests {
     fn legacy_anchor_without_source_context_states_what_is_unavailable() {
         let text = render_comment(&GroundedComment {
             text: "adjust this".into(),
-            anchors: vec![GeometryContext {
-                part: None,
-                sketch: Default::default(),
-                element: PickedElement::Solid(TopologyElement::Face(FaceId(0))),
-                provenance: LedgerValue::Untraced,
-                identification: Default::default(),
-                source_context: String::new(),
-                neighbours: Vec::new(),
-                chosen_candidate: None,
-            }],
+            anchors: vec![GeometryContext::new(
+                PickedElement::Solid(TopologyElement::Face(FaceId(0))),
+                LedgerValue::Untraced,
+            )],
         });
 
         assert!(text.contains("surrounding code:\nThe executed script text is unavailable."));

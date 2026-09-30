@@ -759,16 +759,7 @@ impl CadmarkApp {
                 tool,
                 arguments,
             } => {
-                let activity = ToolActivity {
-                    call_id,
-                    tool,
-                    arguments,
-                    output: None,
-                    failed: false,
-                    started: chrono::Utc::now(),
-                    finished: None,
-                    executed_source: None,
-                };
+                let activity = ToolActivity::begin(call_id, tool, arguments);
                 let (tools, response) =
                     record_tool_start(conversation, turn.tools, turn.response, activity);
                 if turn.tools != Some(tools) {

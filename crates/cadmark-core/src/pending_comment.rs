@@ -150,16 +150,10 @@ mod tests {
     use crate::ledger::LedgerValue;
 
     fn anchor(face: u32) -> GeometryContext {
-        GeometryContext {
-            part: None,
-            sketch: Default::default(),
-            element: PickedElement::Solid(TopologyElement::Face(FaceId(face))),
-            provenance: LedgerValue::Untraced,
-            identification: Default::default(),
-            source_context: String::new(),
-            neighbours: Vec::new(),
-            chosen_candidate: None,
-        }
+        GeometryContext::new(
+            PickedElement::Solid(TopologyElement::Face(FaceId(face))),
+            LedgerValue::Untraced,
+        )
     }
 
     #[test]

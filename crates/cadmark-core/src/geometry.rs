@@ -163,6 +163,25 @@ pub struct GeometryContext {
 }
 
 impl GeometryContext {
+    /// A context for `element` with the provenance the ledger gave it and
+    /// nothing else filled in: no part, no identification, no source
+    /// window, no neighbours, no chosen candidate, no sketch route. The
+    /// application sets what it knows beyond that afterwards, and a test
+    /// builds on this naming only the fields it reads, so a field added to
+    /// the type is filled here and nowhere else.
+    pub fn new(element: PickedElement, provenance: LedgerValue) -> Self {
+        Self {
+            element,
+            part: None,
+            provenance,
+            identification: Default::default(),
+            source_context: String::new(),
+            neighbours: Vec::new(),
+            chosen_candidate: None,
+            sketch: Default::default(),
+        }
+    }
+
     /// The solid element this context anchors to, where it anchors to one.
     /// A sketch anchor has none: sketch elements are not solid topology,
     /// so measurement and neighbour queries do not apply to them.
@@ -221,7 +240,7 @@ impl MinimumDistance {
 
 /// Whether one solid of the executed model is printable geometry: every
 /// shell closed, and the kernel's own validity check passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SolidValidity {
     /// Every shell of the solid is closed (no open boundary).
     pub closed: bool,
@@ -236,7 +255,7 @@ impl SolidValidity {
 }
 
 /// Whole-model measurements used for status display and edit regression checks.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ModelSummary {
     pub volume: f64,
     pub bounds_min: [f64; 3],
@@ -350,11 +369,9 @@ mod tests {
     fn summary(volume: f64, size: [f64; 3], faces: usize) -> ModelSummary {
         ModelSummary {
             volume,
-            bounds_min: [0.0; 3],
             bounds_max: size,
             face_count: faces,
-            edge_count: 0,
-            vertex_count: 0,
+            ..Default::default()
         }
     }
 

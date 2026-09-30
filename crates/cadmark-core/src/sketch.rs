@@ -267,14 +267,13 @@ mod tests {
             [0.0, 3.0, 0.0],
         ];
         SketchProfile {
-            plane: SketchPlane::default(),
             curves: (0..4)
                 .map(|index| SketchCurve {
                     curve_id: index as u32,
                     points: vec![corners[index], corners[(index + 1) % 4]],
                     curve_type: "line".to_string(),
                     length: if index % 2 == 0 { 2.0 } else { 3.0 },
-                    radius: None,
+                    ..Default::default()
                 })
                 .collect(),
             corners: corners
@@ -283,14 +282,16 @@ mod tests {
                 .map(|(index, position)| SketchCorner {
                     corner_id: index as u32,
                     position: *position,
+                    ..Default::default()
                 })
                 .collect(),
             regions: vec![SketchRegion {
-                region_id: 0,
                 vertices: corners.to_vec(),
                 indices: vec![0, 1, 2, 0, 2, 3],
                 area: 6.0,
+                ..Default::default()
             }],
+            ..Default::default()
         }
     }
 
@@ -359,6 +360,7 @@ mod tests {
             curve_type: "circle".to_string(),
             length: std::f64::consts::TAU,
             radius: Some(1.0),
+            ..Default::default()
         });
         let curve = SketchElement {
             kind: SketchElementKind::Curve,
