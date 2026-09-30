@@ -212,7 +212,7 @@ fn is_identifier_byte(byte: u8) -> bool {
 /// is possible and a full literal is the only form.
 fn is_declaration(before: &str) -> bool {
     let statement = before
-        .rsplit(|ch| ch == ';' || ch == '{' || ch == '}')
+        .rsplit([';', '{', '}'])
         .next()
         .unwrap_or("")
         .trim_start();
