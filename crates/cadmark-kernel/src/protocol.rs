@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use cadmark_core::export::ExportFormat;
+use cadmark_core::export::{ExportFormat, ExportReport};
 use cadmark_core::geometry::{
     GeometryDescriptors, MinimumDistance, ModelSummary, PartMeasurements, SolidValidity,
     TopologyElement,
@@ -23,14 +23,25 @@ pub enum WorkerRequest {
     /// Execute the script at `script_path` (inside the project folder) and
     /// keep its model as a file in the worker's scratch directory.
     Execute { script_path: PathBuf },
-    /// Write a retained model to `path` in `format`. A drawing format
-    /// flattens the model onto `plane`, the plane a sketch was drawn on;
-    /// solid formats ignore it.
+    /// Write a retained model to `path` in `format` and prove the file
+    /// reproduces it (a solid format is read back and compared; a refused
+    /// file is removed). A drawing format flattens the model onto `plane`,
+    /// the plane a sketch was drawn on, without a check; solid formats
+    /// ignore the plane.
     Export {
         model: ModelFile,
         format: ExportFormat,
         path: PathBuf,
         plane: Option<SketchPlane>,
+    },
+    /// Run the export proof for a retained model in a solid `format`
+    /// without leaving a file: the same write, read-back and comparison an
+    /// `Export` makes, into the worker's scratch directory, removed after.
+    /// This is how a caller learns whether an export would be refused, and
+    /// why, with the verdict the export itself would give.
+    ProveExport {
+        model: ModelFile,
+        format: ExportFormat,
     },
     /// Measure the closest separation between two elements of a retained model.
     MinimumDistance {
@@ -278,7 +289,9 @@ impl WorkerFailure {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum WorkerReply {
     Executed(Box<ExecutedModel>),
-    Exported,
+    /// The export's proof: what the written file reads back as against the
+    /// retained model, the faces it lost, and any conversion it needed.
+    Exported(ExportReport),
     MinimumDistance(MinimumDistance),
     SnippetRan(SnippetOutcome),
     Failed(WorkerFailure),

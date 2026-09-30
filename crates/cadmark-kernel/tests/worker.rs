@@ -9,7 +9,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use cadmark_core::cancellation::CancelFlag;
-use cadmark_core::export::ExportFormat;
+use cadmark_core::export::{APPROXIMATE_TOLERANCE, ExportFormat, ExportReport, ExportVerdict};
 use cadmark_core::geometry::{EdgeId, FaceId, SolidValidity, TopologyElement, VertexId};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
@@ -66,8 +66,12 @@ fn documented_modelling_recipes_build_one_closed_valid_part_each() {
         .skip(1)
         .map(|section| section.split("```").next().unwrap())
         .collect();
-    assert_eq!(examples.len(), 2, "threaded bolt and enclosure examples");
-    for (source, expected_volume) in examples.into_iter().zip([1349.995692, 5832.0]) {
+    assert_eq!(
+        examples.len(),
+        3,
+        "threaded bolt, enclosure and offset-rim examples"
+    );
+    for (source, expected_volume) in examples.into_iter().zip([1349.995692, 5832.0, 10885.8056]) {
         let (_project, script, mut worker) = project_with_script(source);
         let model = worker
             .execute(&script, roomy(), &CancelFlag::new())
@@ -93,6 +97,16 @@ const SEPARATED_BOXES: &str = "from build123d import *\n\nwith BuildPart() as pa
 const CURVED_PART: &str =
     "from build123d import *\n\nwith BuildPart() as part:\n    Cylinder(10, 10)\n";
 
+/// A part whose side faces are extrusions of an offset ellipse: the
+/// construct OCCT's STEP writer omits silently while reporting success, so
+/// a plain STEP of it reads back as nothing. Its mesh exports are whole.
+const OFFSET_CURVE_PART: &str = "from build123d import *\n\nwith BuildPart() as part:\n    with BuildSketch():\n        Ellipse(20, 12)\n        offset(amount=3)\n    extrude(amount=10)\n";
+
+/// A box with one face removed, closed into a \"solid\" with a hole in it:
+/// the shape the slicer would reject, and the kernel's validity check
+/// flags before any export.
+const LEAKY_PART: &str = "from build123d import *\nfrom OCP.BRepBuilderAPI import BRepBuilderAPI_MakeSolid\nfrom OCP.TopoDS import TopoDS\n\nbox = Solid.make_box(10, 10, 10)\nshell = Shell(box.faces()[:-1])\nleaky = Solid(BRepBuilderAPI_MakeSolid(TopoDS.Shell_s(shell.wrapped)).Solid())\nwith BuildPart() as part:\n    add(leaky)\n";
+
 const STEP_RELATIVE_TOLERANCE: f64 = 0.000_1;
 const MESH_RELATIVE_TOLERANCE: f64 = 0.01;
 
@@ -102,6 +116,8 @@ struct ImportedModel {
     size: [f64; 3],
     closed: bool,
     valid: Option<bool>,
+    /// B-rep faces, for the STEP reader only.
+    faces: Option<usize>,
 }
 
 /// Re-import one written file in a fresh Python process, outside the worker.
@@ -128,6 +144,7 @@ if format_name in ("step", "stl"):
         "size": list(box.size),
         "closed": shape.is_manifold,
         "valid": shape.is_valid,
+        "faces": len(shape.faces()) if format_name == "step" else None,
     }
 elif format_name == "3mf":
     import xml.etree.ElementTree as ET
@@ -250,11 +267,165 @@ fn assert_worker_export_round_trip(format: ExportFormat) {
     let path = project
         .path()
         .join(format!("round-trip.{}", format.extension()));
-    worker
+    let report = worker
         .export(&solid.file, format, &path, None, roomy())
         .unwrap_or_else(|error| panic!("{} export failed: {error}", format.label()));
     let imported = import_export(&path, format);
+    assert_report_agrees_with_reader(&report, &imported);
+    assert_eq!(report.conversion, None, "a plain part needs no conversion");
     assert_round_trip(format, solid.summary.volume, solid.summary.size(), imported);
+}
+
+/// The kernel's own read-back reproduced the part and measured what an
+/// independent reader measures in the same file.
+fn assert_report_agrees_with_reader(report: &ExportReport, imported: &ImportedModel) {
+    assert_eq!(
+        report.verdict(),
+        ExportVerdict::Reproduced,
+        "{} export was refused: {}",
+        report.format.label(),
+        report.explain()
+    );
+    let written = report
+        .written
+        .as_ref()
+        .expect("a solid format is read back");
+    assert!(
+        relative_difference(written.volume, imported.volume) <= 1e-6,
+        "the kernel read back a volume of {} where the independent reader read {}",
+        written.volume,
+        imported.volume
+    );
+    if let Some(faces) = imported.faces {
+        assert_eq!(
+            written.faces, faces,
+            "the kernel and the reader count faces alike"
+        );
+    }
+}
+
+/// The STEP writer drops the extrusion faces of an offset curve; the export
+/// converts them to B-splines, writes again, and the file then reads back
+/// as the part — reported as a conversion with the volume it moved.
+#[test]
+fn a_step_of_offset_curve_faces_is_converted_to_b_splines_and_proves_itself() {
+    let (project, script, mut worker) = project_with_script(OFFSET_CURVE_PART);
+    let source = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    let solid = source.solid().expect("a solid result");
+    assert!(
+        printable(&solid.validity),
+        "the part itself is a closed solid"
+    );
+
+    let path = project.path().join("offset.step");
+    let report = worker
+        .export(&solid.file, ExportFormat::Step, &path, None, roomy())
+        .unwrap();
+    let imported = import_export(&path, ExportFormat::Step);
+    assert_report_agrees_with_reader(&report, &imported);
+    let conversion = report
+        .conversion
+        .expect("the plain write lost faces, so it converted");
+    assert!(
+        conversion.volume_deviation.abs() <= APPROXIMATE_TOLERANCE,
+        "conversion moved the volume by {}",
+        conversion.volume_deviation
+    );
+    assert_eq!(imported.faces, Some(solid.summary.face_count));
+    assert!(
+        report.explain().contains("converted to B-splines"),
+        "{}",
+        report.explain()
+    );
+    assert_round_trip(
+        ExportFormat::Stl, // the converted STEP is judged at the mesh figure
+        solid.summary.volume,
+        solid.summary.size(),
+        imported,
+    );
+}
+
+#[test]
+fn a_mesh_of_offset_curve_faces_needs_no_conversion() {
+    let (project, script, mut worker) = project_with_script(OFFSET_CURVE_PART);
+    let source = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    let solid = source.solid().expect("a solid result");
+    for format in [ExportFormat::Stl, ExportFormat::ThreeMf] {
+        let path = project
+            .path()
+            .join(format!("offset.{}", format.extension()));
+        let report = worker
+            .export(&solid.file, format, &path, None, roomy())
+            .unwrap();
+        let imported = import_export(&path, format);
+        assert_report_agrees_with_reader(&report, &imported);
+        assert_eq!(report.conversion, None);
+    }
+}
+
+/// Two gates, two questions. The validity check answers whether the part
+/// is a closed solid; the export proof answers whether the file is the
+/// part. An open shell is not printable, and the application refuses to
+/// export it on the validity result — but a file written from it
+/// reproduces it faithfully, open shell and all, and the proof says so
+/// rather than repeating the validity verdict.
+#[test]
+fn an_open_shell_exports_as_the_open_shell_it_is() {
+    let (project, script, mut worker) = project_with_script(LEAKY_PART);
+    let source = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    let solid = source.solid().expect("a solid result");
+    assert!(!printable(&solid.validity), "the fixture is an open shell");
+
+    let path = project.path().join("leaky.stl");
+    let report = worker
+        .export(&solid.file, ExportFormat::Stl, &path, None, roomy())
+        .unwrap();
+    assert_eq!(report.verdict(), ExportVerdict::Reproduced);
+    assert_eq!(report.explain(), "");
+    assert!(path.exists());
+}
+
+/// The proof answers the AI's in-turn question with the export's own
+/// verdict and cause, from the same write and read-back, and leaves
+/// nothing behind.
+#[test]
+fn the_export_proof_gives_the_exports_verdict_without_leaving_a_file() {
+    let (project, script, mut worker) = project_with_script(OFFSET_CURVE_PART);
+    let source = worker
+        .execute(&script, roomy(), &CancelFlag::new())
+        .unwrap();
+    let solid = source.solid().expect("a solid result");
+    let entries = |dir: &Path| -> Vec<PathBuf> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = entries(project.path());
+
+    let proof = worker
+        .prove_export(&solid.file, ExportFormat::Step, roomy())
+        .unwrap();
+    let path = project.path().join("offset.step");
+    let export = worker
+        .export(&solid.file, ExportFormat::Step, &path, None, roomy())
+        .unwrap();
+
+    assert_eq!(proof.verdict(), export.verdict());
+    assert_eq!(proof.explain(), export.explain());
+    assert_eq!(proof.retained, export.retained);
+    assert_eq!(proof.written, export.written);
+    let mut after = entries(project.path());
+    after.retain(|entry| entry != &path);
+    assert_eq!(after, before, "the proof wrote nothing into the project");
 }
 
 #[test]
@@ -287,7 +458,7 @@ fn a_sketch_exports_as_a_drawing_through_the_worker() {
     assert!(sketch.file.0.is_file(), "sketch kept at {:?}", sketch.file);
 
     let export = project.path().join("profile.svg");
-    worker
+    let report = worker
         .export(
             &sketch.file,
             ExportFormat::Svg,
@@ -296,6 +467,11 @@ fn a_sketch_exports_as_a_drawing_through_the_worker() {
             roomy(),
         )
         .unwrap();
+    assert_eq!(
+        report.verdict(),
+        ExportVerdict::Unchecked,
+        "a drawing carries a profile, not a part, and is written without a check"
+    );
     let output = Command::new(venv().join("bin/python"))
         .arg("-c")
         .arg(

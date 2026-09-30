@@ -24,19 +24,20 @@ use cadmark_bridge::backend::{
 use cadmark_bridge::examples;
 use cadmark_bridge::grounding::{GroundedComment, render_comment};
 use cadmark_bridge::tools::{
-    EDIT_SCRIPT, EditScriptArgs, KEEP_REFERENCE, KeepReferenceArgs, KeepReferenceSource,
-    LOOKUP_DOCS, LookupDocsArgs, READ_SCRIPT, REFERENCE_IMAGES, RENDER_VIEW, RUN_PYTHON,
-    RUN_SCRIPT, ReadScriptArgs, ReferenceImagesArgs, RenderView, RenderViewArgs, RunPythonArgs,
-    RunScriptArgs, tools_for, unavailable_tools_note,
+    CHECK_EXPORT, CheckExportArgs, EDIT_SCRIPT, EditScriptArgs, KEEP_REFERENCE, KeepReferenceArgs,
+    KeepReferenceSource, LOOKUP_DOCS, LookupDocsArgs, READ_SCRIPT, REFERENCE_IMAGES, RENDER_VIEW,
+    RUN_PYTHON, RUN_SCRIPT, ReadScriptArgs, ReferenceImagesArgs, RenderView, RenderViewArgs,
+    RunPythonArgs, RunScriptArgs, tools_for, unavailable_tools_note,
 };
 use cadmark_core::cancellation::CancelFlag;
+use cadmark_core::export::{ExportFormat, ExportReport};
 use cadmark_core::geometry::describe_parts;
 use cadmark_core::message::{
     ContextUsage, Conversation, IMAGE_TOKENS, ImageAttachment, Message, MessageKind,
     estimate_tokens,
 };
 use cadmark_core::skills;
-use cadmark_kernel::protocol::{ExecutedModel, ModelForm, SnippetOutcome};
+use cadmark_kernel::protocol::{ExecutedModel, ModelFile, ModelForm, SnippetOutcome};
 use cadmark_kernel::worker::WorkerError;
 
 use crate::script_parameters;
@@ -175,6 +176,58 @@ pub trait ScriptExecutor: Send {
         code: &str,
         cancel: &CancelFlag,
     ) -> Result<SnippetOutcome, WorkerError>;
+
+    /// What the last successful execution left to export — the model on
+    /// screen, since every model shown came through this executor — or
+    /// `None` before any execution succeeded.
+    fn exportable(&self) -> Option<Exportable>;
+
+    /// Run the export gate's own check on a retained file in a solid
+    /// `format` without leaving a file: the report an export of it returns.
+    fn prove_export(
+        &mut self,
+        model: &ModelFile,
+        format: ExportFormat,
+    ) -> Result<ExportReport, WorkerError>;
+}
+
+/// The files a model can be exported from and the formats it can be
+/// written to: the whole model, and each named part on its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Exportable {
+    pub whole: ModelFile,
+    pub parts: Vec<ExportablePart>,
+    pub formats: &'static [ExportFormat],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportablePart {
+    pub name: String,
+    pub file: ModelFile,
+}
+
+impl Exportable {
+    pub fn of(model: &ExecutedModel) -> Self {
+        match &model.form {
+            ModelForm::Solid(solid) => Self {
+                whole: solid.file.clone(),
+                parts: solid
+                    .parts
+                    .iter()
+                    .map(|part| ExportablePart {
+                        name: part.name.clone(),
+                        file: part.file.clone(),
+                    })
+                    .collect(),
+                formats: &ExportFormat::SOLID,
+            },
+            ModelForm::Sketch(sketch) => Self {
+                whole: sketch.file.clone(),
+                parts: Vec::new(),
+                formats: &ExportFormat::SKETCH,
+            },
+        }
+    }
 }
 
 /// Answers the documentation tool.
@@ -725,6 +778,71 @@ impl<
                     }),
                 }
             }
+            CHECK_EXPORT => {
+                let args: CheckExportArgs = match serde_json::from_value(call.arguments.clone()) {
+                    Ok(args) => args,
+                    Err(error) => return ToolRun::bad_arguments(error),
+                };
+                let format = ExportFormat::from(args.format);
+                let subject = match &args.part {
+                    Some(name) => format!("`{name}`"),
+                    None => "the model".to_string(),
+                };
+                emit(TurnEvent::Phase(format!(
+                    "checking a {} export of {subject}",
+                    format.label()
+                )));
+                let Some(exportable) = self.executor.exportable() else {
+                    return ToolRun::Output {
+                        output: "There is no model to check yet: run the script first.".to_string(),
+                        failed: true,
+                    };
+                };
+                if !exportable.formats.contains(&format) {
+                    return ToolRun::Output {
+                        output: format!(
+                            "{} is not a format this model can be exported to; the formats \
+                             are {}.",
+                            format.label(),
+                            list_labels(exportable.formats.iter().map(|f| f.label()))
+                        ),
+                        failed: true,
+                    };
+                }
+                let file = match &args.part {
+                    None => &exportable.whole,
+                    Some(name) => match exportable.parts.iter().find(|part| part.name == *name) {
+                        Some(part) => &part.file,
+                        None => {
+                            return ToolRun::Output {
+                                output: format!(
+                                    "No part is named `{name}`; the parts are {}.",
+                                    list_labels(
+                                        exportable
+                                            .parts
+                                            .iter()
+                                            .map(|part| { format!("`{}`", part.name) })
+                                    )
+                                ),
+                                failed: true,
+                            };
+                        }
+                    },
+                };
+                match self.executor.prove_export(file, format) {
+                    Ok(report) => ToolRun::Output {
+                        failed: report.refused(),
+                        output: describe_export_check(&subject, &report),
+                    },
+                    Err(WorkerError::Cancelled) => ToolRun::Abort(TurnOutcome::Cancelled),
+                    // A check that could not run is an answer, not a dead
+                    // turn: the model reads why and decides what to do.
+                    Err(error) => ToolRun::Output {
+                        output: format!("The export check could not run: {error}"),
+                        failed: true,
+                    },
+                }
+            }
             LOOKUP_DOCS => {
                 let args: LookupDocsArgs = match serde_json::from_value(call.arguments.clone()) {
                     Ok(args) => args,
@@ -1013,6 +1131,46 @@ fn numbered_lines(source: &str, start_line: Option<u32>, end_line: Option<u32>) 
 /// What the model reads after a snippet: what it printed, the value of
 /// its final expression, and the traceback if it raised, each only when
 /// present.
+/// The check's answer: the verdict the export would give, then the cause
+/// the report carries — the same sentences the user's export shows.
+fn describe_export_check(subject: &str, report: &ExportReport) -> String {
+    let explanation = report.explain();
+    if report.refused() {
+        return format!(
+            "A {} export of {subject} would be refused: the file does not reproduce it. \
+             {explanation}",
+            report.format.label()
+        );
+    }
+    let figures = &report.retained;
+    let mut text = format!(
+        "A {} export of {subject} reproduces it: {} of {} mm³, {} × {} × {} mm.",
+        report.format.label(),
+        if figures.solids == 1 {
+            "1 solid".to_string()
+        } else {
+            format!("{} solids", figures.solids)
+        },
+        figures.volume.round(),
+        figures.size[0].round(),
+        figures.size[1].round(),
+        figures.size[2].round(),
+    );
+    if !explanation.is_empty() {
+        text.push(' ');
+        text.push_str(&explanation);
+    }
+    text
+}
+
+fn list_labels<T: std::fmt::Display>(labels: impl IntoIterator<Item = T>) -> String {
+    labels
+        .into_iter()
+        .map(|label| label.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn describe_snippet(outcome: &SnippetOutcome) -> String {
     let mut parts = Vec::new();
     if !outcome.printed.trim().is_empty() {
@@ -1485,6 +1643,7 @@ fn describe_tool(name: &str) -> &str {
         EDIT_SCRIPT => "edit the script",
         READ_SCRIPT => "read the script",
         RUN_PYTHON => "run a Python snippet",
+        CHECK_EXPORT => "check an export",
         LOOKUP_DOCS => "look up the docs",
         RENDER_VIEW => "look at the render",
         REFERENCE_IMAGES => "look at the reference images",
@@ -1753,6 +1912,11 @@ mod tests {
         /// Scripted snippet outcomes, and each snippet run.
         snippets: Arc<Mutex<VecDeque<SnippetOutcome>>>,
         snippets_run: Arc<Mutex<Vec<SnippetRun>>>,
+        /// What there is to export, as production sets it after each
+        /// successful execution; scripted export proofs, and each asked.
+        exportable: Arc<Mutex<Option<Exportable>>>,
+        proofs: Arc<Mutex<VecDeque<ExportReport>>>,
+        proofs_run: Arc<Mutex<Vec<(ModelFile, ExportFormat)>>>,
         block_restoration: bool,
     }
 
@@ -1763,6 +1927,9 @@ mod tests {
                 executed: Arc::new(Mutex::new(Vec::new())),
                 snippets: Arc::new(Mutex::new(VecDeque::new())),
                 snippets_run: Arc::new(Mutex::new(Vec::new())),
+                exportable: Arc::new(Mutex::new(None)),
+                proofs: Arc::new(Mutex::new(VecDeque::new())),
+                proofs_run: Arc::new(Mutex::new(Vec::new())),
                 block_restoration: false,
             }
         }
@@ -1770,6 +1937,22 @@ mod tests {
         fn with_snippets(self, outcomes: impl IntoIterator<Item = SnippetOutcome>) -> Self {
             *self.snippets.lock().unwrap() = outcomes.into_iter().collect();
             self
+        }
+
+        /// A model already on screen when the turn starts, and the reports
+        /// its export proofs will return in order.
+        fn with_exportable(
+            self,
+            exportable: Exportable,
+            proofs: impl IntoIterator<Item = ExportReport>,
+        ) -> Self {
+            *self.exportable.lock().unwrap() = Some(exportable);
+            *self.proofs.lock().unwrap() = proofs.into_iter().collect();
+            self
+        }
+
+        fn proofs_run(&self) -> Vec<(ModelFile, ExportFormat)> {
+            self.proofs_run.lock().unwrap().clone()
         }
 
         fn snippets_run(&self) -> Vec<SnippetRun> {
@@ -1899,7 +2082,32 @@ mod tests {
                 std::fs::remove_file(script_path).unwrap();
                 std::fs::create_dir(script_path).unwrap();
             }
-            outcome.map(|()| sample_model())
+            outcome.map(|()| {
+                let model = sample_model();
+                *self.exportable.lock().unwrap() = Some(Exportable::of(&model));
+                model
+            })
+        }
+
+        fn exportable(&self) -> Option<Exportable> {
+            self.exportable.lock().unwrap().clone()
+        }
+
+        fn prove_export(
+            &mut self,
+            model: &ModelFile,
+            format: ExportFormat,
+        ) -> Result<ExportReport, WorkerError> {
+            self.proofs_run
+                .lock()
+                .unwrap()
+                .push((model.clone(), format));
+            Ok(self
+                .proofs
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| ExportReport::new(format)))
         }
 
         fn run_snippet(
@@ -1964,6 +2172,18 @@ mod tests {
             _cancel: &CancelFlag,
         ) -> Result<SnippetOutcome, WorkerError> {
             Ok(SnippetOutcome::default())
+        }
+
+        fn exportable(&self) -> Option<Exportable> {
+            None
+        }
+
+        fn prove_export(
+            &mut self,
+            _model: &ModelFile,
+            format: ExportFormat,
+        ) -> Result<ExportReport, WorkerError> {
+            Ok(ExportReport::new(format))
         }
     }
 
@@ -4527,6 +4747,171 @@ mod tests {
         let text = describe_model(&model);
         assert!(text.ends_with("\nPrinted:\nhole 12.2"), "{text}");
         assert!(!describe_model(&sample_model()).contains("Printed"));
+    }
+
+    fn check_export(
+        id: &str,
+        format: &str,
+        part: Option<&str>,
+    ) -> Result<ModelResponse, BackendError> {
+        let mut arguments = serde_json::json!({"format": format});
+        if let Some(part) = part {
+            arguments["part"] = serde_json::Value::String(part.to_string());
+        }
+        Ok(ModelResponse {
+            output_items: Vec::new(),
+            reached_output_limit: false,
+            usage: None,
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: id.to_string(),
+                name: CHECK_EXPORT.to_string(),
+                arguments,
+            }],
+        })
+    }
+
+    fn two_part_exportable() -> Exportable {
+        Exportable {
+            whole: ModelFile(PathBuf::from("/scratch/model-3.brep")),
+            parts: vec![
+                ExportablePart {
+                    name: "base".into(),
+                    file: ModelFile(PathBuf::from("/scratch/part-3-0.brep")),
+                },
+                ExportablePart {
+                    name: "lid".into(),
+                    file: ModelFile(PathBuf::from("/scratch/part-3-1.brep")),
+                },
+            ],
+            formats: &ExportFormat::SOLID,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_export_check_returns_the_gates_verdict_and_cause_for_the_named_part() {
+        let model = ScriptedModel::new([
+            check_export("c1", "step", Some("lid")),
+            check_export("c2", "stl", None),
+            text("Checked."),
+        ]);
+        let refused = ExportReport {
+            retained: cadmark_core::export::ShapeFigures {
+                solids: 1,
+                faces: 7,
+                ..Default::default()
+            },
+            written: Some(cadmark_core::export::ShapeFigures::default()),
+            lost_faces: vec![cadmark_core::export::LostFace {
+                surface: "extrusion".into(),
+                curves: vec!["offset".into()],
+                ..Default::default()
+            }],
+            ..ExportReport::new(ExportFormat::Step)
+        };
+        let figures = cadmark_core::export::ShapeFigures {
+            solids: 1,
+            shells: 1,
+            volume: 1000.0,
+            size: [10.0; 3],
+            ..Default::default()
+        };
+        let reproduced = ExportReport {
+            retained: figures.clone(),
+            written: Some(figures),
+            ..ExportReport::new(ExportFormat::Stl)
+        };
+        let executor =
+            FakeExecutor::new([]).with_exportable(two_part_exportable(), [refused, reproduced]);
+        let mut harness = Harness::with_script(Some("x = 1\n"), executor);
+
+        let outcome = harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        assert_eq!(outcome, TurnOutcome::Answered);
+        assert_eq!(
+            harness.executor.proofs_run(),
+            vec![
+                (
+                    ModelFile(PathBuf::from("/scratch/part-3-1.brep")),
+                    ExportFormat::Step
+                ),
+                (
+                    ModelFile(PathBuf::from("/scratch/model-3.brep")),
+                    ExportFormat::Stl
+                ),
+            ],
+            "the named part's own file is proved; the whole model when no part is named"
+        );
+        let results = tool_results(&harness);
+        assert!(results[0].2, "a refusal is a failed result");
+        assert_eq!(
+            results[0].1,
+            "A STEP export of `lid` would be refused: the file does not reproduce it. The \
+             file read back with 0 solids where the part has 1 solid, and 0 faces where the \
+             part has 7 faces. Faces missing from the file: 1 face on an extrusion surface \
+             bounded by offset curves."
+        );
+        assert!(!results[1].2);
+        assert_eq!(
+            results[1].1,
+            "A STL export of the model reproduces it: 1 solid of 1000 mm³, 10 × 10 × 10 mm."
+        );
+        assert!(
+            harness.executor.executed().is_empty(),
+            "a check keeps no model and runs no script"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_export_check_answers_an_unknown_part_with_the_parts_that_exist() {
+        let model = ScriptedModel::new([check_export("c1", "3mf", Some("handle")), text("Ok.")]);
+        let executor = FakeExecutor::new([]).with_exportable(two_part_exportable(), []);
+        let mut harness = Harness::with_script(Some("x = 1\n"), executor);
+
+        harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        let results = tool_results(&harness);
+        assert!(results[0].2);
+        assert_eq!(
+            results[0].1,
+            "No part is named `handle`; the parts are `base`, `lid`."
+        );
+        assert!(harness.executor.proofs_run().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_export_check_needs_a_model_and_a_format_the_model_offers() {
+        let model = ScriptedModel::new([
+            check_export("c1", "step", None),
+            run_script("c2", "from build123d import *\n", "A part"),
+            check_export("c3", "stl", None),
+            text("Ok."),
+        ]);
+        let mut harness = Harness::with_script(None, FakeExecutor::new([Ok(())]));
+
+        harness
+            .run(&model, TurnInput::default(), CancelFlag::new())
+            .await;
+
+        let results = tool_results(&harness);
+        assert!(results[0].2);
+        assert!(
+            results[0].1.contains("run the script first"),
+            "{}",
+            results[0].1
+        );
+        assert_eq!(
+            harness.executor.proofs_run(),
+            vec![(
+                sample_model().solid().unwrap().file.clone(),
+                ExportFormat::Stl
+            )],
+            "after a run in the turn, the check proves the model that run built"
+        );
     }
 
     #[test]
