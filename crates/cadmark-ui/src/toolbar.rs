@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn project_name_is_the_folder_name() {
         assert_eq!(
-            project_display_name(Path::new("/home/someone/parts/bracket")),
+            project_display_name(Path::new("/srv/parts/bracket")),
             "bracket"
         );
         assert_eq!(project_display_name(Path::new("/")), "/");
