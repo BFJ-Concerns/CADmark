@@ -28,13 +28,20 @@ const KEPT_CALLS: usize = 60;
 #[derive(Debug, Clone)]
 pub struct RequestLog {
     dir: PathBuf,
+    /// Calls begun through this log and its clones. Part of every record's
+    /// name, so two calls begun in the same millisecond — a refusal and
+    /// its retry against a fast provider — never share a file.
+    calls: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl RequestLog {
     /// Record calls under `dir`, which is created when the first call
     /// begins.
     pub fn in_directory(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 
     pub fn directory(&self) -> &Path {
@@ -50,8 +57,11 @@ impl RequestLog {
         body: &serde_json::Value,
         credential: Option<Arc<Credential>>,
     ) -> CallRecord {
+        let call = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let name = format!(
-            "{}-{}.jsonl",
+            "{}-{call:04}-{}.jsonl",
             chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ"),
             purpose.slug()
         );
@@ -255,6 +265,20 @@ mod tests {
             "{}",
             path.display()
         );
+    }
+
+    #[test]
+    fn two_calls_begun_in_the_same_instant_are_two_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = RequestLog::in_directory(dir.path().to_path_buf());
+        let first = log.begin(RequestPurpose::Turn, &serde_json::json!({}), None);
+        let second = log
+            .clone()
+            .begin(RequestPurpose::Turn, &serde_json::json!({}), None);
+        assert_ne!(first.path(), second.path());
+        first.ended("done", None);
+        second.ended("done", None);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]
