@@ -2013,21 +2013,15 @@ mod tests {
         // the stage that reads it all surface here and nowhere earlier.
         let (device, _queue) = crate::test_device::shared().handles();
 
-        let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = errors.clone();
-        device.on_uncaptured_error(Box::new(move |error| {
-            sink.lock().expect("error sink").push(error.to_string());
-        }));
-
+        // An error scope, never a device-wide handler: the device is shared
+        // with every other test in the process, so nothing this test
+        // installs may outlive it.
+        device.push_error_scope(wgpu::ErrorFilter::Validation);
         let pipelines = RenderPipelines::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, 64, 64);
         let _ = pipelines.surface_format;
         let _ = device.poll(wgpu::Maintain::Wait);
-
-        let errors = errors.lock().expect("error sink").clone();
-        assert!(
-            errors.is_empty(),
-            "building the passes reported: {errors:#?}"
-        );
+        let error = pollster::block_on(device.pop_error_scope());
+        assert!(error.is_none(), "building the passes reported: {error:#?}");
     }
 
     /// One quad, one plane, and the picking texture read back on both sides
