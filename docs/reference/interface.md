@@ -187,7 +187,7 @@ The AI can run the same proof inside a turn with `check_export`, which writes, r
 
 After each build, the status bar reports every produced part's validity:
 
-- "Part 1 is closed and valid." — a solid that will print and export correctly.
+- "Part 1 is closed and valid." — a printable solid.
 - "Part 1 is NOT a closed valid solid; it will not print." — open or invalid geometry that needs fixing.
 
 The export menu shows a warning before writing an invalid part. Validity and the export proof are separate checks: a part can be valid but not reproducible in a given format (faces the writer cannot carry), or reproducible but flagged as invalid.
