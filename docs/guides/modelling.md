@@ -75,9 +75,9 @@ changed.
 
 ## Exports that keep every face
 
-Every export is proven: the file is read back and compared with the model. A file that does not reproduce the part is refused and removed, and the message names what was lost — for STEP, the faces and their surface kinds; for STL and 3MF, the discrepancy in shell count, volume or size.
+Every solid export is proven: the file is read back and compared with the model — solids and faces for STEP, closed surfaces for STL and 3MF, volume and size for both. Drawing formats (SVG, DXF) are written without a read-back check. A file that does not reproduce the part is refused and removed, and the message names what was lost — for STEP, the faces and their surface kinds; for STL and 3MF, the discrepancy in shell count, volume or size.
 
-A part built on an offset of an ellipse or spline — using `offset` in a sketch, or `offset_2d` on a wire, then extruding or revolving it — gives faces that the STEP writer cannot carry as they are. CADmark converts those faces to B-splines before writing. The export message states the volume the conversion moved, typically around 0.1 % on a real part. The file is judged at a wider tolerance to accommodate the approximation.
+A part built on an offset of an ellipse or spline — using `offset` in a sketch, or `offset_2d` on a wire, then extruding or revolving it — gives faces that the STEP writer cannot carry as they are. CADmark converts those faces to B-splines before writing. The export message states the measured volume deviation, which is accepted within the 1 % mesh-format tolerance.
 
 Offsets of lines and arcs simplify to lines and arcs exactly and need no conversion. STL and 3MF carry offset geometry as triangles and need none either.
 
