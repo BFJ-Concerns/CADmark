@@ -301,7 +301,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Rust workspace with six crates (core, kernel, renderer, UI, bridge, app)
 - Provenance ledger mapping rendered geometry to generating build123d code
-- Geometry context with pluggable identification strategies (ADR-0003)
+- Geometry context with pluggable identification strategies
 - Spatial comment system with overlay, anchor line, and applied-state lifecycle
 - Chat pane with three visually distinct message types
 - wgpu renderer with shaded mesh, wireframe overlay, and selection glow

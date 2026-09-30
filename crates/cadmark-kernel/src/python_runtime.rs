@@ -97,17 +97,17 @@ mod tests {
     #[test]
     fn derives_runtime_layout_from_uv_python_interpreter() {
         let layout = derive_runtime_layout_from_interpreter(Path::new(
-            "/home/user/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12",
+            "/opt/python/cpython-3.12-linux-x86_64-gnu/bin/python3.12",
         ))
         .expect("expected uv-managed interpreter layout");
 
         assert_eq!(
             layout.home,
-            Path::new("/home/user/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu")
+            Path::new("/opt/python/cpython-3.12-linux-x86_64-gnu")
         );
         assert_eq!(
             layout.lib_dir,
-            Path::new("/home/user/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/lib")
+            Path::new("/opt/python/cpython-3.12-linux-x86_64-gnu/lib")
         );
     }
 
@@ -130,7 +130,7 @@ mod tests {
     #[test]
     fn rejects_interpreter_path_outside_bin_directory() {
         let error = derive_runtime_layout_from_interpreter(Path::new(
-            "/home/user/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/python3.12",
+            "/opt/python/cpython-3.12-linux-x86_64-gnu/python3.12",
         ))
         .expect_err("expected invalid interpreter layout");
 

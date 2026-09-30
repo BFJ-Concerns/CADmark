@@ -1,7 +1,7 @@
 // Geometry context resolution — bridges picking results to provenance data,
 // producing the structured context sent to the AI.
 //
-// This module implements ADR-0003's three-layer architecture:
+// Three layers, kept apart so the middle one can change without the others:
 // 1. Provenance (foundation): which code generated the element.
 // 2. Identification (experimental): which specific element was clicked.
 // 3. Output format (stable): packages the result for the AI bridge.
@@ -22,7 +22,9 @@ pub struct MissingElement {
 }
 
 /// Strategy for identifying which specific element was clicked.
-/// ADR-0003 mandates this layer is modular and experimental.
+/// The experimental layer: strategies plug in here so the identification
+/// data can change without touching the provenance beneath it or the
+/// output format above it.
 pub trait IdentificationStrategy: Send + Sync {
     /// Given a selected element, produce additional key-value identification
     /// data that helps the AI disambiguate. Returns an empty map if the
