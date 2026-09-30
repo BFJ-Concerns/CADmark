@@ -236,6 +236,9 @@ struct TurnRecord {
     comment_ids: Vec<MessageId>,
     /// Messages before the active turn, which a condensation event may replace.
     history_len: usize,
+    /// Messages belonging to this turn's history, input and streamed output.
+    /// Other application events can add messages without the model seeing them.
+    covered_messages: Vec<MessageId>,
     /// The item sequence the turn ended with, recorded on the
     /// conversation once its messages are settled.
     model_context: Option<(Vec<ModelItem>, Option<String>)>,
@@ -683,6 +686,12 @@ impl CadmarkApp {
                     thinking: None,
                     comment_ids,
                     history_len,
+                    covered_messages: project
+                        .conversation
+                        .messages()
+                        .iter()
+                        .map(|message| message.id)
+                        .collect(),
                     model_context: None,
                 });
                 true
@@ -711,6 +720,11 @@ impl CadmarkApp {
             return;
         };
         let conversation = &mut project.conversation;
+        let before: Vec<_> = conversation
+            .messages()
+            .iter()
+            .map(|message| message.id)
+            .collect();
         // Reasoning precedes whatever the model does next, so any other
         // event ends the open thinking record.
         if !matches!(event, TurnEvent::Thinking(_)) {
@@ -802,6 +816,14 @@ impl CadmarkApp {
             // Handled before the project is borrowed above.
             TurnEvent::ModelBuilt { .. } => {}
         }
+        turn.covered_messages.extend(
+            project
+                .conversation
+                .messages()
+                .iter()
+                .filter(|message| !before.contains(&message.id))
+                .map(|message| message.id),
+        );
     }
 
     fn finish_turn(&mut self, outcome: TurnOutcome) {
@@ -814,6 +836,11 @@ impl CadmarkApp {
         };
         let conversation = &mut project.conversation;
         close_thinking(conversation, &mut turn);
+        let before: Vec<_> = conversation
+            .messages()
+            .iter()
+            .map(|message| message.id)
+            .collect();
         // What the outcome asks of the rest of the application, once the
         // conversation has been brought up to date.
         let mut show: Option<(Box<cadmark_kernel::protocol::ExecutedModel>, String)> = None;
@@ -865,11 +892,23 @@ impl CadmarkApp {
                 rebuild = true;
             }
         }
-        // The messages are settled; the session reaches the last of them.
+        // The session accounts for the turn, not independent messages added while it ran.
         if let Some((items, identity)) = turn.model_context.take()
             && let Some(project) = self.project.as_mut()
         {
-            project.conversation.record_session_for(items, identity);
+            turn.covered_messages.extend(
+                project
+                    .conversation
+                    .messages()
+                    .iter()
+                    .filter(|message| !before.contains(&message.id))
+                    .map(|message| message.id),
+            );
+            project.conversation.record_session_for_messages(
+                items,
+                identity,
+                turn.covered_messages,
+            );
         }
         if let Some((model, source)) = show {
             self.show_model(*model, source);
@@ -3023,7 +3062,7 @@ impl eframe::App for CadmarkApp {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use cadmark_core::geometry::PartId;
     use cadmark_core::pending_comment::PendingComments;
     use cadmark_renderer::picking::Pick;
@@ -3188,6 +3227,12 @@ mod tests {
             Box::new(NoRender),
         );
         let response = project.conversation.push(Message::ai_response(""));
+        let covered_messages = project
+            .conversation
+            .messages()
+            .iter()
+            .map(|message| message.id)
+            .collect();
         CadmarkApp {
             project: Some(project),
             settings: UserSettings::default(),
@@ -3228,6 +3273,7 @@ mod tests {
                 thinking: None,
                 comment_ids: vec![],
                 history_len: 1,
+                covered_messages,
                 model_context: None,
             }),
         }
@@ -3398,6 +3444,14 @@ mod tests {
             thinking: None,
             comment_ids: vec![],
             history_len: 1,
+            covered_messages: app
+                .project()
+                .unwrap()
+                .conversation
+                .messages()
+                .iter()
+                .map(|message| message.id)
+                .collect(),
             model_context: None,
         });
         app.apply_turn_event(TurnEvent::ModelContext {
@@ -3435,6 +3489,14 @@ mod tests {
             thinking: None,
             comment_ids: vec![],
             history_len: 1,
+            covered_messages: app
+                .project()
+                .unwrap()
+                .conversation
+                .messages()
+                .iter()
+                .map(|message| message.id)
+                .collect(),
             model_context: None,
         });
         std::fs::write(dir.path().join("bracket.py"), "width = 120\ndepth = 40\n").unwrap();
@@ -3474,7 +3536,7 @@ mod tests {
         let project = app.project_mut().unwrap();
         project.script_source = Some("width = 80\ndepth = 40\n".into());
         project.busy = None;
-        let commands = project.stand_in_worker();
+        let (commands, _results) = project.stand_in_worker();
 
         app.apply_parameter_lock("width", true);
 
@@ -3545,7 +3607,7 @@ mod tests {
         let project = app.project_mut().unwrap();
         project.script_source = Some("width = 80\n".into());
         project.busy = None;
-        let commands = project.stand_in_worker();
+        let (commands, _results) = project.stand_in_worker();
 
         app.apply_parameter_lock("depth", true);
 
@@ -3602,6 +3664,14 @@ mod tests {
             thinking: None,
             comment_ids: vec![],
             history_len: 1,
+            covered_messages: app
+                .project()
+                .unwrap()
+                .conversation
+                .messages()
+                .iter()
+                .map(|message| message.id)
+                .collect(),
             model_context: None,
         });
         std::fs::write(dir.path().join("bracket.py"), "width = 80\ndepth = 40\n").unwrap();
@@ -4259,6 +4329,52 @@ mod tests {
         assert_eq!(services.model.model_name(), "hosted-cad-model");
     }
 
+    pub(crate) fn conversation_after_in_flight_refusal(
+        more_turn_output: bool,
+    ) -> (Conversation, String) {
+        use cadmark_core::export::{ExportFormat, ExportReport, LostFace, ShapeFigures};
+        let report = ExportReport {
+            retained: ShapeFigures {
+                solids: 1,
+                faces: 7,
+                ..Default::default()
+            },
+            written: Some(ShapeFigures::default()),
+            lost_faces: vec![LostFace {
+                surface: "extrusion".into(),
+                curves: vec!["offset".into()],
+                ..Default::default()
+            }],
+            ..ExportReport::new(ExportFormat::Step)
+        };
+        let cause = report.explain();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_with_pending_response(dir.path().to_path_buf());
+        let (_commands, sender) = app.project_mut().unwrap().stand_in_worker();
+        sender
+            .send(crate::orchestrator::OrchestratorResult::Exported {
+                format: ExportFormat::Step,
+                path: dir.path().join("part.step"),
+                result: Ok(report),
+            })
+            .unwrap();
+        app.poll_results(&egui::Context::default());
+        let mut items = Vec::new();
+        if more_turn_output {
+            app.apply_turn_event(TurnEvent::Thinking("Checking the part.".into()));
+        }
+        app.apply_turn_event(TurnEvent::Text("The part is ready.".into()));
+        items.push(cadmark_bridge::backend::ModelItem::Assistant {
+            text: "The part is ready.".into(),
+        });
+        app.apply_turn_event(TurnEvent::ModelContext {
+            items,
+            identity: None,
+        });
+        app.finish_turn(TurnOutcome::Answered);
+        (app.project().unwrap().conversation.clone(), cause)
+    }
+
     #[test]
     fn export_refusal_records_only_refused_reports_and_saves_the_exact_status() {
         use cadmark_core::export::{
@@ -4300,7 +4416,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut app = app_with_pending_response(dir.path().to_path_buf());
             let before = app.project().unwrap().conversation.len();
-            let sender = app.project_mut().unwrap().stand_in_worker_results();
+            let (_commands, sender) = app.project_mut().unwrap().stand_in_worker();
             app.project_mut().unwrap().exports_in_flight = 1;
             sender
                 .send(crate::orchestrator::OrchestratorResult::Exported {

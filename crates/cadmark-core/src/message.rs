@@ -288,6 +288,10 @@ pub struct Conversation {
     /// recorded one for, where the messages are rendered afresh.
     #[serde(default)]
     session: ModelSession,
+    /// Exact message membership for sessions recorded while other application
+    /// events can add messages. Older files use the session's prefix boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_messages: Option<Vec<MessageId>>,
 }
 
 impl Conversation {
@@ -336,8 +340,14 @@ impl Conversation {
                 .messages
                 .iter()
                 .position(|message| message.id == id)
-                .and_then(|index| index.checked_sub(1))
-                .map(|index| self.messages[index].id);
+                .and_then(|index| {
+                    self.messages[..index].iter().rev().find(|message| {
+                        self.session_messages
+                            .as_ref()
+                            .is_none_or(|covered| covered.contains(&message.id))
+                    })
+                })
+                .map(|message| message.id);
             if self.session.covers.is_none() {
                 self.session = ModelSession::default();
             }
@@ -362,38 +372,73 @@ impl Conversation {
         self.messages = vec![Message::conversation_summary(summary)];
         self.messages.extend(retained);
         self.session = ModelSession::default();
+        self.session_messages = None;
     }
 
     /// The items the next request begins with, and the messages still to
     /// be rendered after them: the recorded session and what came after
-    /// the message it reaches, or nothing and every message when no
-    /// session is recorded or its message is gone.
-    pub fn replay(&self) -> (&[ModelItem], &[Message]) {
+    /// the messages it accounts for, or nothing and every message when no
+    /// session is recorded. Older sessions use their last-message boundary.
+    pub fn replay(&self) -> (&[ModelItem], Vec<&Message>) {
+        if let Some(covered) = &self.session_messages
+            && !self.session.is_empty()
+        {
+            return (
+                &self.session.items,
+                self.messages
+                    .iter()
+                    .filter(|message| !covered.contains(&message.id))
+                    .collect(),
+            );
+        }
         let reached = self
             .session
             .covers
             .and_then(|id| self.messages.iter().position(|message| message.id == id));
         match reached {
-            Some(index) if !self.session.is_empty() => {
-                (&self.session.items, &self.messages[index + 1..])
-            }
-            _ => (&[], &self.messages),
+            Some(index) if !self.session.is_empty() => (
+                &self.session.items,
+                self.messages[index + 1..].iter().collect(),
+            ),
+            _ => (&[], self.messages.iter().collect()),
         }
     }
 
     /// Record the item sequence a turn ended with as the session the next
-    /// request extends. It accounts for every message now in the
-    /// conversation, this turn's own included.
+    /// request extends. Use this when every current message is accounted for;
+    /// a live turn records its explicit message membership instead.
     pub fn record_session(&mut self, items: Vec<ModelItem>) {
         self.record_session_for(items, None);
     }
 
     pub fn record_session_for(&mut self, items: Vec<ModelItem>, identity: Option<String>) {
+        self.session_messages = None;
         self.session = ModelSession {
             items,
             identity,
             covers: self.messages.last().map(|message| message.id),
         };
+    }
+
+    /// Record only the messages accounted for by a turn. Independently added
+    /// messages remain unrendered even when the turn speaks again after them.
+    pub fn record_session_for_messages(
+        &mut self,
+        items: Vec<ModelItem>,
+        identity: Option<String>,
+        covered: Vec<MessageId>,
+    ) {
+        self.session = ModelSession {
+            items,
+            identity,
+            covers: self
+                .messages
+                .iter()
+                .rev()
+                .find(|message| covered.contains(&message.id))
+                .map(|message| message.id),
+        };
+        self.session_messages = Some(covered);
     }
 
     /// Reconstruct the human history when changing provider or model: opaque
@@ -402,6 +447,7 @@ impl Conversation {
         let mut conversation = self.clone();
         if self.session.identity.as_deref() != identity {
             conversation.session = ModelSession::default();
+            conversation.session_messages = None;
         }
         conversation
     }
@@ -591,18 +637,6 @@ mod tests {
     }
 
     #[test]
-    fn export_refusal_survives_conversation_json_round_trip() {
-        let mut conversation = Conversation::new();
-        conversation.push(Message::export_refusal(
-            "STEP export refused: missing extrusion face.",
-        ));
-        let json = serde_json::to_string(&conversation).unwrap();
-        let decoded = serde_json::from_str::<Conversation>(&json);
-        assert!(decoded.is_ok(), "refusal could not be read: {decoded:?}");
-        assert_eq!(decoded.unwrap(), conversation);
-    }
-
-    #[test]
     fn export_refusal_kind_preserves_loading_older_conversation_files() {
         let json = r#"{"messages":[{"id":"00000000-0000-0000-0000-000000000001","kind":"UserChat","text":"make a box","timestamp":"2026-09-01T12:00:00Z"}]}"#;
         let decoded = serde_json::from_str::<Conversation>(json);
@@ -628,8 +662,40 @@ mod tests {
             ..ToolActivity::begin("call_1", "run_script", serde_json::json!({"code": "x = 1"}))
         }]));
         conv.push(Message::error_notice("part.py failed to run"));
+        let refusal = conv.push(Message::export_refusal(
+            "STEP export refused: missing extrusion face.",
+        ));
+        conv.push(Message::ai_response("The part is ready."));
+        let covered = conv
+            .messages()
+            .iter()
+            .filter(|message| message.id != refusal)
+            .map(|message| message.id)
+            .collect();
+        conv.record_session_for_messages(
+            vec![ModelItem::Assistant {
+                text: "The part is ready.".into(),
+            }],
+            None,
+            covered,
+        );
         let json = serde_json::to_string(&conv).unwrap();
-        assert_eq!(serde_json::from_str::<Conversation>(&json).unwrap(), conv);
+        let decoded = serde_json::from_str::<Conversation>(&json);
+        assert!(
+            decoded.is_ok(),
+            "conversation could not be read: {decoded:?}"
+        );
+        let decoded = decoded.unwrap();
+        assert_eq!(decoded, conv);
+        assert_eq!(
+            decoded
+                .replay()
+                .1
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![refusal]
+        );
     }
 
     #[test]
