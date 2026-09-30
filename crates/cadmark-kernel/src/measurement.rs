@@ -227,6 +227,15 @@ pub enum MeasurementError {
     NotMeasurable(String),
 }
 
+/// Define the measurement functions, and the exact-bounds search they use,
+/// in `namespace`. Every kernel module that measures a shape — including
+/// the export proof, which compares a written file with the retained model
+/// — builds on this one namespace rather than carrying its own name tables.
+pub(crate) fn define_measurement(py: Python<'_>, namespace: &Bound<'_, PyDict>) -> PyResult<()> {
+    crate::bounds::define_exact_bounds(py, namespace)?;
+    py.run(MEASUREMENT_SOURCE, Some(namespace), None)
+}
+
 /// Measure the finalised model. `session` is the provenance session whose
 /// final topology maps define element order.
 pub(crate) fn measure(
@@ -235,8 +244,7 @@ pub(crate) fn measure(
     session: &Bound<'_, PyAny>,
 ) -> PyResult<(GeometryDescriptors, ModelSummary)> {
     let namespace = PyDict::new(py);
-    crate::bounds::define_exact_bounds(py, &namespace)?;
-    py.run(MEASUREMENT_SOURCE, Some(&namespace), None)?;
+    define_measurement(py, &namespace)?;
     let measure = namespace
         .get_item("measure")?
         .expect("measurement source defines measure()");

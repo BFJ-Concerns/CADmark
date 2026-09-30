@@ -8,7 +8,7 @@ use std::sync::mpsc;
 
 use cadmark_bridge::AiServices;
 use cadmark_core::cancellation::CancelFlag;
-use cadmark_core::export::ExportFormat;
+use cadmark_core::export::{ExportFormat, ExportReport};
 use cadmark_core::geometry::{MinimumDistance, TopologyElement};
 use cadmark_core::limits::ExecutionLimits;
 use cadmark_core::message::Conversation;
@@ -18,8 +18,8 @@ use cadmark_kernel::worker::{KernelWorker, WorkerError, WorkerLaunch};
 
 use crate::reference_images::ReferenceLibrary;
 use crate::turn::{
-    DocSource, ReferenceListing, ReferenceSource, RenderSource, ScriptExecutor, TurnEvent,
-    TurnInput, TurnOutcome, TurnRunner,
+    DocSource, Exportable, ReferenceListing, ReferenceSource, RenderSource, ScriptExecutor,
+    TurnEvent, TurnInput, TurnOutcome, TurnRunner,
 };
 
 /// Commands sent from the UI thread to the worker.
@@ -70,10 +70,13 @@ pub enum OrchestratorResult {
     TurnEvent(TurnEvent),
     /// The turn ended.
     TurnEnded(TurnOutcome),
-    /// The export finished.
+    /// The export finished: the report says whether the file at `path`
+    /// reproduces the part (a refused file has already been removed), or
+    /// the export did not happen at all.
     Exported {
         format: ExportFormat,
-        result: Result<PathBuf, String>,
+        path: PathBuf,
+        result: Result<ExportReport, String>,
     },
     /// The requested minimum distance completed, on the retained model it
     /// was asked for.
@@ -89,10 +92,12 @@ pub enum OrchestratorResult {
     ContextWindowDetected { tokens: usize },
 }
 
-/// The production executor: the confined kernel worker.
+/// The production executor: the confined kernel worker, remembering what
+/// its last successful execution left to export.
 struct WorkerExecutor {
     worker: KernelWorker,
     limits: ExecutionLimits,
+    exportable: Option<Exportable>,
 }
 
 impl ScriptExecutor for WorkerExecutor {
@@ -101,7 +106,21 @@ impl ScriptExecutor for WorkerExecutor {
         script_path: &Path,
         cancel: &CancelFlag,
     ) -> Result<ExecutedModel, WorkerError> {
-        self.worker.execute(script_path, self.limits, cancel)
+        let model = self.worker.execute(script_path, self.limits, cancel)?;
+        self.exportable = Some(Exportable::of(&model));
+        Ok(model)
+    }
+
+    fn exportable(&self) -> Option<Exportable> {
+        self.exportable.clone()
+    }
+
+    fn prove_export(
+        &mut self,
+        model: &ModelFile,
+        format: ExportFormat,
+    ) -> Result<ExportReport, WorkerError> {
+        self.worker.prove_export(model, format, self.limits)
     }
 
     fn run_snippet(
@@ -243,9 +262,12 @@ impl Orchestrator {
             .executor
             .worker
             .export(model, format, path, plane, self.executor.limits)
-            .map(|()| path.to_path_buf())
             .map_err(|error| error.to_string());
-        OrchestratorResult::Exported { format, result }
+        OrchestratorResult::Exported {
+            format,
+            path: path.to_path_buf(),
+            result,
+        }
     }
 
     fn handle_minimum_distance(
@@ -313,6 +335,7 @@ pub fn spawn_orchestrator(
                     executor: WorkerExecutor {
                         worker: KernelWorker::new(launch),
                         limits,
+                        exportable: None,
                     },
                     ai,
                     render,

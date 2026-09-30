@@ -23,7 +23,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use cadmark_core::cancellation::CancelFlag;
-use cadmark_core::export::ExportFormat;
+use cadmark_core::export::{ExportFormat, ExportReport};
 use cadmark_core::geometry::{MinimumDistance, TopologyElement};
 use cadmark_core::limits::{ExecutionLimits, LimitHit};
 use cadmark_core::sketch::SketchPlane;
@@ -44,6 +44,10 @@ const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The line the child prints once it is confined and Python is up.
 const READY_LINE: &str = "ready";
+
+/// Numbers the files an export proof writes into scratch, so two proofs of
+/// one model never share a name.
+static PROOF_FILE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum WorkerError {
@@ -168,9 +172,12 @@ impl KernelWorker {
         }
     }
 
-    /// Write a kept model to `path`; a drawing format flattens it onto
-    /// `plane`. Exports run under the wall-clock ceiling but no memory
-    /// ceiling: writing a mesh is bounded work.
+    /// Write a kept model to `path` and return what the file proved: a
+    /// solid format is read back and compared with the model, and a file
+    /// that does not reproduce it is removed with the report saying why. A
+    /// drawing format flattens the model onto `plane` and is not checked.
+    /// Exports run under the wall-clock ceiling but no memory ceiling:
+    /// writing a mesh is bounded work.
     pub fn export(
         &mut self,
         model: &ModelFile,
@@ -178,19 +185,44 @@ impl KernelWorker {
         path: &Path,
         plane: Option<SketchPlane>,
         limits: ExecutionLimits,
-    ) -> Result<(), WorkerError> {
+    ) -> Result<ExportReport, WorkerError> {
         let request = WorkerRequest::Export {
             model: model.clone(),
             format,
             path: path.to_path_buf(),
             plane,
         };
+        self.export_request(&request, limits)
+    }
+
+    /// Run the export proof for `model` in a solid `format` without leaving
+    /// a file, returning the report an `export` of it would return. The AI
+    /// asks this inside a turn; the user's export and this answer come
+    /// from the same write, read-back and comparison.
+    pub fn prove_export(
+        &mut self,
+        model: &ModelFile,
+        format: ExportFormat,
+        limits: ExecutionLimits,
+    ) -> Result<ExportReport, WorkerError> {
+        let request = WorkerRequest::ProveExport {
+            model: model.clone(),
+            format,
+        };
+        self.export_request(&request, limits)
+    }
+
+    fn export_request(
+        &mut self,
+        request: &WorkerRequest,
+        limits: ExecutionLimits,
+    ) -> Result<ExportReport, WorkerError> {
         let limits = ExecutionLimits {
             memory_bytes: u64::MAX,
             ..limits
         };
-        match self.request(&request, Some(limits), &CancelFlag::new())? {
-            WorkerReply::Exported => Ok(()),
+        match self.request(request, Some(limits), &CancelFlag::new())? {
+            WorkerReply::Exported(report) => Ok(report),
             other => Err(unexpected_reply("an export", other)),
         }
     }
@@ -345,7 +377,7 @@ fn unexpected_reply(request: &str, reply: WorkerReply) -> WorkerError {
             "worker replied to {request} with {}",
             match other {
                 WorkerReply::Executed(_) => "a model",
-                WorkerReply::Exported => "an export",
+                WorkerReply::Exported(_) => "an export",
                 WorkerReply::MinimumDistance(_) => "a minimum-distance measurement",
                 WorkerReply::SnippetRan(_) => "a snippet outcome",
                 WorkerReply::Failed(_) => unreachable!("handled above"),
@@ -641,11 +673,28 @@ fn serve(request: WorkerRequest, scratch_dir: &Path) -> WorkerReply {
             path,
             plane,
         } => match crate::export::export_model(&model, format, &path, plane) {
-            Ok(()) => WorkerReply::Exported,
+            Ok(report) => WorkerReply::Exported(report),
             Err(error) => WorkerReply::Failed(WorkerFailure::Runtime {
                 message: error.to_string(),
             }),
         },
+        WorkerRequest::ProveExport { model, format } => {
+            // The proof writes into the worker's own scratch directory, the
+            // one place a confined worker may write, and clears up after
+            // itself whatever the verdict; a refused file is already gone.
+            let sequence = PROOF_FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = scratch_dir.join(format!("proof-{sequence}.{}", format.extension()));
+            let outcome = crate::export::export_model(&model, format, &path, None);
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+            match outcome {
+                Ok(report) => WorkerReply::Exported(report),
+                Err(error) => WorkerReply::Failed(WorkerFailure::Runtime {
+                    message: error.to_string(),
+                }),
+            }
+        }
         WorkerRequest::MinimumDistance {
             model,
             first,

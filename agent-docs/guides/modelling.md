@@ -151,6 +151,41 @@ works on the outside may consume a thin inside wall. Inspect a section and
 check validity after each change. For bed-facing edges in FFF/FDM, consult
 the [3D-printing guide](3d-printing.md) before choosing the finish.
 
+## Exports that keep every face
+
+Search terms: STEP, export refused, offset curve, faces missing, B-spline
+conversion, check_export.
+
+Every export is proven: the file is read back and compared with the model
+— solids and faces for STEP, closed surfaces for STL and 3MF, volume and
+size for both. A file that does not reproduce the part is refused and
+removed, and the refusal names the faces the format lost with their surface
+and curve kinds. `check_export` runs the same proof inside a turn without
+keeping a file, and gives the same answer.
+
+Faces built on an offset of a conic or spline cannot be written to STEP as
+they are: an ellipse or spline grown with `offset` in a sketch, or a wire's
+`offset_2d`, then extruded or revolved, gives faces over `Geom_OffsetCurve`
+geometry, which OCCT's STEP writer omits while reporting success. CADmark
+converts those faces to B-splines before writing, states the volume the
+conversion moved in the export message (below 0.01 percent in practice),
+and judges the file at the mesh tolerance of 1 percent. Offsets of lines
+and arcs simplify to lines and arcs and need no conversion; STL and 3MF
+carry offset geometry as triangles and need none either.
+
+```python
+from build123d import *
+
+with BuildPart() as flange:
+    with BuildSketch():
+        Ellipse(20, 12)
+        offset(amount=3)  # the rim is an offset curve
+    extrude(amount=10)
+```
+
+Exporting this part as STEP reports the conversion; as STL or 3MF it needs
+none.
+
 API evidence: the installed build123d 0.11.1 implementations of `Helix`,
 `Polygon`, `RegularPolygon`, `sweep`, `Box`, and `Cylinder`, plus the bundled
 [operations](../../docs/build123d/operations.md) and

@@ -12,6 +12,7 @@
 // model its lines rather than the whole script, and a scratch run
 // answers a question without touching the file.
 
+use cadmark_core::export::ExportFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -30,6 +31,9 @@ pub const READ_SCRIPT: &str = "read_script";
 /// namespace, or alone — for its printed output and last value, changing
 /// nothing.
 pub const RUN_PYTHON: &str = "run_python";
+/// Runs the export gate's own check on a part in a solid format, without
+/// writing a file the user keeps, and returns the verdict an export would.
+pub const CHECK_EXPORT: &str = "check_export";
 /// The tool that answers a build123d API question from the documentation.
 pub const LOOKUP_DOCS: &str = "lookup_docs";
 /// The tool that shows the model the current viewport.
@@ -82,6 +86,37 @@ pub struct RunPythonArgs {
     /// Run the snippet alone rather than after the current script.
     #[serde(default)]
     pub standalone: bool,
+}
+
+/// Arguments of `check_export`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckExportArgs {
+    /// The solid format to prove.
+    pub format: SolidFormat,
+    /// The part to check by name; the whole model when absent.
+    #[serde(default)]
+    pub part: Option<String>,
+}
+
+/// The solid export formats as the model names them, in the file
+/// extension's own spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SolidFormat {
+    Step,
+    Stl,
+    #[serde(rename = "3mf")]
+    ThreeMf,
+}
+
+impl From<SolidFormat> for ExportFormat {
+    fn from(format: SolidFormat) -> Self {
+        match format {
+            SolidFormat::Step => ExportFormat::Step,
+            SolidFormat::Stl => ExportFormat::Stl,
+            SolidFormat::ThreeMf => ExportFormat::ThreeMf,
+        }
+    }
 }
 
 /// Arguments of `lookup_docs`.
@@ -233,6 +268,31 @@ pub fn run_python_spec() -> ToolSpec {
     }
 }
 
+pub fn check_export_spec() -> ToolSpec {
+    ToolSpec {
+        name: CHECK_EXPORT.to_string(),
+        description: "Check whether exporting a part in a format would reproduce it: the \
+                      file is written, read back and compared with the model — solids and \
+                      faces for STEP, closed surfaces for a mesh, volume and size for both — \
+                      exactly as the user's export is, and then discarded. The answer is the \
+                      verdict that export would give and the same cause: the faces the format \
+                      lost and their surface and curve kinds, or the B-spline conversion STEP \
+                      needed and the volume it moved. Run it before calling a part finished \
+                      when the part has curved or offset geometry, and after a refused export \
+                      to confirm a fix. Names the whole model when `part` is absent."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "enum": ["step", "stl", "3mf"], "description": "The export format to prove."},
+                "part": {"type": "string", "description": "The part's name, as the run result lists it. Omit for the whole model."}
+            },
+            "required": ["format"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 pub fn lookup_docs_spec() -> ToolSpec {
     ToolSpec {
         name: LOOKUP_DOCS.to_string(),
@@ -344,6 +404,7 @@ pub fn tools_for(accepts_images: bool) -> Vec<ToolSpec> {
         edit_script_spec(),
         read_script_spec(),
         run_python_spec(),
+        check_export_spec(),
         lookup_docs_spec(),
     ];
     if accepts_images {
@@ -458,6 +519,7 @@ mod tests {
                 EDIT_SCRIPT,
                 READ_SCRIPT,
                 RUN_PYTHON,
+                CHECK_EXPORT,
                 LOOKUP_DOCS,
                 RENDER_VIEW,
                 REFERENCE_IMAGES,
@@ -471,6 +533,7 @@ mod tests {
                 EDIT_SCRIPT,
                 READ_SCRIPT,
                 RUN_PYTHON,
+                CHECK_EXPORT,
                 LOOKUP_DOCS
             ]
         );

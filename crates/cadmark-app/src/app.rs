@@ -968,14 +968,28 @@ impl CadmarkApp {
                 }
                 OrchestratorResult::TurnEvent(event) => self.apply_turn_event(event),
                 OrchestratorResult::TurnEnded(outcome) => self.finish_turn(outcome),
-                OrchestratorResult::Exported { format, result } => {
+                OrchestratorResult::Exported {
+                    format,
+                    path,
+                    result,
+                } => {
                     project.exports_in_flight = project.exports_in_flight.saturating_sub(1);
                     self.status = Some(match result {
-                        Ok(path) => Status::info(format!(
-                            "Exported {} to {}",
+                        Ok(report) if report.refused() => Status::error(format!(
+                            "{} export refused: the file did not reproduce the part and was \
+                             not kept. {}",
                             format.label(),
-                            path.display()
+                            report.explain()
                         )),
+                        Ok(report) => {
+                            let explanation = report.explain();
+                            Status::info(format!(
+                                "Exported {} to {}{}{explanation}",
+                                format.label(),
+                                path.display(),
+                                if explanation.is_empty() { "" } else { ". " }
+                            ))
+                        }
                         Err(error) => {
                             Status::error(format!("{} export failed: {error}", format.label()))
                         }
