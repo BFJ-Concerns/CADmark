@@ -31,13 +31,17 @@ just run [dir]       # Run with a project directory (defaults to cwd)
 just install         # Build release and install as a desktop application
 ```
 
-CI (`.forgejo/workflows/ci.yml`) runs `just verify` on every pull request
-and lane push with `CADMARK_TEST_RUNNER=nextest`, which swaps `cargo test`
-for cargo-nextest's retrying `ci` profile plus the doctests. Checks belong
-in the justfile, not the workflow, so the two cannot drift.
+Two CI workflows run `just verify` with `CADMARK_TEST_RUNNER=nextest`, which
+swaps `cargo test` for cargo-nextest's retrying `ci` profile plus the
+doctests. `.forgejo/workflows/ci.yml` is the development gate: every pull
+request and lane push on the Forgejo origin. `.github/workflows/ci.yml` is
+the public gate: pushes to `main` and pull requests on GitHub, on a stock
+Ubuntu runner. Checks belong in the justfile, not in either workflow, so the
+two gates cannot drift from each other or from a dev box.
 
 Requires Python 3.12 (cadquery-ocp). The `.cargo/config.toml` points PyO3
-at the uv-managed Python 3.12 installation. `cadmark-app` embeds an rpath
+at the repository `.venv`'s interpreter, a symlink the build scripts follow
+to the real Python 3.12 installation. `cadmark-app` embeds an rpath
 to that runtime's `lib/` directory, and `cadmark-kernel` sets `PYTHONHOME`
 from the configured interpreter before Python initialises. The gitignored
 `.venv/` in the project root holds the runtime packages (`build123d`, OCP)

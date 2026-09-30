@@ -66,9 +66,13 @@ Source: `justfile`, `.config/nextest.toml`, `crates/cadmark-renderer/tests/picki
 
 ## Continuous integration
 
-`.forgejo/workflows/ci.yml` runs `just verify` with `CADMARK_TEST_RUNNER=nextest` on every non-draft pull request and on pushes to `main` and `structural/**`, in the `forge-ci/rust` image on the Forgejo Actions runner. The image carries the Rust toolchain, cargo-nextest, just, and Mesa's Vulkan drivers (lavapipe serves as the software adapter); it has no Python 3.12, so the job installs a pinned uv, fetches the pinned CPython 3.12 build, and runs `just bootstrap` against it, caching the interpreter and `.venv` on the pins and `requirements.txt`. A pull request whose head commit already has a verdict from the workflow is not re-run. A test that failed and then passed on retry marks the PR with the `Flaky Test` label.
+Two workflows run the one gate, `just verify` with `CADMARK_TEST_RUNNER=nextest`; neither defines a check of its own, so they cannot drift from each other or from a development machine.
 
-Source: `.forgejo/workflows/ci.yml`.
+**Development gate** — `.forgejo/workflows/ci.yml` runs on every non-draft pull request and on pushes to `main` and `structural/**`, in the `forge-ci/rust` image on the Forgejo Actions runner. The image carries the Rust toolchain, cargo-nextest, just, and Mesa's Vulkan drivers (lavapipe serves as the software adapter); it has no Python 3.12, so the job installs a pinned uv, fetches the pinned CPython 3.12 build, and runs `just bootstrap` against it, caching the interpreter and `.venv` on the pins and `requirements.txt`. A pull request whose head commit already has a verdict from the workflow is not re-run. A test that failed and then passed on retry marks the PR with the `Flaky Test` label.
+
+**Public gate** — `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests at the GitHub repository, on GitHub's hosted `ubuntu-24.04` runner, and is the standing proof that the build and the test suite pass on a stock Linux distribution. The job installs Mesa's Vulkan drivers for lavapipe, the stable Rust toolchain with rustfmt and clippy, just and cargo-nextest, and the pinned CPython 3.12 through uv, then runs `just bootstrap` and `just verify`. The `.venv` is cached on the interpreter pin, `requirements.txt`, and the bootstrap script. Every action is pinned to a commit. The workflow has read-only repository permissions and applies no labels.
+
+Source: `.forgejo/workflows/ci.yml`, `.github/workflows/ci.yml`.
 
 ## Desktop installation
 
