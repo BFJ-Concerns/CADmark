@@ -177,6 +177,12 @@ A design that has reached only a sketch offers drawing formats instead, written 
 
 Multi-part models can export one part or all parts; the top-level entries write the part currently selected and name it in the menu. An open or invalid solid shows a warning before export.
 
+Every solid export is proven: the file is read back and compared with the model — solids and faces for STEP, closed surfaces for STL and 3MF, volume and size for both. A file that does not reproduce the part is removed, and the export is refused. The status bar shows the cause: for STEP, which faces the format lost and their surface and curve kinds; for STL and 3MF, the discrepancies in shell count, volume or size. The same refusal appears in the chat as a notice the AI reads on its next turn, so you can ask it to fix the part.
+
+Faces built on an offset of a conic or spline — an ellipse or spline grown with `offset` in a sketch, then extruded or revolved — cannot be written to STEP as they are. CADmark converts those faces to B-splines before writing, and the export message states the volume the conversion moved (a fraction of a percent). The file is judged at a wider tolerance (1 %) to accommodate the approximation. Offsets of lines and arcs simplify exactly and need no conversion; STL and 3MF carry offset geometry as triangles and need none either.
+
+The AI can run the same proof inside a turn with `check_export`, which writes, reads back, compares and discards the file without keeping it. It gives the same verdict and the same cause the user's export would.
+
 ## Solid validity
 
 After each build, the status bar reports every produced part's validity:
@@ -184,7 +190,7 @@ After each build, the status bar reports every produced part's validity:
 - "Part 1 is closed and valid." — a solid that will print and export correctly.
 - "Part 1 is NOT a closed valid solid; it will not print." — open or invalid geometry that needs fixing.
 
-The export menu shows a warning before writing an invalid part.
+The export menu shows a warning before writing an invalid part. Validity and the export proof are separate checks: a part can be valid but not reproducible in a given format (faces the writer cannot carry), or reproducible but flagged as invalid.
 
 ## Images in chat
 
