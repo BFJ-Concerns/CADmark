@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- STEP, STL and 3MF exports are read back and compared with the part. A file
+  that does not reproduce it is refused and removed; the refusal names the
+  lost faces and their surface or curve kinds
+- STEP faces on offset curves are converted to B-splines when needed to
+  reproduce the part, with the volume deviation stated in the export message
+- The AI can run the same export check inside a turn with `check_export`
+- A refused export is kept in the conversation, so the AI reads its cause
+  on the next turn without the user repeating it
 - A part can be named in the script by setting the shape's `label`
   (`lid.label = "lid"`, or `bp.part.label = "lid"` after a builder); the
   label names the part in the Parts tab, in the measurements the AI reads,
