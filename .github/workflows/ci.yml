@@ -1,0 +1,88 @@
+# CI on GitHub Actions: the public gate.
+#
+# Runs `just verify` — the one recipe the development gate on Forgejo also
+# runs (.forgejo/workflows/ci.yml) — on GitHub's hosted Ubuntu runner, so the
+# public repository proves the build and the test suite on a stock
+# distribution. What the gate checks is defined in the justfile, not here;
+# this file changes only when the gate needs a new tool or capability on the
+# runner.
+#
+# The hosted image carries a Rust toolchain but neither just, cargo-nextest,
+# nor a Python 3.12 with build123d and OCP: the job installs each, pinned,
+# then runs `just bootstrap` to create the repository .venv that the Cargo
+# build and the kernel tests read. Mesa's Vulkan drivers supply lavapipe, the
+# software adapter the renderer tests draw on; the sandbox tests need the
+# runner kernel to enforce Landlock, which Ubuntu's does.
+#
+# Every action is pinned to a commit, with the release that commit is in a
+# trailing comment, so a moved tag cannot change what runs here.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHON_VERSION: "3.12.13"
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    # A cold build of the workspace and its GPU and Python dependencies is
+    # long on a hosted runner; a hang still costs at most this.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # lavapipe (mesa-vulkan-drivers) is the software Vulkan adapter the
+      # renderer's tests and the offscreen render draw on; Mesa's EGL and GL
+      # libraries are the GL software route behind it.
+      - name: Install the software renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libegl1 libgl1-mesa-dri
+
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: taiki-e/install-action@dfae9bf3d6f6c6f20ef4ebb3486c01a51341ff12 # v2.87.18
+        with:
+          tool: just,cargo-nextest
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # Red runs still warm the cache, or every retry rebuilds from cold.
+          cache-on-failure: true
+
+      # uv fetches the pinned CPython build; the interpreter pin keeps the
+      # exact patch release part of the runtime contract.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # The venv is keyed on everything that decides its contents, so a
+      # bumped pin rebuilds it and nothing else does. Its bin/python is a
+      # symlink into uv's managed-interpreter directory, which setup-uv
+      # fills at the same path on every run.
+      - name: Restore the Python runtime
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .venv
+          key: python-runtime-${{ env.PYTHON_VERSION }}-${{ hashFiles('requirements.txt', 'scripts/bootstrap-python-runtime') }}
+
+      - name: Bootstrap the Python runtime
+        run: just bootstrap --python "$(uv python find --managed-python "${PYTHON_VERSION}")"
+
+      # The whole gate, in one command — the same one a dev box and the
+      # development gate run. Steps live in the justfile, not here.
+      - name: Verify
+        run: just verify
+        env:
+          CADMARK_TEST_RUNNER: nextest
