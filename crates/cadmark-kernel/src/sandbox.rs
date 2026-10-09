@@ -1,9 +1,10 @@
 // Confinement of the kernel worker process. The build123d scripts CADmark
 // runs are machine-generated and re-executed every session, so the process
 // that runs them is boxed before the interpreter starts: it can read the
-// Python runtime and the system libraries, read and write the project
-// folder and its own scratch directory, and nothing else; it cannot open a
-// socket; and it can never regain privileges. The parent process supplies
+// Python runtime and the system directories, read and write the project
+// folder and its own scratch directory, and nothing else (a kernel older
+// than Linux 6.2 cannot deny truncation, see `REQUIRED_ABI`); it cannot
+// open a socket; and it can never regain privileges. The parent process supplies
 // no environment, so no credential is reachable from executed code.
 //
 // Confinement fails closed: when the running kernel cannot enforce it, the
@@ -22,7 +23,8 @@ use landlock::{
 };
 use thiserror::Error;
 
-/// What the worker may touch. Everything not listed is denied.
+/// What the worker may touch. Everything not listed is denied, as far as
+/// the running kernel's Landlock ABI reaches (see `REQUIRED_ABI`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxPolicy {
     /// The project folder: scripts, exports, reference images. Read-write.
@@ -48,9 +50,10 @@ const SYSTEM_READ_ROOTS: &[&str] = &[
 ];
 
 /// The Landlock ABI whose access set the policy is written against. ABI 3
-/// (Linux 6.2) adds truncation; everything the policy denies is denied
-/// from ABI 1 onwards, so an older kernel still confines the filesystem
-/// and is reported as partial rather than refused.
+/// (Linux 6.2) adds truncation. An older kernel enforces every right it
+/// knows, so reads and writes outside the policy are still denied, but it
+/// cannot deny truncating a file outside it; that confinement is reported
+/// as partial rather than refused.
 const REQUIRED_ABI: ABI = ABI::V3;
 
 #[derive(Debug, Error)]
@@ -69,9 +72,9 @@ pub enum SandboxError {
 pub enum Confinement {
     /// Every rule of the policy is enforced.
     Full,
-    /// The filesystem policy is enforced, but the running kernel predates
-    /// one of the finer access rights (truncation); nothing the policy
-    /// denies is permitted.
+    /// The filesystem policy is enforced as far as the running kernel's
+    /// Landlock ABI reaches. The kernel predates the truncation right, so
+    /// truncating a file outside the policy is not denied.
     Partial,
 }
 
