@@ -9,6 +9,7 @@ This guide walks through installing CADmark, connecting it to an AI provider, an
 
 ## What you need
 
+- **Linux** — with Landlock enabled, a Wayland or X11 session, and xdg-desktop-portal. The [README](../../README.md#requirements) lists the platform requirements and the system packages to install for Debian, Ubuntu, Fedora, and Arch.
 - **Rust** — a recent stable toolchain (the workspace uses edition 2024).
 - **Python 3.12** — cadquery-ocp, which provides the modelling kernel, publishes wheels for 3.12 only.
 - **A GPU** — or a software adapter that wgpu can use.
