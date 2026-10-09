@@ -2,7 +2,7 @@
 //
 // A named version is a design step the user chose to label, so it stands
 // out in the history and can be returned to by name. A floating window,
-// not a modal: the viewport and chat stay live while it is open (C39).
+// not a modal: the viewport and chat stay live while it is open.
 
 use crate::theme;
 

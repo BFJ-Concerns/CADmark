@@ -3,7 +3,7 @@
 //
 // The panel this feeds is not a view of whatever the AI labelled as a
 // parameter block: it is every top-level numeric name the script
-// actually uses (C16). So the script is read the way Python reads it
+// actually uses. So the script is read the way Python reads it
 // rather than the way the file is typed, and it is read once, as a
 // grammar. `tokenize` turns the source into Python's tokens — comments
 // and backslash continuations gone, a string literal taken whole
@@ -40,7 +40,7 @@
 //
 // A value is either a numeric literal, which the user can edit, or an
 // arithmetic expression over numbers and other parameters, which is
-// shown for what it is and not editable — C33 asks the AI to derive
+// shown for what it is and not editable — the AI is asked to derive
 // dimensions from each other, and a derived name is a name the script
 // uses. Numeric constants the script imported from `math` count as
 // numbers there: `angle = pi / 4` and `angle = math.tau / 8` are both

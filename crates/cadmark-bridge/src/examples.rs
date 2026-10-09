@@ -146,8 +146,8 @@ pub fn select(request: &str) -> Vec<&'static Example> {
         .map(|word| word.to_lowercase())
         .collect();
 
-    // Every operation the request names gets its material: C34 is a
-    // per-operation obligation, so a request naming four covered
+    // Every operation the request names gets its material: the example
+    // library is consulted per operation, so a request naming four covered
     // operations carries four examples. The library's own size is the
     // only bound.
     let mut selected: Vec<&'static Example> = LIBRARY
@@ -267,7 +267,7 @@ mod tests {
                 assert!(
                     derives_a_parameter(&block),
                     "every parameter block of {} must derive a value from another \
-                     parameter, not only state literals (C33); this one does not:\n{}",
+                     parameter, not only state literals; this one does not:\n{}",
                     example.name,
                     block.join("\n")
                 );

@@ -133,7 +133,7 @@ fn camera_change(
     }
 }
 
-/// The pair C21 measures: exactly the two anchors currently held for the
+/// The pair a two-anchor measurement reads: exactly the two anchors currently held for the
 /// comment the user is composing, with the part both are numbered within.
 /// Additional anchors remain comments only. The two must be on the same
 /// part: the measurement names elements within one part's numbering, and
@@ -923,7 +923,7 @@ impl CadmarkApp {
     /// Record the open part's script as it now stands as a design step.
     /// Every change to the script goes through here — a completed turn
     /// and a parameter edit alike — so the script on disk and the newest
-    /// step never differ (C15). A failure leaves the reason in the status
+    /// step never differ. A failure leaves the reason in the status
     /// and says so to the caller: the script has changed and the history
     /// has not, which no caller may report as success.
     fn record_design_step(&mut self, summary: &str, trigger: &str) -> Result<(), String> {
@@ -1997,7 +1997,7 @@ impl CadmarkApp {
     fn show_start_view(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         let mut action = StartAction::None;
         // Chat is the primary channel and stays reachable with no project
-        // open (C39): what is typed here is held and sent as the first
+        // open: what is typed here is held and sent as the first
         // turn of whichever project the user then chooses.
         let mut chat_action = ChatAction::None;
         self.chat.activity = ChatActivity::Idle;
@@ -2397,7 +2397,7 @@ impl CadmarkApp {
 
     /// A parameter edit: rewrite that one value in the open part's
     /// script, record the design step, and rebuild. No AI turn is
-    /// involved (C16), and the step is recorded as the file is written so
+    /// involved, and the step is recorded as the file is written so
     /// the newest step is always the script on disk.
     fn apply_parameter_edit(&mut self, name: &str, value: f64) {
         let Some((path, part)) = self
@@ -2442,7 +2442,7 @@ impl CadmarkApp {
             Ok(()) => self.status = Some(Status::info(summary)),
             // The rebuild that follows will post its own status over
             // this one, so a divergence between the script and the
-            // newest design step (C15) also goes to the conversation,
+            // newest design step also goes to the conversation,
             // where the user still has it afterwards.
             Err(reason) => {
                 if let Some(project) = self.project_mut() {
@@ -4908,7 +4908,7 @@ pub(crate) mod tests {
         assert!(!candidate_highlight_ids(&ledger, 1, Some(PartId(0))).is_empty());
     }
 
-    /// C28's start view and part-name dialog are reached only from this
+    /// The start view and part-name dialog are reached only from this
     /// file. A merge that drops those modules and this file's calls to them
     /// together still compiles, which is how they were lost once already;
     /// driving both from here is what refuses that silently.

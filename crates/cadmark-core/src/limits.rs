@@ -1,5 +1,5 @@
-// The ceilings every script execution runs under. The defaults are the
-// commission's decisions; both are user-adjustable in settings.
+// The ceilings every script execution runs under. Both defaults are
+// user-adjustable in settings.
 
 use std::time::Duration;
 
@@ -55,7 +55,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_the_commissioned_decisions() {
+    fn defaults_are_the_documented_ceilings() {
         let limits = ExecutionLimits::default();
         assert_eq!(limits.wall_clock, Duration::from_secs(120));
         assert_eq!(limits.memory_bytes, 4 * 1024 * 1024 * 1024);

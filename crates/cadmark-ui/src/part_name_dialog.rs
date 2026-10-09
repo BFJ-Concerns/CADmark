@@ -3,7 +3,7 @@
 // A part made in the application is Untitled until it is saved; the save
 // asks what to call it, and the answer becomes its file name in the
 // project folder. A floating window, not a modal: the viewport and chat
-// stay live while it is open (C39).
+// stay live while it is open.
 
 use crate::theme;
 

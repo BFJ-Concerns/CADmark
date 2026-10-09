@@ -3,7 +3,7 @@
 // AI badge when no provider is set; the credential field is masked and
 // its value is never echoed back into the form. A floating window, not a
 // modal: while it is open the viewport still takes clicks and the chat
-// still takes text (C39).
+// still takes text.
 
 use std::time::Duration;
 

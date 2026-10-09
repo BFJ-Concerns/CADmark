@@ -34,7 +34,7 @@ just install         # Build release and install as a desktop application
 Two CI workflows run `just verify` with `CADMARK_TEST_RUNNER=nextest`, which
 swaps `cargo test` for cargo-nextest's retrying `ci` profile plus the
 doctests. `.forgejo/workflows/ci.yml` is the development gate: every pull
-request and lane push on the Forgejo origin. `.github/workflows/ci.yml` is
+request and branch push on the Forgejo origin. `.github/workflows/ci.yml` is
 the public gate: pushes to `main` and pull requests on GitHub, on a stock
 Ubuntu runner. Checks belong in the justfile, not in either workflow, so the
 two gates cannot drift from each other or from a dev box.
