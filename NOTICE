@@ -1,0 +1,27 @@
+CADmark
+Copyright (C) 2026 BFJ Concerns
+
+CADmark is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option)
+any later version. See LICENSE for the full terms.
+
+-------------------------------------------------------------------------------
+
+Bundled build123d documentation
+
+The pages under docs/build123d/ are derived from the documentation of
+build123d (https://github.com/gumyr/build123d) and are compiled into the
+application for the AI's documentation lookup.
+
+build123d
+Copyright (c) 2022–2025 The build123d Contributors
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use these files except in compliance with the License. A copy of the License
+is in docs/build123d/LICENSE, and it is also available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+The pages have been converted to Markdown from the upstream documentation
+and edited for use as AI reference material.
