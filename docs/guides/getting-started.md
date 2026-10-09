@@ -33,6 +33,8 @@ It finds a Python 3.12 interpreter automatically (or accepts `--python /path/to/
 cargo build   # or: just build (release)
 ```
 
+This builds both binaries: the `cadmark` application and the `cadmark-kernel-worker` it runs scripts in. The application starts the worker from its own directory, so build the whole workspace before launching with `cargo run`.
+
 To run the test suite (some kernel tests need the `.venv`):
 
 ```sh

@@ -61,7 +61,10 @@ test-crate CRATE *ARGS: require-venv
 verify: fmt-check lint test
 
 # Build and run the app. `just run mypart` opens a project folder.
+# The kernel worker is a separate binary the app starts from its own
+# directory, and `cargo run` builds only the app, so build both first.
 run *ARGS: require-venv
+    cargo build --workspace --bins
     cargo run --bin cadmark -- {{ ARGS }}
 
 # Optimised build of every binary.
