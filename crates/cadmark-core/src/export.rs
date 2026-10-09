@@ -59,7 +59,7 @@ impl ExportFormat {
     }
 
     /// How far the read-back file's volume and size may sit from the
-    /// retained model's and still reproduce it (C31): B-rep is exact to
+    /// retained model's and still reproduce it: B-rep is exact to
     /// 0.01 %, a mesh approximates curves to 1 %. A drawing carries a
     /// profile, not a part, and has no reproduction tolerance.
     pub fn reproduction_tolerance(self) -> Option<f64> {

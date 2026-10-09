@@ -1,7 +1,7 @@
 // Parameters panel — the script's named numbers, editable in place.
 //
 // Adjusting a dimension is the one change the user makes without asking
-// the AI (C16), so the panel sits beside the viewport rather than behind
+// the AI, so the panel sits beside the viewport rather than behind
 // a mode, as one tab of the left panel: a row per module-level numeric
 // name, a drag-or-type field for the ones bound to a literal, and the
 // expression itself for the ones derived from other parameters.
