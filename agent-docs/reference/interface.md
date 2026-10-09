@@ -142,7 +142,7 @@ Source: `crates/cadmark-ui/src/chat.rs` (`show_step_run`, `tool_group_label`, `t
 The **Skills** menu inserts a built-in command into the draft. Start a message or
 spatial comment with `/3d-printing` or `$3d-printing` to apply printing guidance
 to that turn; active skills are shown beside the menu. See the
-[printing skill guide](../guides/3d-printing.md).
+printing skill guide (`agent-docs/guides/3d-printing.md`).
 
 ## Spatial comments
 
