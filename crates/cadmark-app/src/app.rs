@@ -1671,12 +1671,9 @@ impl CadmarkApp {
             !self.busy() && !self.version_dialog.is_open() && !self.settings_dialog.is_open();
         let mut action = ToolbarAction::None;
         ctx.input_mut(|input| {
+            // Redo before undo: egui matches shortcuts logically, so the
+            // Ctrl+Z pattern also accepts Ctrl+Shift+Z.
             if !typing
-                && idle
-                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z))
-            {
-                action = ToolbarAction::Undo;
-            } else if !typing
                 && idle
                 && input.consume_shortcut(&KeyboardShortcut::new(
                     Modifiers::COMMAND | Modifiers::SHIFT,
@@ -1684,6 +1681,11 @@ impl CadmarkApp {
                 ))
             {
                 action = ToolbarAction::Redo;
+            } else if !typing
+                && idle
+                && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z))
+            {
+                action = ToolbarAction::Undo;
             } else if idle
                 && input.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O))
             {
@@ -4906,6 +4908,42 @@ pub(crate) mod tests {
             "the ledger draws no distinction here and the highlight must not invent one"
         );
         assert!(!candidate_highlight_ids(&ledger, 1, Some(PartId(0))).is_empty());
+    }
+
+    /// egui matches a shortcut "logically": a pattern without Shift also
+    /// accepts the key with Shift held. Redo is Ctrl+Shift+Z, so the undo
+    /// pattern must not be the one that consumes it.
+    #[test]
+    fn ctrl_shift_z_redoes_and_ctrl_z_undoes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app_around(open_test_project(dir.path().to_path_buf(), None));
+        // Opening requests an initial build; nothing is building here.
+        app.project_mut().unwrap().busy = None;
+        let press = |app: &mut CadmarkApp, modifiers: egui::Modifiers| {
+            let ctx = egui::Context::default();
+            let mut input = egui::RawInput {
+                modifiers,
+                ..Default::default()
+            };
+            input.events.push(egui::Event::Key {
+                key: egui::Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            });
+            let mut action = cadmark_ui::toolbar::ToolbarAction::None;
+            let _ = ctx.run(input, |ctx| action = app.handle_shortcuts(ctx));
+            action
+        };
+        assert_eq!(
+            press(&mut app, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT),
+            cadmark_ui::toolbar::ToolbarAction::Redo
+        );
+        assert_eq!(
+            press(&mut app, egui::Modifiers::COMMAND),
+            cadmark_ui::toolbar::ToolbarAction::Undo
+        );
     }
 
     /// The start view and part-name dialog are reached only from this

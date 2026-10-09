@@ -51,6 +51,8 @@ All notable changes to this project will be documented in this file.
 - The comment overlay's hint and button said "send"; Enter and the button
   add the comment to the pending comments, which are sent from the chat, so
   they now say "add" and "Add comment"
+- `Ctrl+Shift+Z` undid a design step instead of redoing it: the undo
+  shortcut was checked first and also matched with Shift held
 
 ## [0.2.1] - 2026-09-24
 
