@@ -122,9 +122,11 @@ All notable changes to this project will be documented in this file.
 ## [0.2.0] - 2026-09-23
 
 ### Added
-- Continuous integration on Forgejo Actions runs `just verify` on every pull
-  request and branch push; `CADMARK_TEST_RUNNER=nextest` selects cargo-nextest's
-  retrying profile so a flaky test is labelled rather than failing the run
+- Continuous integration on Forgejo Actions runs `just verify` on non-draft
+  pull requests whose head branch does not start with `structural/`, and on
+  pushes to `main` and `structural/**`; `CADMARK_TEST_RUNNER=nextest` selects
+  cargo-nextest's retrying profile so a flaky test is labelled rather than
+  failing the run
 - The AI edits the script in place rather than rewriting it: `edit_script`
   replaces exact text and reports the edited region with line numbers,
   `read_script` shows lines by number, and `run_script` without `code` runs

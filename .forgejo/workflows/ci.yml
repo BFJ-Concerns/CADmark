@@ -27,7 +27,7 @@ on:
     types: [opened, synchronize, reopened, edited]
   # Direct pushes to main are allowed past the PR gate, so run the same
   # job on them as a post-merge tripwire. Structural integration branches
-  # get the same treatment: unit PRs into them are gated pre-merge, but
+  # get the same treatment: pull requests into them are gated pre-merge, but
   # the branch tip itself (merge commits and direct pushes) otherwise never
   # runs, letting a red tip hide until the next PR's gate trips over it.
   push:
