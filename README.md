@@ -87,8 +87,9 @@ CADmark builds with a recent stable Rust (edition 2024). Install it with
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-The modelling kernel needs **Python 3.12** exactly: cadquery-ocp publishes no
-wheels for newer versions. [uv](https://docs.astral.sh/uv/) is the simplest way
+The modelling kernel needs **Python 3.12** exactly: its provenance
+instrumentation is validated against Python 3.12 with the pinned build123d and
+OCP releases, and refuses any other runtime. [uv](https://docs.astral.sh/uv/) is the simplest way
 to get it:
 
 ```sh

@@ -39,7 +39,7 @@ the public gate: pushes to `main` and pull requests on GitHub, on a stock
 Ubuntu runner. Checks belong in the justfile, not in either workflow, so the
 two gates cannot drift from each other or from a dev box.
 
-Requires Python 3.12 (cadquery-ocp). The `.cargo/config.toml` points PyO3
+Requires Python 3.12 exactly (the provenance instrumentation validates it). The `.cargo/config.toml` points PyO3
 at the repository `.venv`'s interpreter, a symlink the build scripts follow
 to the real Python 3.12 installation. `cadmark-app` embeds an rpath
 to that runtime's `lib/` directory, and `cadmark-kernel` sets `PYTHONHOME`
