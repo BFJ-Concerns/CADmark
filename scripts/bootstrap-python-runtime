@@ -3,7 +3,7 @@
 # at the repository root unless --venv names somewhere else.
 #
 # Installs the exact versions in requirements.txt into it using a Python
-# 3.12 interpreter (cadquery-ocp publishes no wheels for newer Pythons), then
+# 3.12 interpreter (the kernel's provenance instrumentation accepts no other), then
 # proves build123d and OCP import. Re-running is safe: an existing .venv is
 # reused and brought up to the pinned versions.
 #

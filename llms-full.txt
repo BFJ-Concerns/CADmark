@@ -19,7 +19,7 @@ Source: `justfile`.
 
 - Linux with Landlock (5.13+, 6.2+ for full confinement); the kernel worker refuses scripts when Landlock is not enforced
 - Rust (edition 2024 workspace) and a C compiler (`aws-lc-sys` and `ring` compile C)
-- Python 3.12 — cadquery-ocp publishes no wheels for newer versions
+- Python 3.12 exactly — `_cadmark_validate_runtime` in `provenance_instrumentation.py` refuses any runtime but Python 3.12 with build123d 0.11.1 and cadquery-ocp-novtk 7.9.3.1.1
 - `libGL.so.1` — OCP fails to import without it
 - A GPU or software adapter supported by wgpu (Vulkan; Mesa lavapipe works)
 
