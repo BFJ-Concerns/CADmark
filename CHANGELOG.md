@@ -38,6 +38,9 @@ All notable changes to this project will be documented in this file.
 - The AI's render tool shows what the user sees: every part of a multi-part
   model, each in its own colour, with the parts hidden from the Parts tab
   left out. It previously drew only one part, in grey
+- CADmark is licensed under the GNU Affero General Public License v3.0 or
+  later; the bundled build123d documentation keeps its Apache License 2.0
+  and attribution notice
 
 ## [0.2.1] - 2026-09-24
 

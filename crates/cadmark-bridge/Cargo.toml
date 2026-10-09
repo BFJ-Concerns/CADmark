@@ -1,6 +1,7 @@
 [package]
 name = "cadmark-bridge"
 version.workspace = true
+license.workspace = true
 edition = "2024"
 
 [dependencies]
