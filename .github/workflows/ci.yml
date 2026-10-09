@@ -1,11 +1,9 @@
-# CI on GitHub Actions: the public gate.
+# CI on GitHub Actions.
 #
-# Runs `just verify` — the one recipe the development gate on Forgejo also
-# runs (.forgejo/workflows/ci.yml) — on GitHub's hosted Ubuntu runner, so the
-# public repository proves the build and the test suite on a stock
-# distribution. What the gate checks is defined in the justfile, not here;
-# this file changes only when the gate needs a new tool or capability on the
-# runner.
+# Runs `just verify` on GitHub's hosted Ubuntu runner, so the repository
+# proves the build and the test suite on a stock distribution. What the
+# gate checks is defined in the justfile, not here; this file changes only
+# when the gate needs a new tool or capability on the runner.
 #
 # The hosted image carries a Rust toolchain but neither just, cargo-nextest,
 # nor a Python 3.12 with build123d and OCP: the job installs each, pinned,

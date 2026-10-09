@@ -35,6 +35,9 @@ All notable changes to this project will be documented in this file.
   notice in chat naming it
 
 ### Changed
+- Continuous integration runs on GitHub Actions alone, on pushes to `main`
+  and pull requests; the Forgejo Actions workflow, and the label it put on
+  a pull request with a flaky test, are gone
 - The AI's render tool shows what the user sees: every part of a multi-part
   model, each in its own colour, with the parts hidden from the Parts tab
   left out. It previously drew only one part, in grey
