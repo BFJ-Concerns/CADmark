@@ -52,8 +52,11 @@ CADmark runs on Linux only. It needs:
   cannot enforce it, CADmark refuses to run scripts rather than run them
   unconfined.
 - **A Wayland or X11 desktop session** with
-  [xdg-desktop-portal](https://flatpak.github.io/xdg-desktop-portal/) for
-  file dialogs.
+  [xdg-desktop-portal](https://flatpak.github.io/xdg-desktop-portal/) and a
+  portal backend that provides the file chooser, for the open-folder dialog.
+  GNOME, KDE Plasma and most full desktops install one; on a bare window
+  manager or compositor, install `xdg-desktop-portal-gtk` (the package has
+  that name on Debian, Ubuntu, Fedora and Arch).
 - **A Vulkan-capable GPU**, or Mesa's software Vulkan driver (lavapipe).
 - **An OpenAI Responses-compatible endpoint**, to use the AI, with an API key
   if the endpoint requires one.

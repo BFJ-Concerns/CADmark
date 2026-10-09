@@ -9,7 +9,7 @@ This guide walks through installing CADmark, connecting it to an AI provider, an
 
 ## What you need
 
-- **Linux** — with Landlock enabled, a Wayland or X11 session, and xdg-desktop-portal. The [README](../../README.md#requirements) lists the platform requirements and the system packages to install for Debian, Ubuntu, Fedora, and Arch.
+- **Linux** — with Landlock enabled, a Wayland or X11 session, and xdg-desktop-portal with a backend that provides the file chooser. The [README](../../README.md#requirements) lists the platform requirements and the system packages to install for Debian, Ubuntu, Fedora, and Arch.
 - **Rust** — a recent stable toolchain (the workspace uses edition 2024).
 - **Python 3.12** — exactly: the kernel's provenance instrumentation is validated against Python 3.12 with the pinned build123d and OCP releases, and refuses any other runtime.
 - **A GPU** — or a software adapter that wgpu can use.
@@ -30,10 +30,10 @@ It finds a Python 3.12 interpreter automatically (or accepts `--python /path/to/
 ## Build
 
 ```sh
-cargo build   # or: just build (release)
+cargo build
 ```
 
-This builds both binaries: the `cadmark` application and the `cadmark-kernel-worker` it runs scripts in. The application starts the worker from its own directory, so build the whole workspace before launching with `cargo run`.
+This builds both binaries in the debug profile: the `cadmark` application and the `cadmark-kernel-worker` it runs scripts in. The application starts the worker from its own directory, so build the whole workspace in the same profile before launching with `cargo run`. (`just build` builds the release profile instead, for `just install`.)
 
 To run the test suite (some kernel tests need the `.venv`):
 
@@ -44,7 +44,7 @@ cargo test    # or: just test
 ## Launch
 
 ```sh
-cargo run --bin cadmark   # or: just run
+cargo run --bin cadmark   # or: just run, which builds both binaries first
 ```
 
 CADmark opens the start view. From here you can create a new project in an empty folder or open an existing one. To skip the start view and open a folder directly:
