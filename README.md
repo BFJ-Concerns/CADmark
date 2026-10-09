@@ -23,8 +23,9 @@ releases yet; you build it from source.
 - **Design history.** Every accepted edit is a design step you can undo
   (`Ctrl+Z`), and you can name a version to come back to (`Ctrl+S`).
 - **Checked exports.** STEP, STL and 3MF exports are read back and compared
-  with the model, and a file that does not reproduce the part is refused.
-  Sketch-only designs export to SVG and DXF.
+  with the model: solid and face counts for STEP, closed-shell counts for
+  meshes, and volume and size within a set tolerance for both. A file that
+  fails the comparison is refused. Sketch-only designs export to SVG and DXF.
 - **Printability checks.** After every build the status bar reports whether
   each part is a closed, valid solid. A built-in 3D-printing skill reviews
   designs for filament printing.
@@ -35,8 +36,12 @@ releases yet; you build it from source.
   local model server.
 - **Sandboxed scripts.** AI-written scripts run in a separate worker process
   that can write only to the project folder and its own scratch space, can
-  read only those, the Python runtime and the system libraries, and cannot
-  open a network connection.
+  read only those, the Python runtime, the system directories `/usr`,
+  `/lib`, `/lib64` and `/etc`, and the `/dev/null`, `/dev/zero`,
+  `/dev/random` and `/dev/urandom` devices, and cannot open a network
+  connection. On
+  kernels older than 6.2, Landlock cannot stop a script truncating files
+  elsewhere.
 
 ## Requirements
 
@@ -50,7 +55,8 @@ CADmark runs on Linux only. It needs:
   [xdg-desktop-portal](https://flatpak.github.io/xdg-desktop-portal/) for
   file dialogs.
 - **A Vulkan-capable GPU**, or Mesa's software Vulkan driver (lavapipe).
-- **An API key** for an OpenAI Responses-compatible endpoint, to use the AI.
+- **An OpenAI Responses-compatible endpoint**, to use the AI, with an API key
+  if the endpoint requires one.
   Without one, CADmark still opens, rebuilds and exports models.
 
 Continuous integration builds and tests CADmark on a stock Ubuntu 24.04
@@ -80,20 +86,21 @@ renderer: `mesa-vulkan-drivers` on Debian, Ubuntu and Fedora, or
 
 ### 2. Install Rust, uv and just
 
-CADmark builds with a recent stable Rust (edition 2024). Install it with
-[rustup](https://rustup.rs):
+CADmark builds with a recent stable Rust (edition 2024), installed with
+[rustup](https://rustup.rs). The modelling kernel needs **Python 3.12**
+exactly: its provenance instrumentation is validated against Python 3.12 with
+the pinned build123d and OCP releases, and refuses any other runtime.
+[uv](https://docs.astral.sh/uv/) is the simplest way to get it.
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-The modelling kernel needs **Python 3.12** exactly: its provenance
-instrumentation is validated against Python 3.12 with the pinned build123d and
-OCP releases, and refuses any other runtime. [uv](https://docs.astral.sh/uv/) is the simplest way
-to get it:
+Both installers add their tools to your `PATH` for new shells. Open a new
+terminal, then install Python 3.12:
 
 ```sh
-curl -LsSf https://astral.sh/uv/install.sh | sh
 uv python install 3.12
 ```
 
