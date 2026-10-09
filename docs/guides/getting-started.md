@@ -96,8 +96,8 @@ Save, and the toolbar shows the model name where "AI off" was.
 1. Click "New project" and pick an empty folder.
 2. Type something in the chat — "a box with rounded edges, 80 mm wide" — and press Enter.
 3. The AI writes a build123d script, executes it, and the model appears in the viewport.
-4. Click a face, type a comment in the overlay ("make this face thinner"), and press Enter to send it as a spatial comment.
-5. The AI sees which face you selected and which source line produced it, and edits the script accordingly.
+4. Click a face, type a comment in the overlay ("make this face thinner"), and press Enter. The comment becomes a pending card in the chat pane.
+5. Click **Send 1 comment** (or press Enter in the chat input). The AI sees which face you selected and which source line produced it, and edits the script accordingly.
 
 Every accepted edit is recorded as a design step. Undo with `Ctrl+Z`, redo with `Ctrl+Shift+Z`, or name a version with `Ctrl+S` to mark a checkpoint you can return to.
 

@@ -48,6 +48,9 @@ All notable changes to this project will be documented in this file.
 - `just run` on a fresh checkout opened an application that could not run
   scripts: it built only the `cadmark` binary, not the kernel worker the
   application starts. It now builds both
+- The comment overlay's hint and button said "send"; Enter and the button
+  add the comment to the pending comments, which are sent from the chat, so
+  they now say "add" and "Add comment"
 
 ## [0.2.1] - 2026-09-24
 
