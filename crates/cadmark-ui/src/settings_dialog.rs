@@ -113,8 +113,8 @@ impl SettingsDialog {
                 );
                 ui.label(
                     egui::RichText::new(
-                        "Any OpenAI-compatible endpoint: OpenAI, a gateway in front of Claude \
-                         or Gemini, OpenRouter, or a local model server.",
+                        "Any OpenAI Responses-compatible endpoint: OpenAI, a gateway in front of \
+                         Claude or Gemini, OpenRouter, or a local model server.",
                     )
                     .small()
                     .color(theme::TEXT_MUTED),

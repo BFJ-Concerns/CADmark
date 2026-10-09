@@ -13,7 +13,7 @@ This guide walks through installing CADmark, connecting it to an AI provider, an
 - **Rust** — a recent stable toolchain (the workspace uses edition 2024).
 - **Python 3.12** — exactly: the kernel's provenance instrumentation is validated against Python 3.12 with the pinned build123d and OCP releases, and refuses any other runtime.
 - **A GPU** — or a software adapter that wgpu can use.
-- **An OpenAI-compatible API endpoint** — OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server.
+- **An OpenAI Responses-compatible API endpoint** — OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server.
 
 [`just`](https://github.com/casey/just) is optional but shortens every command below; `just` on its own lists the available recipes.
 
