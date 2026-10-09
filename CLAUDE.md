@@ -15,7 +15,7 @@ Rust workspace with six crates:
 | `cadmark-kernel` | PyO3 bridge to build123d — script execution, OCP instrumentation, tessellation extraction |
 | `cadmark-renderer` | wgpu pipeline — shaded mesh, wireframe overlay, GPU colour-ID picking, selection glow |
 | `cadmark-ui` | egui panels — chat pane, comment overlay, undo/redo toolbar |
-| `cadmark-bridge` | AI backend trait, strict configuration, and shared OpenAI-compatible client |
+| `cadmark-bridge` | AI backend trait, strict configuration, and shared OpenAI Responses-compatible client |
 | `cadmark-app` | Binary entry point, state management, orchestrator, git operations |
 
 ## Build & Run

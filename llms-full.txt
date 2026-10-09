@@ -418,7 +418,7 @@ The dialog opens from the toolbar gear button or from the "AI off" badge. It is 
 
 Sections:
 
-- **AI provider** — base URL, model, reasoning effort (text; blank sends nothing), credential (masked, never echoed), accepts-images checkbox, allow-insecure-HTTP checkbox. The hint text notes "Any OpenAI-compatible endpoint: OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server."
+- **AI provider** — base URL, model, reasoning effort (text; blank sends nothing), credential (masked, never echoed), accepts-images checkbox, allow-insecure-HTTP checkbox. The hint text notes "Any OpenAI Responses-compatible endpoint: OpenAI, a gateway in front of Claude or Gemini, OpenRouter, or a local model server."
 - **Script limits** — wall clock (seconds, min 1, max 3600) and memory (MB, min 64, max 65536).
 - **Conversation context** — context window in tokens (min 1024, max 10000000).
 
