@@ -345,11 +345,13 @@ the [3D-printing guide](3d-printing.md) before choosing the finish.
 Search terms: STEP, export refused, offset curve, faces missing, B-spline
 conversion, check_export.
 
-Every export is proven: the file is read back and compared with the model
-— solids and faces for STEP, closed surfaces for STL and 3MF, volume and
-size for both. A file that does not reproduce the part is refused and
-removed, and the refusal names the faces the format lost with their surface
-and curve kinds. `check_export` runs the same proof inside a turn without
+Every solid export is proven: the STEP, STL or 3MF file is read back and
+compared with the model — solids and faces for STEP, closed surfaces for STL
+and 3MF, volume and size for both. A file that does not reproduce the part
+is refused and removed. A STEP refusal names the faces the format lost with
+their surface and curve kinds; an STL or 3MF refusal states the shell count,
+volume or size that differs. Drawing exports (SVG, DXF) are written without
+a read-back check. `check_export` runs the same proof inside a turn without
 keeping a file, and gives the same answer.
 
 Faces built on an offset of a conic or spline cannot be written to STEP as
