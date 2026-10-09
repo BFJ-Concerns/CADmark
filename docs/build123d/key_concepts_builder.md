@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/key_concepts_builder.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/key_concepts_builder.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
+
 # Key Concepts (Builder Mode)
 
 Builder mode provides a stateful approach to building CAD models using context managers like `BuildPart`, `BuildSketch`, and `BuildLine`. Each context accumulates geometry as operations are performed.

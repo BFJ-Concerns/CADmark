@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/advanced.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/advanced.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
+
 # Advanced Topics
 
 This section covers advanced topics in build123d, including:

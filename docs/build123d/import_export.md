@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/import_export.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/import_export.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
+
 # Import/Export Documentation
 
 ## Overview

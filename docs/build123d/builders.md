@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/builders.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/builders.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
+
 # Builders
 
 Builders are stateful context managers that enable a design history-like interface where state is tracked and structured. Each dimension is distinct, and operations are aware of pending faces and edges from Build contexts with location transformations applied to all child objects.

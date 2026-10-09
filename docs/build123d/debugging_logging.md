@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/debugging_logging.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/debugging_logging.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
+
 # Debugging & Logging
 
 Debugging problems with your build123d design involves the same techniques one would use to debug any Python source code; however, there are some specific techniques that might be of assistance. The following sections describe these techniques.
