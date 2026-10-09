@@ -2,77 +2,61 @@
 
 > Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/direct_api_reference.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
 
-# Direct API Reference
+# Direct API Reference
 
 The Direct API is an interface layer between the primary user interface API
 (the Builders) and the OpenCascade (OCCT) API. This API is based on the CadQuery
 Direct API (thank you to all of the CadQuery contributors that made this possible)
 with the following major changes:
 
-- 
-PEP8 compliance
+- PEP8 compliance
 
-- 
-New Axis class
+- New Axis class
 
-- 
-New ShapeList class enabling sorting and filtering of shape objects
+- New ShapeList class enabling sorting and filtering of shape objects
 
-- 
-Literal strings replaced with Enums
+- Literal strings replaced with Enums
 
-## Geometric Objects
+## Geometric Objects
 
 The geometric classes defined by build123d are defined below. This parameters to the
 CAD objects described in the following section are frequently of these types.
 
-**
-*class *Axis(**args*, ***kwargs*)**
+`class Axis(*args: Any, **kwargs: Any)`
 
 Axis defined by point and direction
 
 **Parameters:**
 
-- 
-**origin** (*VectorLike*) – start point
+- **origin** (*VectorLike*) – start point
 
-- 
-**direction** (*VectorLike*) – direction
+- **direction** (*VectorLike*) – direction
 
-- 
-**edge** (*Edge*) – origin & direction defined by start of edge
+- **edge** (*Edge*) – origin & direction defined by start of edge
 
-- 
-**location** (*Location*) – location to convert to axis
+- **location** (*Location*) – location to convert to axis
 
 **Variables:**
 
-- 
-**position** (*Vector*) – the global position of the axis origin
+- **position** (*Vector*) – the global position of the axis origin
 
-- 
-**direction** (*Vector*) – the normalized direction vector
+- **direction** (*Vector*) – the normalized direction vector
 
-- 
-**wrapped** (*gp_Ax1*) – the OCP axis object
+- **wrapped** (*gp_Ax1*) – the OCP axis object
 
-**
-__copy__() → Axis**
+`__copy__() -> Axis`
 
 Return copy of self
 
-**
-__deepcopy__(*_memo*) → Axis**
+`__deepcopy__(_memo) -> Axis`
 
 Return deepcopy of self
 
-**
-__neg__() → Axis**
+`__neg__() -> Axis`
 
 Flip direction operator -
 
-**
-angle_between(*other: Axis*) → float**
+`angle_between(other: Axis) -> float`
 
 calculate angle between axes
 
@@ -91,18 +75,15 @@ angle between axes
 
 *float*
 
-**
-*property *direction*: Vector***
+`property direction: Vector`
 
 The normalized direction of the Axis
 
-**
-intersect(**args*, ***kwargs*)**
+`intersect(*args, **kwargs)`
 
 Find intersection of axis and geometric object or shape
 
-**
-is_coaxial(*other: Axis*, *angular_tolerance: float = 1e-05*, *linear_tolerance: float = 1e-05*) → bool**
+`is_coaxial(other: Axis, angular_tolerance: float = 1e-05, linear_tolerance: float = 1e-05) -> bool`
 
 are axes coaxial
 
@@ -111,14 +92,11 @@ the distance between self and other is lower or equal to linear_tolerance.
 
 **Parameters:**
 
-- 
-**other** (*Axis*) – axis to compare to
+- **other** (*Axis*) – axis to compare to
 
-- 
-**angular_tolerance** (*float**, **optional*) – max angular deviation. Defaults to 1e-5.
+- **angular_tolerance** (*float, optional*) – max angular deviation. Defaults to 1e-5.
 
-- 
-**linear_tolerance** (*float**, **optional*) – max linear deviation. Defaults to 1e-5.
+- **linear_tolerance** (*float, optional*) – max linear deviation. Defaults to 1e-5.
 
 **Returns:**
 
@@ -128,8 +106,7 @@ axes are coaxial
 
 *bool*
 
-**
-is_normal(*other: Axis*, *angular_tolerance: float = 1e-05*) → bool**
+`is_normal(other: Axis, angular_tolerance: float = 1e-05) -> bool`
 
 are axes normal
 
@@ -138,11 +115,9 @@ if the angle between the two axes is equal to 90° within the angular_tolerance.
 
 **Parameters:**
 
-- 
-**other** (*Axis*) – axis to compare to
+- **other** (*Axis*) – axis to compare to
 
-- 
-**angular_tolerance** (*float**, **optional*) – max angular deviation. Defaults to 1e-5.
+- **angular_tolerance** (*float, optional*) – max angular deviation. Defaults to 1e-5.
 
 **Returns:**
 
@@ -152,8 +127,7 @@ axes are normal
 
 *bool*
 
-**
-is_opposite(*other: Axis*, *angular_tolerance: float = 1e-05*) → bool**
+`is_opposite(other: Axis, angular_tolerance: float = 1e-05) -> bool`
 
 are axes opposite
 
@@ -163,11 +137,9 @@ to 180° within the angular_tolerance.
 
 **Parameters:**
 
-- 
-**other** (*Axis*) – axis to compare to
+- **other** (*Axis*) – axis to compare to
 
-- 
-**angular_tolerance** (*float**, **optional*) – max angular deviation. Defaults to 1e-5.
+- **angular_tolerance** (*float, optional*) – max angular deviation. Defaults to 1e-5.
 
 **Returns:**
 
@@ -177,8 +149,7 @@ axes are opposite
 
 *bool*
 
-**
-is_parallel(*other: Axis*, *angular_tolerance: float = 1e-05*) → bool**
+`is_parallel(other: Axis, angular_tolerance: float = 1e-05) -> bool`
 
 are axes parallel
 
@@ -188,11 +159,9 @@ equal to 0° or 180° within the angular_tolerance.
 
 **Parameters:**
 
-- 
-**other** (*Axis*) – axis to compare to
+- **other** (*Axis*) – axis to compare to
 
-- 
-**angular_tolerance** (*float**, **optional*) – max angular deviation. Defaults to 1e-5.
+- **angular_tolerance** (*float, optional*) – max angular deviation. Defaults to 1e-5.
 
 **Returns:**
 
@@ -202,8 +171,7 @@ axes are parallel
 
 *bool*
 
-**
-is_skew(*other: Axis*, *tolerance: float = 1e-05*) → bool**
+`is_skew(other: Axis, tolerance: float = 1e-05) -> bool`
 
 are axes skew
 
@@ -213,12 +181,10 @@ and never intersect.
 
 Mathematically, this means:
 
-- 
-The axes are **not parallel** (the cross product of their direction vectors
+- The axes are **not parallel** (the cross product of their direction vectors
 is nonzero).
 
-- 
-The axes are **not coplanar** (the vector between their positions is not
+- The axes are **not coplanar** (the vector between their positions is not
 aligned with the plane spanned by their directions).
 
 If either condition is false (i.e., the axes are parallel or coplanar), they are
@@ -226,11 +192,9 @@ not skew.
 
 **Parameters:**
 
-- 
-**other** (*Axis*) – axis to compare to
+- **other** (*Axis*) – axis to compare to
 
-- 
-**tolerance** (*float**, **optional*) – max deviation. Defaults to 1e-5.
+- **tolerance** (*float, optional*) – max deviation. Defaults to 1e-5.
 
 **Returns:**
 
@@ -240,77 +204,60 @@ axes are skew
 
 *bool*
 
-**
-located(*new_location: Location*)**
+`located(new_location: Location)`
 
 relocates self to a new location possibly changing position and direction
 
-**
-*property *location*: Location***
+`property location: Location`
 
 Return self as Location
 
-**
-*property *position*: Vector***
+`property position: Vector`
 
 The position or origin of the Axis
 
-**
-reverse() → Axis**
+`reverse() -> Axis`
 
 Return a copy of self with the direction reversed
 
-**
-to_plane() → Plane**
+`to_plane() -> Plane`
 
 Return self as Plane
 
-**
-*class *BoundBox(*bounding_box: Bnd_Box*)**
+`class BoundBox(*args, **kwargs)`
 
 A BoundingBox for a Shape
 
-**
-add(*obj: tuple[float, float, float] | Vector | BoundBox*, *tol: float | None = None*) → BoundBox**
+`add(obj: tuple[float, float, float] | Vector | BoundBox, tol: float | None = None) -> BoundBox`
 
 Returns a modified (expanded) bounding box
 
 **obj can be one of several things:**
 
-- 
-a 3-tuple corresponding to x,y, and z amounts to add
+- a 3-tuple corresponding to x,y, and z amounts to add
 
-- 
-a vector, containing the x,y,z values to add
+- a vector, containing the x,y,z values to add
 
-- 
-another bounding box, where a new box will be created that
+- another bounding box, where a new box will be created that
 encloses both.
 
 This bounding box is not changed.
 
 **Parameters:**
 
-- 
-**obj** – tuple[float, float, float] | Vector | BoundBox]:
+- **obj** – tuple[float, float, float] | Vector | BoundBox]:
 
-- 
-**tol** – float: (Default value = None)
+- **tol** – float: (Default value = None)
 
-Returns:
-
-**
-center() → Vector**
+`center() -> Vector`
 
 Return center of the bounding box
 
-**
-*property *diagonal*: float***
+`property diagonal: float`
 
 body diagonal length (i.e. object maximum size)
 
-**
-*static *find_outside_box_2d(*bb1: BoundBox*, *bb2: BoundBox*) → BoundBox | None**
+`static find_outside_box_2d(bb1: BoundBox, bb2: BoundBox) -> BoundBox | None`
 
 Compares bounding boxes
 
@@ -323,81 +270,59 @@ the built-in implementation i do not understand.
 
 **Parameters:**
 
-- 
-**bb1** – BoundBox:
+- **bb1** (*BoundBox*)
 
-- 
-**bb2** – BoundBox:
+- **bb2** (*BoundBox*)
 
-Returns:
-
-**
-*classmethod *from_topo_ds(*shape: TopoDS_Shape*, *tolerance: float | None = None*, *optimal: bool = True*) → BoundBox**
+`classmethod from_topo_ds(shape: TopoDS_Shape, tolerance: float | None = None, optimal: bool = True) -> BoundBox`
 
 Constructs a bounding box from a TopoDS_Shape
 
 **Parameters:**
 
-- 
-**shape** – TopoDS_Shape:
+- **shape** (*TopoDS_Shape*)
 
-- 
-**tolerance** – float: (Default value = None)
+- **tolerance** – float: (Default value = None)
 
-- 
-**optimal** – bool: This algorithm builds precise bounding box (Default value = True)
+- **optimal** – bool: This algorithm builds precise bounding box (Default value = True)
 
-Returns:
-
-**
-is_inside(*second_box: BoundBox*) → bool**
+`is_inside(second_box: BoundBox) -> bool`
 
 Is the provided bounding box inside this one?
 
 **Parameters:**
 
-**b2** – BoundBox:
+- **b2** (*BoundBox*)
 
-Returns:
-
-**
-*property *measure*: float***
+`property measure: float`
 
 Return the overall Lebesgue measure of the bounding box.
 
-- 
-For 1D objects: length
+- For 1D objects: length
 
-- 
-For 2D objects: area
+- For 2D objects: area
 
-- 
-For 3D objects: volume
+- For 3D objects: volume
 
-**
-overlaps(*other: BoundBox*, *tolerance: float = 1e-06*) → bool**
+`overlaps(other: BoundBox, tolerance: float = 1e-06) -> bool`
 
 Check if this bounding box overlaps with another.
 
 **Parameters:**
 
-- 
-**other** – BoundBox to check overlap with
+- **other** – BoundBox to check overlap with
 
-- 
-**tolerance** – Distance tolerance for overlap detection
+- **tolerance** – Distance tolerance for overlap detection
 
 **Returns:**
 
 True if bounding boxes overlap (share any volume), False otherwise
 
-**
-to_align_offset(*align: Align | None | tuple[Align | None, Align | None] | tuple[Align | None, Align | None, Align | None]*) → Vector**
+`to_align_offset(align: Align2D | Align3D) -> Vector`
 
 Amount to move object to achieve the desired alignment
 
-**
-*class *Color(**args*, ***kwargs*)**
+`class Color(*args, **kwargs)`
 
 Color object based on OCCT Quantity_ColorRGBA.
 
@@ -405,18 +330,15 @@ Color object based on OCCT Quantity_ColorRGBA.
 
 **wrapped** (*Quantity_ColorRGBA*) – the OCP color object
 
-**
-__copy__() → Color**
+`__copy__() -> Color`
 
 Return copy of self
 
-**
-__deepcopy__(*_memo*) → Color**
+`__deepcopy__(_memo) -> Color`
 
 Return deepcopy of self
 
-**
-*classmethod *categorical_set(*color_count: int*, *starting_hue: str | tuple[str, float | int] | tuple[float | int, float | int, float | int] | tuple[float | int, float | int, float | int, float | int] | int | tuple[int, int] | Color | Quantity_ColorRGBA | float = 0.0*, *alpha: float | Iterable[float] = 1.0*) → list[Color]**
+`classmethod categorical_set(color_count: int, starting_hue: ColorLike | float = 0.0, alpha: float | Iterable[float] = 1.0) -> list[Color]`
 
 Generate a palette of evenly spaced colors.
 
@@ -434,15 +356,12 @@ across hues while avoiding overly vivid or dark colors.
 
 **Parameters:**
 
-- 
-**color_count** (*int*) – Number of colors to generate.
+- **color_count** (*int*) – Number of colors to generate.
 
-- 
-**starting_hue** (*ColorLike** | **float*) – Either a Color-like object or
+- **starting_hue** (*ColorLike | float*) – Either a Color-like object or
 a hue value in the range [0.0, 1.0] that defines the starting color.
 
-- 
-**alpha** (*float** | **Iterable**[**float**]*) – Alpha value(s) for the colors. Can be a
+- **alpha** (*float | Iterable[float]*) – Alpha value(s) for the colors. Can be a
 single float or an iterable of length color_count.
 
 **Returns:**
@@ -457,8 +376,7 @@ List of generated colors.
 
 **ValueError** – If starting_hue is out of range or alpha length mismatch.
 
-**
-*class *Location(**args*, ***kwargs*)**
+`class Location(*args: Any, **kwargs: Any)`
 
 Location in 3D space. Depending on usage can be absolute or relative.
 
@@ -470,51 +388,41 @@ in build123d.
 
 **wrapped** (*TopLoc_Location*) – the OCP location object
 
-**
-__copy__() → Location**
+`__copy__() -> Location`
 
 Lib/copy.py shallow copy
 
-**
-__deepcopy__(*_memo*) → Location**
+`__deepcopy__(_memo) -> Location`
 
 Lib/copy.py deep copy
 
-**
-__eq__(*other: object*) → bool**
+`__eq__(other: object) -> bool`
 
 Compare Locations
 
-**
-__mul__(*other: Shape | Location | Iterable[Location]*) → Shape | Location | list[Location]**
+`__mul__(other: Location | Iterable[Location]) -> Location | list[Location]`
 
 Combine locations
 
-**
-__neg__() → Location**
+`__neg__() -> Location`
 
 Flip the orientation without changing the position operator -
 
-**
-__pow__(*exponent: int*) → Location**
+`__pow__(exponent: int) -> Location`
 
-**
-center() → Vector**
+`center() -> Vector`
 
 Return center of the location - useful for sorting
 
-**
-intersect(**args*, ***kwargs*)**
+`intersect(*args, **kwargs)`
 
 Find intersection of location and geometric object or shape
 
-**
-inverse() → Location**
+`inverse() -> Location`
 
 Inverted location
 
-**
-mirror(*mirror_plane: Plane*) → Location**
+`mirror(mirror_plane: Plane) -> Location`
 
 Return a new Location mirrored across the given plane.
 
@@ -523,8 +431,7 @@ across the specified mirror_plane using affine vector mathematics.
 
 **Due to the mathematical properties of reflection:**
 
-- 
-The true mirror of a right-handed coordinate system is a *left-handed* one.
+- The true mirror of a right-handed coordinate system is a *left-handed* one.
 
 However, build123d requires all coordinate systems to be right-handed.
 Therefore, this implementation:
@@ -546,8 +453,7 @@ A new mirrored Location that preserves right-handedness.
 
 *Location*
 
-**
-*property *orientation*: Vector***
+`property orientation: Vector`
 
 Extract orientation/rotation component of self
 
@@ -559,8 +465,7 @@ orientation part of Location
 
 *Vector*
 
-**
-*property *position*: Vector***
+`property position: Vector`
 
 Extract Position component of self
 
@@ -572,33 +477,27 @@ Position part of Location
 
 *Vector*
 
-**
-to_axis() → Axis**
+`to_axis() -> Axis`
 
 Convert the location into an Axis
 
-**
-to_tuple() → tuple[tuple[float, float, float], tuple[float, float, float]]**
+`to_tuple() -> tuple[tuple[float, float, float], tuple[float, float, float]]`
 
 Convert the location to a translation, rotation tuple.
 
-**
-*property *x_axis*: Axis***
+`property x_axis: Axis`
 
 Default X axis when used as a plane
 
-**
-*property *y_axis*: Axis***
+`property y_axis: Axis`
 
 Default Y axis when used as a plane
 
-**
-*property *z_axis*: Axis***
+`property z_axis: Axis`
 
 Default Z axis when used as a plane
 
-**
-*class *LocationEncoder(***, *skipkeys=False*, *ensure_ascii=True*, *check_circular=True*, *allow_nan=True*, *sort_keys=False*, *indent=None*, *separators=None*, *default=None*)**
+`class LocationEncoder(*, skipkeys=False, ensure_ascii=True, check_circular=True, allow_nan=True, sort_keys=False, indent=None, separators=None, default=None)`
 
 Custom JSON Encoder for Location values
 
@@ -620,12 +519,10 @@ with open("sample.json", "w") as outfile:
 with open("sample.json", "r") as infile:
  copy_data_dict = json.load(infile, object_hook=LocationEncoder.location_hook)
 
-**
-default(*o: Location*) → dict**
+`default(o: Location) -> dict`
 Return a serializable object
 
-**
-*static *location_hook(*obj*) → dict**
+`static location_hook(obj) -> dict`
 
 Convert Locations loaded from json to Location objects
 
@@ -633,18 +530,15 @@ Example
 
 read_json = json.load(infile, object_hook=LocationEncoder.location_hook)
 
-**
-*class *Pos(**args*, ***kwargs*)**
+`class Pos(*args, **kwargs)`
 
 A position only sub-class of Location
 
-**
-Rot**
+`Rot(*args, **kwargs)`
 
 alias of `Rotation`
 
-**
-*class *Matrix(**args*, ***kwargs*)**
+`class Matrix(*args, **kwargs)`
 
 A 3d , 4x4 transformation matrix.
 
@@ -655,9 +549,11 @@ values.
 
 If given a nested list, it is expected to be of the form:
 
-**[[m11, m12, m13, m14],**
-[m21, m22, m23, m24],
-[m31, m32, m33, m34]]
+```
+[[m11, m12, m13, m14],
+ [m21, m22, m23, m24],
+ [m31, m32, m33, m34]]
+```
 
 A fourth row may be given, but it is expected to be: [0.0, 0.0, 0.0, 1.0]
 since this is a transform matrix.
@@ -666,38 +562,31 @@ since this is a transform matrix.
 
 **wrapped** (*gp_GTrsf*) – the OCP transformation function
 
-**
-__copy__() → Matrix**
+`__copy__() -> Matrix`
 
 Return copy of self
 
-**
-__deepcopy__(*_memo*) → Matrix**
+`__deepcopy__(_memo) -> Matrix`
 
 Return deepcopy of self
 
-**
-inverse() → Matrix**
+`inverse() -> Matrix`
 
 Invert Matrix
 
-**
-multiply(*other*)**
+`multiply(other)`
 
 Matrix multiplication
 
-**
-rotate(*axis: Axis*, *angle: float*)**
+`rotate(axis: Axis, angle: float)`
 
 General rotate about axis
 
-**
-transposed_list() → Sequence[float]**
+`transposed_list() -> Sequence[float]`
 
 Needed by the cqparts gltf exporter
 
-**
-*class *Plane(**args*, ***kwargs*)**
+`class Plane(*args: Any, **kwargs: Any)`
 
 A plane is positioned in space with a coordinate system such that the plane is defined by
 the origin, x_dir (X direction), y_dir (Y direction), and z_dir (Z direction) of this coordinate
@@ -823,69 +712,50 @@ isometric
 
 **Parameters:**
 
-- 
-**gp_pln** (*gp_Pln*) – an OCCT plane object
+- **gp_pln** (*gp_Pln*) – an OCCT plane object
 
-- 
-**origin** (*tuple**[**float**, **float**, **float**] **| **Vector*) – the origin in global coordinates
+- **origin** (*tuple[float, float, float] | Vector*) – the origin in global coordinates
 
-- 
-**x_dir** (*tuple**[**float**, **float**, **float**] **| **Vector** | **None*) – an optional vector
+- **x_dir** (*tuple[float, float, float] | Vector | None*) – an optional vector
 representing the X Direction. Defaults to None.
 
-- 
-**y_dir** (*tuple**[**float**, **float**, **float**] **| **Vector** | **None*) – optional Y direction.
+- **y_dir** (*tuple[float, float, float] | Vector | None*) – optional Y direction.
 Mutually exclusive with z_dir. Requires x_dir.
 
-- 
-**z_dir** (*tuple**[**float**, **float**, **float**] **| **Vector** | **None*) – the normal direction
+- **z_dir** (*tuple[float, float, float] | Vector | None*) – the normal direction
 for the plane. Defaults to (0, 0, 1).
 
 **Variables:**
 
-- 
-**origin** (*Vector*) – global position of local (0,0,0) point
+- **origin** (*Vector*) – global position of local (0,0,0) point
 
-- 
-**x_dir** (*Vector*) – x direction
+- **x_dir** (*Vector*) – x direction
 
-- 
-**y_dir** (*Vector*) – y direction
+- **y_dir** (*Vector*) – y direction
 
-- 
-**z_dir** (*Vector*) – z direction
+- **z_dir** (*Vector*) – z direction
 
-- 
-**local_coord_system** (*gp_Ax3*) – OCP coordinate system
+- **local_coord_system** (*gp_Ax3*) – OCP coordinate system
 
-- 
-**forward_transform** (*Matrix*) – forward location transformation matrix
+- **forward_transform** (*Matrix*) – forward location transformation matrix
 
-- 
-**reverse_transform** (*Matrix*) – reverse location transformation matrix
+- **reverse_transform** (*Matrix*) – reverse location transformation matrix
 
-- 
-**wrapped** (*gp_Pln*) – the OCP plane object
+- **wrapped** (*gp_Pln*) – the OCP plane object
 
 **Raises:**
 
-- 
-**ValueError** – z_dir must be non null
+- **ValueError** – z_dir must be non null
 
-- 
-**ValueError** – y_dir must be non null
+- **ValueError** – y_dir must be non null
 
-- 
-**ValueError** – x_dir must be non null
+- **ValueError** – x_dir must be non null
 
-- 
-**ValueError** – the specified x_dir is not orthogonal to the provided normal
+- **ValueError** – the specified x_dir is not orthogonal to the provided normal
 
-- 
-**ValueError** – x_dir and y_dir must not be parallel
+- **ValueError** – x_dir and y_dir must not be parallel
 
-- 
-**ValueError** – the specified x_dir is not orthogonal to the provided normal
+- **ValueError** – the specified x_dir is not orthogonal to the provided normal
 
 **Returns:**
 
@@ -895,41 +765,33 @@ A plane
 
 *Plane*
 
-**
-__copy__() → Plane**
+`__copy__() -> Plane`
 
 Return copy of self
 
-**
-__deepcopy__(*_memo*) → Plane**
+`__deepcopy__(_memo) -> Plane`
 
 Return deepcopy of self
 
-**
-__eq__(*other: object*)**
+`__eq__(other: object)`
 
 Are planes equal operator ==
 
-**
-__mul__(*other: Location | Shape*) → Plane | list[Plane] | Shape**
+`__mul__(other: Location | Plane | Iterable[Location | Plane]) -> Location | list[Location]`
 
-**
-__neg__() → Plane**
+`__neg__() -> Plane`
 
 Reverse z direction of plane operator -
 
-**
-contains(*obj: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | Axis*, *tolerance: float = 1e-06*) → bool**
+`contains(obj: VectorLike | Axis, tolerance: float = 1e-06) -> bool`
 
 Is this point or Axis fully contained in this plane?
 
 **Parameters:**
 
-- 
-**obj** (*VectorLike** | **Axis*) – point or Axis to evaluate
+- **obj** (*VectorLike | Axis*) – point or Axis to evaluate
 
-- 
-**tolerance** (*float**, **optional*) – comparison tolerance. Defaults to TOLERANCE.
+- **tolerance** (*float, optional*) – comparison tolerance. Defaults to TOLERANCE.
 
 **Returns:**
 
@@ -939,45 +801,36 @@ self contains point or Axis
 
 *bool*
 
-**
-from_local_coords(*obj: tuple | Vector | Any | BoundBox*)**
+`from_local_coords(obj: tuple | Vector | Any | BoundBox)`
 
 Reposition the object relative from this plane
 
 **Parameters:**
 
-- 
-**obj** – VectorLike | Shape | BoundBox an object to reposition. Note that
-
-- 
-**classes.** (*type Any refers to all topological*)
+- **obj** (*VectorLike | Shape | BoundBox*) – an object to reposition. Note that
+type Any refers to all topological classes.
 
 **Returns:**
 
 an object of the same type, but repositioned to world coordinates
 
-**
-*static *get_topods_face_normal(*face: TopoDS_Face*) → Vector**
+`static get_topods_face_normal(face: TopoDS_Face) -> Vector`
 
 Find the normal at the center of a TopoDS_Face
 
-**
-intersect(**args*, ***kwargs*)**
+`intersect(*args, **kwargs)`
 
 Find intersection of plane and geometric object or shape
 
-**
-*property *location*: Location***
+`property location: Location`
 
 Return Location representing the origin and z direction
 
-**
-location_between(*other: Plane*) → Location**
+`location_between(other: Plane) -> Location`
 
 Return a location representing the translation from self to other
 
-**
-move(*loc: Location*) → Plane**
+`move(loc: Location | Plane) -> Plane`
 
 Change the position & orientation of self by applying a relative location
 
@@ -993,23 +846,19 @@ relocated plane
 
 *Plane*
 
-**
-offset(*amount: float*) → Plane**
+`offset(amount: float) -> Plane`
 
 Move the Plane by amount in the direction of z_dir
 
-**
-*property *origin*: Vector***
+`property origin: Vector`
 
 Get the Plane origin
 
-**
-reverse() → Plane**
+`reverse() -> Plane`
 
 Reverse z direction of plane
 
-**
-rotated(*rotation: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 0)*, *ordering: Extrinsic | Intrinsic | None = None*) → Plane**
+`rotated(rotation: VectorLike = (0, 0, 0), ordering: Extrinsic | Intrinsic | None = None) -> Plane`
 
 Returns a copy of this plane, rotated about the specified axes
 
@@ -1021,12 +870,10 @@ specify ordering. e.g. Intrinsic.ZYX changes rotation to
 
 **Parameters:**
 
-- 
-**rotation** (*VectorLike**, **optional*) – (x angle, y angle, z angle).
+- **rotation** (*VectorLike, optional*) – (x angle, y angle, z angle).
 Defaults to (0, 0, 0)
 
-- 
-**ordering** (*Intrinsic** | **Extrinsic**, **optional*) – order of rotations in
+- **ordering** (*Intrinsic | Extrinsic, optional*) – order of rotations in
 Intrinsic or Extrinsic rotation mode. Defaults to Intrinsic.XYZ
 
 **Returns:**
@@ -1037,8 +884,7 @@ a copy of this plane rotated as requested.
 
 *Plane*
 
-**
-shift_origin(*locator: Axis | VectorLike | Vertex*) → Plane**
+`shift_origin(locator: Axis | VectorLike | Vertex) -> Plane`
 
 shift plane origin
 
@@ -1047,19 +893,16 @@ of the axis or at the given Vertex. The plane’s x_dir and z_dir are unchanged.
 
 **Parameters:**
 
-**locator** (*Axis** | **VectorLike** | **Vertex*) – Either Axis that intersects the new
+**locator** (*Axis | VectorLike | Vertex*) – Either Axis that intersects the new
 plane origin or Vertex within Plane.
 
 **Raises:**
 
-- 
-**ValueError** – Vertex isn’t within plane
+- **ValueError** – Vertex isn’t within plane
 
-- 
-**ValueError** – Point isn’t within plane
+- **ValueError** – Point isn’t within plane
 
-- 
-**ValueError** – Axis doesn’t intersect plane
+- **ValueError** – Axis doesn’t intersect plane
 
 **Returns:**
 
@@ -1069,65 +912,50 @@ plane with new origin
 
 *Plane*
 
-**
-to_gp_ax2() → gp_Ax2**
+`to_gp_ax2() -> gp_Ax2`
 
 Return gp_Ax2 version of the plane
 
-**
-to_local_coords(*obj: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | Any | BoundBox*)**
+`to_local_coords(obj: VectorLike | Any | BoundBox)`
 
 Reposition the object relative to this plane
 
 **Parameters:**
 
-- 
-**obj** – VectorLike | Shape | BoundBox an object to reposition. Note that
-
-- 
-**classes.** (*type Any refers to all topological*)
+- **obj** (*VectorLike | Shape | BoundBox*) – an object to reposition. Note that
+type Any refers to all topological classes.
 
 **Returns:**
 
 an object of the same type, but repositioned to local coordinates
 
-**
-*class *Rotation(**args*, ***kwargs*)**
+`class Rotation(*args, **kwargs)`
 
 Subclass of Location used only for object rotation
 
 **Variables:**
 
-- 
-**X** (*float*) – rotation in degrees about X axis
+- **X** (*float*) – rotation in degrees about X axis
 
-- 
-**Y** (*float*) – rotation in degrees about Y axis
+- **Y** (*float*) – rotation in degrees about Y axis
 
-- 
-**Z** (*float*) – rotation in degrees about Z axis
+- **Z** (*float*) – rotation in degrees about Z axis
 
-- 
-**enums****,** (*optionally specify rotation ordering with Intrinsic** or **Extrinsic*) – defaults to Intrinsic.XYZ
+- **ordering** (*Intrinsic | Extrinsic, optional*) – rotation ordering; defaults to Intrinsic.XYZ
 
-**
-*class *Vector(**args*, ***kwargs*)**
+`class Vector(*args, **kwargs)`
 
 Create a 3-dimensional vector
 
 **Parameters:**
 
-- 
-**x** (*float*) – x component
+- **x** (*float*) – x component
 
-- 
-**y** (*float*) – y component
+- **y** (*float*) – y component
 
-- 
-**z** (*float*) – z component
+- **z** (*float*) – z component
 
-- 
-**vec** (*Vector** | **Sequence**(**float**) **| **gp_Vec** | **gp_Pnt** | **gp_Dir** | **gp_XYZ*) – vector
+- **vec** (*Vector | Sequence(float) | gp_Vec | gp_Pnt | gp_Dir | gp_XYZ*) – vector
 representations
 
 Note that if no z value is provided it’s assumed to be zero. If no values are provided
@@ -1137,78 +965,63 @@ the returned Vector has the value of 0, 0, 0.
 
 **wrapped** (*gp_Vec*) – the OCP vector object
 
-**
-*property *X*: float***
+`property X: float`
 
 Get x value
 
-**
-*property *Y*: float***
+`property Y: float`
 
 Get y value
 
-**
-*property *Z*: float***
+`property Z: float`
 
 Get z value
 
-**
-__abs__() → float**
+`__abs__() -> float`
 
 Vector length operator abs()
 
-**
-__add__(*vec: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Vector**
+`__add__(vec: VectorLike) -> Vector`
 
 Mathematical addition operator +
 
-**
-__copy__() → Vector**
+`__copy__() -> Vector`
 
 Return copy of self
 
-**
-__deepcopy__(*_memo*) → Vector**
+`__deepcopy__(_memo) -> Vector`
 
 Return deepcopy of self
 
-**
-__eq__(*other: object*) → bool**
+`__eq__(other: object) -> bool`
 
 Vectors equal operator ==
 
-**
-__mul__(*scale: float*) → Vector**
+`__mul__(scale: float) -> Vector`
 
-Mathematical multiply operator *
+Mathematical multiply operator `*`
 
-**
-__neg__() → Vector**
+`__neg__() -> Vector`
 
 Flip direction of vector operator -
 
-**
-__rmul__(*scale: float*) → Vector**
+`__rmul__(scale: float) -> Vector`
 
-Mathematical multiply operator *
+Mathematical multiply operator `*`
 
-**
-__sub__(*vec: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Vector**
+`__sub__(vec: VectorLike) -> Vector`
 
 Mathematical subtraction operator -
 
-**
-__truediv__(*denom: float*) → Vector**
+`__truediv__(denom: float) -> Vector`
 
 Mathematical division operator /
 
-**
-add(*vec: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Vector**
+`add(vec: VectorLike)`
 
 Mathematical addition function
 
-**
-center() → Vector**
+`center() -> Vector`
 
 **Returns:**
 
@@ -1217,28 +1030,23 @@ Provided so that vectors, vertices, and other shapes all support a
 common interface, when center() is requested for all objects on the
 stack.
 
-**
-cross(*vec: Vector*) → Vector**
+`cross(vec: Vector) -> Vector`
 
 Mathematical cross function
 
-**
-distance_to_plane(*plane: Plane*) → float**
+`distance_to_plane(plane: Plane) -> float`
 
 Minimum unsigned distance between vector and plane
 
-**
-dot(*vec: Vector*) → float**
+`dot(vec: Vector) -> float`
 
 Mathematical dot function
 
-**
-get_angle(*vec: Vector*) → float**
+`get_angle(vec: Vector) -> float`
 
 Unsigned angle between vectors
 
-**
-get_signed_angle(*vec: Vector*, *normal: Vector | None = None*) → float**
+`get_signed_angle(vec: Vector, normal: Vector | None = None) -> float`
 
 Signed Angle Between Vectors
 
@@ -1247,11 +1055,9 @@ based on this math: angle = atan2((Va × Vb) ⋅ Vn, Va ⋅ Vb)
 
 **Parameters:**
 
-- 
-**v** (*Vector*) – Second Vector
+- **v** (*Vector*) – Second Vector
 
-- 
-**normal** (*Vector**, **optional*) – normal direction. Defaults to None.
+- **normal** (*Vector, optional*) – normal direction. Defaults to None.
 
 **Returns:**
 
@@ -1261,28 +1067,23 @@ Angle between vectors
 
 *float*
 
-**
-intersect(**args*, ***kwargs*)**
+`intersect(*args, **kwargs)`
 
 Find intersection of vector and geometric object or shape
 
-**
-*property *length*: float***
+`property length: float`
 
 Vector length
 
-**
-multiply(*scale: float*) → Vector**
+`multiply(scale: float) -> Vector`
 
 Mathematical multiply function
 
-**
-normalized() → Vector**
+`normalized() -> Vector`
 
 Scale to length of 1
 
-**
-project_to_line(*line: Vector*) → Vector**
+`project_to_line(line: Vector) -> Vector`
 
 Returns a new vector equal to the projection of this Vector onto the line
 represented by Vector 
@@ -1300,8 +1101,7 @@ Returns the projected vector.
 
 *Vector*
 
-**
-project_to_plane(*plane: Plane*) → Vector**
+`project_to_plane(plane: Plane) -> Vector`
 
 Vector is projected onto the plane provided as input.
 
@@ -1313,15 +1113,11 @@ Vector is projected onto the plane provided as input.
 
 plane: Plane:
 
-Returns:
-
-**
-reverse() → Vector**
+`reverse() -> Vector`
 
 Return a vector with the same magnitude but pointing in the opposite direction
 
-**
-rotate(*axis: Axis*, *angle: float*) → Vector**
+`rotate(axis: Axis, angle: float) -> Vector`
 
 Rotate about axis
 
@@ -1331,8 +1127,7 @@ Rotate about the given Axis by an angle in degrees
 
 **axis** (*Axis*) – Axis of rotation
 
-- 
-**angle** (*float*) – angle in degrees
+- **angle** (*float*) – angle in degrees
 
 **Returns:**
 
@@ -1342,43 +1137,35 @@ rotated vector
 
 *Vector*
 
-**
-signed_distance_from_plane(*plane: Plane*) → float**
+`signed_distance_from_plane(plane: Plane) -> float`
 
 Signed distance from plane to point vector.
 
-**
-sub(*vec: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Vector**
+`sub(vec: VectorLike)`
 
 Mathematical subtraction function
 
-**
-to_dir() → gp_Dir**
+`to_dir() -> gp_Dir`
 
 Convert to OCCT gp_Dir object
 
-**
-to_pnt() → gp_Pnt**
+`to_pnt() -> gp_Pnt`
 
 Convert to OCCT gp_Pnt object
 
-**
-to_tuple() → tuple[float, float, float]**
+`to_tuple() -> tuple[float, float, float]`
 
 Return tuple equivalent
 
-**
-transform(*affine_transform: Matrix*, *is_direction: bool = False*) → Vector**
+`transform(affine_transform: Matrix, is_direction: bool = False) -> Vector`
 
 Apply affine transformation
 
 **Parameters:**
 
-- 
-**affine_transform** (*Matrix*) – affine transformation matrix
+- **affine_transform** (*Matrix*) – affine transformation matrix
 
-- 
-**is_direction** (*bool**, **optional*) – Should self be transformed as a vector or direction?
+- **is_direction** (*bool, optional*) – Should self be transformed as a vector or direction?
 Defaults to False (vector)
 
 **Returns:**
@@ -1389,12 +1176,11 @@ transformed vector
 
 *Vector*
 
-**
-*property *wrapped*: gp_Vec***
+`property wrapped: gp_Vec`
 
 OCCT object
 
-## Topological Objects
+## Topological Objects
 
 The topological object classes defined by build123d are defined below.
 
@@ -1404,8 +1190,7 @@ supplementary functionality specific to 1D
 ~topology.Solid) objects respectively.
 Note that a `Compound` may be contain only 1D, 2D (`Face`) or 3D objects.
 
-**
-*class *Compound(*obj: TopoDS_Compound | Iterable[Shape] | None = None*, *label: str = ''*, *color: Color | None = None*, *material: str = ''*, *joints: dict[str, Joint] | None = None*, *parent: Compound | None = None*, *children: Sequence[Shape] | None = None*)[source]**
+`class Compound(obj: TopoDS_Compound | Iterable[Shape] | None = None, label: str = '', color: Color | None = None, material: str = '', joints: dict[str, Joint] | None = None, parent: Compound | None = None, children: Sequence[Shape] | None = None)`
 
 A Compound in build123d is a topological entity representing a collection of
 geometric shapes grouped together within a single structure. It serves as a
@@ -1416,13 +1201,11 @@ composition and structure of intricate 3D models in computer-aided design
 (CAD) applications, allowing engineers and designers to work with assemblies
 of shapes as unified entities for efficient modeling and analysis.
 
-**
-*classmethod *cast(*obj: TopoDS_Shape*) → Vertex | Edge | Wire | Face | Shell | Solid | Compound[source]**
+`classmethod cast(obj: TopoDS_Shape) -> Vertex | Edge | Wire | Face | Shell | Solid | Compound`
 
 Returns the right type of wrapper, given a OCCT object
 
-**
-center(*center_of: ~build123d.build_enums.CenterOf = *) → Vector[source]**
+`center(center_of: CenterOf = <CenterOf.MASS>) -> Vector`
 
 Return center of object
 
@@ -1430,15 +1213,13 @@ Find center of object
 
 **Parameters:**
 
-**center_of** (*CenterOf**, **optional*) – center option. Defaults to CenterOf.MASS.
+**center_of** (*CenterOf, optional*) – center option. Defaults to CenterOf.MASS.
 
 **Raises:**
 
-- 
-**ValueError** – Center of GEOMETRY is not supported for this object
+- **ValueError** – Center of GEOMETRY is not supported for this object
 
-- 
-**NotImplementedError** – Unable to calculate center of mass of this object
+- **NotImplementedError** – Unable to calculate center of mass of this object
 
 **Returns:**
 
@@ -1448,18 +1229,15 @@ center
 
 *Vector*
 
-**
-compound() → Compound | None[source]**
+`compound() -> Compound`
 
 Return the Compound
 
-**
-compounds() → ShapeList[Compound][source]**
+`compounds() -> ShapeList[Compound]`
 
 compounds - all the compounds in this Shape
 
-**
-do_children_intersect(*include_parent: bool = False*, *tolerance: float = 1e-05*) → tuple[bool, tuple[Shape | None, Shape | None], float][source]**
+`do_children_intersect(include_parent: bool = False, tolerance: float = 1e-05) -> tuple[bool, tuple[Shape | None, Shape | None], float]`
 
 Do Children Intersect
 
@@ -1469,11 +1247,9 @@ a common volume.
 
 **Parameters:**
 
-- 
-**include_parent** (*bool**, **optional*) – check parent for intersections. Defaults to False.
+- **include_parent** (*bool, optional*) – check parent for intersections. Defaults to False.
 
-- 
-**tolerance** (*float**, **optional*) – maximum allowable volume difference. Defaults to 1e-5.
+- **tolerance** (*float, optional*) – maximum allowable volume difference. Defaults to 1e-5.
 
 **Returns:**
 
@@ -1483,8 +1259,7 @@ do the object intersect, intersecting objects, volume of intersection
 
 *tuple*[*bool*, *tuple*[*Shape*, *Shape*], *float*]
 
-**
-*classmethod *extrude(*obj: Shell*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Compound[source]**
+`classmethod extrude(obj: Shell, direction: VectorLike) -> Compound`
 
 Extrude a Shell into a Compound.
 
@@ -1494,11 +1269,9 @@ Extrude a Shell into a Compound.
 
 **Raises:**
 
-- 
-**ValueError** – Unsupported class
+- **ValueError** – Unsupported class
 
-- 
-**RuntimeError** – Generated invalid result
+- **RuntimeError** – Generated invalid result
 
 **Returns:**
 
@@ -1508,15 +1281,14 @@ extruded shape
 
 *Edge*
 
-**
-get_type(*obj_type: type[Vertex] | type[Edge] | type[Face] | type[Shell] | type[Solid] | type[Wire]*) → list[Vertex | Edge | Face | Shell | Solid | Wire][source]**
+`get_type(obj_type: type[Vertex] | type[Edge] | type[Face] | type[Shell] | type[Solid] | type[Wire]) -> list[Vertex | Edge | Face | Shell | Solid | Wire]`
 
 Extract the objects of the given type from a Compound. Note that this
 isn’t the same as Faces() etc. which will extract Faces from Solids.
 
 **Parameters:**
 
-**obj_type** (*Union**[**Vertex**, **Edge**, **Face**, **Shell**, **Solid**, **Wire**]*) – Object types to extract
+**obj_type** (*Union[Vertex, Edge, Face, Shell, Solid, Wire]*) – Object types to extract
 
 **Returns:**
 
@@ -1526,8 +1298,7 @@ Extracted objects
 
 *list*[*Union*[*Vertex*, *Edge*, *Face*, *Shell*, *Solid*, *Wire*]]
 
-**
-*classmethod *make_text(*txt: str*, *font_size: float*, *font: str = 'Arial'*, *font_path: ~os.PathLike[str] | str | None = None*, *font_style: ~build123d.build_enums.FontStyle = *, *text_align: tuple[~build123d.build_enums.TextAlign*, *~build123d.build_enums.TextAlign] = (*, *)*, *align: ~build123d.build_enums.Align | tuple[~build123d.build_enums.Align*, *~build123d.build_enums.Align] | None = None*, *position_on_path: float = 0.0*, *text_path: ~topology.one_d.Edge | ~topology.one_d.Wire | None = None*, *single_line_width: float = 0.0*) → Compound[source]**
+`classmethod make_text(txt: str, font_size: float, font: str = 'Arial', font_path: PathLike[str] | str | None = None, font_style: FontStyle = <FontStyle.REGULAR>, text_align: tuple[TextAlign, TextAlign] = (<TextAlign.CENTER>, <TextAlign.CENTER>), align: Align | tuple[Align, Align] | None = None, position_on_path: float = 0.0, text_path: Edge | Wire | None = None, single_line_width: float = 0.0) -> Compound`
 
 Text that optionally follows a path.
 
@@ -1538,41 +1309,31 @@ parameter can be used to shift the text along the path to achieve precise positi
 
 **Parameters:**
 
-- 
-**txt** (*str*) – text to render
+- **txt** (*str*) – text to render
 
-- 
-**font_size** (*float*) – size of the font in model units
+- **font_size** (*float*) – size of the font in model units
 
-- 
-**font** (*str**, **optional*) – font name. Defaults to “Arial”
+- **font** (*str, optional*) – font name. Defaults to “Arial”
 
-- 
-**font_path** (*PathLike** | **str**, **optional*) – system path to font file. Defaults to None
+- **font_path** (*PathLike | str, optional*) – system path to font file. Defaults to None
 
-- 
-**font_style** (*Font_Style**, **optional*) – font style, REGULAR, BOLD, BOLDITALIC, or
+- **font_style** (*Font_Style, optional*) – font style, REGULAR, BOLD, BOLDITALIC, or
 ITALIC. Defaults to Font_Style.REGULAR
 
-- 
-**text_align** (*tuple**[**TextAlign**, **TextAlign**]**, **optional*) – horizontal text align
+- **text_align** (*tuple[TextAlign, TextAlign], optional*) – horizontal text align
 LEFT, CENTER, or RIGHT. Vertical text align BOTTOM, CENTER, TOP, or
 TOPFIRSTLINE. Defaults to (TextAlign.CENTER, TextAlign.CENTER)
 
-- 
-**align** (*Align** | **tuple**[**Align**, **Align**]**, **optional*) – align MIN, CENTER, or MAX of
+- **align** (*Align | tuple[Align, Align], optional*) – align MIN, CENTER, or MAX of
 object. Defaults to None
 
-- 
-**position_on_path** (*float**, **optional*) – the relative location on path to position
+- **position_on_path** (*float, optional*) – the relative location on path to position
 the text, values must be between 0.0 and 1.0. Defaults to 0.0
 
-- 
-**text_path** – (Edge | Wire, optional): path for text to follow. Defaults to None
+- **text_path** – (Edge | Wire, optional): path for text to follow. Defaults to None
 Compound object containing multiple Shapes representing the text
 
-- 
-**single_line_width** (*float*) – width of outlined single line font.
+- **single_line_width** (*float*) – width of outlined single line font.
 Defaults to 0.0
 
 Examples:
@@ -1584,34 +1345,27 @@ fox = Compound.make_text(
  text_path=jump_edge,
 )
 
-**
-*classmethod *make_triad(*axes_scale: float*) → Compound[source]**
+`classmethod make_triad(axes_scale: float) -> Compound`
 
 The coordinate system triad (X, Y, Z axes)
 
-**
-order* = 4.0***
+`order = 4.0`
 
-**
-project_to_viewport(*viewport_origin: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *viewport_up: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 1)*, *look_at: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*, *focus: float | None = None*) → tuple[ShapeList[Edge], ShapeList[Edge]][source]**
+`project_to_viewport(viewport_origin: VectorLike, viewport_up: VectorLike = (0, 0, 1), look_at: VectorLike | None = None, focus: float | None = None) -> tuple[ShapeList[Edge], ShapeList[Edge]]`
 
 Project a shape onto a viewport returning visible and hidden Edges.
 
 **Parameters:**
 
-- 
-**viewport_origin** (*VectorLike*) – location of viewport
+- **viewport_origin** (*VectorLike*) – location of viewport
 
-- 
-**viewport_up** (*VectorLike**, **optional*) – direction of the viewport y axis.
+- **viewport_up** (*VectorLike, optional*) – direction of the viewport y axis.
 Defaults to (0, 0, 1).
 
-- 
-**look_at** (*VectorLike**, **optional*) – point to look at.
+- **look_at** (*VectorLike, optional*) – point to look at.
 Defaults to None (center of shape).
 
-- 
-**focus** (*float**, **optional*) – the focal length for perspective projection
+- **focus** (*float, optional*) – the focal length for perspective projection
 Defaults to None (orthographic projection)
 
 **Returns:**
@@ -1622,8 +1376,7 @@ visible & hidden Edges
 
 *tuple*[*ShapeList*[*Edge*],*ShapeList*[*Edge*]]
 
-**
-touch(*other: Shape*, *tolerance: float = 1e-06*) → ShapeList[Vertex | Edge | Face][source]**
+`touch(other: Shape, tolerance: float = 1e-06) -> ShapeList[Vertex | Edge | Face]`
 
 Distribute touch over compound elements.
 
@@ -1632,24 +1385,21 @@ Face elements produce boundary contacts; other shapes return empty.
 
 **Parameters:**
 
-- 
-**other** – Shape to check boundary contacts with
+- **other** – Shape to check boundary contacts with
 
-- 
-**tolerance** – tolerance for contact detection
+- **tolerance** – tolerance for contact detection
 
 **Returns:**
 
 ShapeList of boundary contact geometry (empty if no contact)
 
-**
-unwrap(*fully: bool = True*) → Self | Shape[source]**
+`unwrap(fully: bool = True) -> Self | Shape`
 
 Strip unnecessary Compound wrappers
 
 **Parameters:**
 
-**fully** (*bool**, **optional*) – return base shape without any Compound
+**fully** (*bool, optional*) – return base shape without any Compound
 wrappers (otherwise one Compound is left). Defaults to True.
 
 **Returns:**
@@ -1660,13 +1410,11 @@ base shape
 
 *Union*[Self, *Shape*]
 
-**
-*property *volume*: float***
+`property volume: float`
 
 volume - the volume of this Compound
 
-**
-*class *Edge(*obj: TopoDS_Edge | Axis | None | None = None*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)[source]**
+`class Edge(obj: TopoDS_Edge | Axis | None | None = None, label: str = '', color: Color | None = None, parent: Compound | None = None)`
 
 An Edge in build123d is a fundamental element in the topological data structure
 representing a one-dimensional geometric entity within a 3D model. It encapsulates
@@ -1676,18 +1424,15 @@ facilitating operations like filleting, chamfering, and Boolean operations. It
 serves as a building block for constructing complex structures, such as wires
 and faces.
 
-**
-*property *arc_center*: Vector***
+`property arc_center: Vector`
 
 center of an underlying circle or ellipse geometry.
 
-**
-close() → Edge | Wire[source]**
+`close() -> Edge | Wire`
 
 Close an Edge
 
-**
-distribute_locations(*count: int*, *start: float = 0.0*, *stop: float = 1.0*, *positions_only: bool = False*) → list[Location][source]**
+`distribute_locations(count: int, start: float = 0.0, stop: float = 1.0, positions_only: bool = False) -> list[Location]`
 
 Distribute Locations
 
@@ -1695,20 +1440,15 @@ Distribute locations along edge or wire.
 
 **Parameters:**
 
-- 
-**self** – Wire:Edge:
+- **self** (*Wire or Edge*)
 
-- 
-**count** (*int*) – Number of locations to generate
+- **count** (*int*) – Number of locations to generate
 
-- 
-**start** (*float*) – position along Edge|Wire to start. Defaults to 0.0.
+- **start** (*float*) – position along Edge|Wire to start. Defaults to 0.0.
 
-- 
-**stop** (*float*) – position along Edge|Wire to end. Defaults to 1.0.
+- **stop** (*float*) – position along Edge|Wire to end. Defaults to 1.0.
 
-- 
-**positions_only** (*bool*) – only generate position not orientation. Defaults to False.
+- **positions_only** (*bool*) – only generate position not orientation. Defaults to False.
 
 **Returns:**
 
@@ -1722,8 +1462,7 @@ locations distributed along Edge|Wire
 
 **ValueError** – count must be two or greater
 
-**
-*classmethod *extrude(*obj: Vertex*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Edge[source]**
+`classmethod extrude(obj: Vertex, direction: VectorLike) -> Edge`
 
 Extrude a Vertex into an Edge.
 
@@ -1733,11 +1472,9 @@ Extrude a Vertex into an Edge.
 
 **Raises:**
 
-- 
-**ValueError** – Unsupported class
+- **ValueError** – Unsupported class
 
-- 
-**RuntimeError** – Generated invalid result
+- **RuntimeError** – Generated invalid result
 
 **Returns:**
 
@@ -1747,18 +1484,15 @@ extruded shape
 
 *Edge*
 
-**
-find_intersection_points(*other: Axis | Edge | None = None*, *tolerance: float = 1e-06*) → ShapeList[Vector][source]**
+`find_intersection_points(other: Axis | Edge | None = None, tolerance: float = 1e-06) -> ShapeList[Vector]`
 
 Determine the points where a 2D edge crosses itself or another 2D edge
 
 **Parameters:**
 
-- 
-**other** (*Axis** | **Edge*) – curve to compare with
+- **other** (*Axis | Edge*) – curve to compare with
 
-- 
-**tolerance** (*float**, **optional*) – the precision of computing the intersection points.
+- **tolerance** (*float, optional*) – the precision of computing the intersection points.
 Defaults to TOLERANCE.
 
 **Raises:**
@@ -1773,8 +1507,7 @@ list of intersection points
 
 *ShapeList*[*Vector*]
 
-**
-find_tangent(*angle: float*) → list[float][source]**
+`find_tangent(angle: float) -> list[float]`
 
 Find the parameter values of self where the tangent is equal to angle.
 
@@ -1790,13 +1523,11 @@ u values between 0.0 and 1.0
 
 *list*[*float*]
 
-**
-geom_adaptor() → BRepAdaptor_Curve[source]**
+`geom_adaptor() -> BRepAdaptor_Curve`
 
 Return the Geom Curve from this Edge
 
-**
-geom_equal(*other: Edge*, *tol: float = 1e-06*, *num_interpolation_points: int = 5*) → bool[source]**
+`geom_equal(other: Edge, tol: float = 1e-06, num_interpolation_points: int = 5) -> bool`
 
 Compare two edges for geometric equality within tolerance.
 
@@ -1806,14 +1537,11 @@ return True.
 
 **Parameters:**
 
-- 
-**other** – Edge to compare with
+- **other** – Edge to compare with
 
-- 
-**tol** – Tolerance for numeric comparisons. Defaults to 1e-6.
+- **tol** – Tolerance for numeric comparisons. Defaults to 1e-6.
 
-- 
-**num_interpolation_points** – Number of points to sample for unknown
+- **num_interpolation_points** – Number of points to sample for unknown
 curve types. Defaults to 5.
 
 **Returns:**
@@ -1824,13 +1552,11 @@ True if edges are geometrically equal within tolerance
 
 *bool*
 
-**
-*property *is_infinite*: bool***
+`property is_infinite: bool`
 
 Check if edge is infinite (LINE with length > 1e100).
 
-**
-*classmethod *make_bezier(**cntl_pnts: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *weights: list[float] | None = None*) → Edge[source]**
+`classmethod make_bezier(*cntl_pnts: VectorLike, weights: list[float] | None = None) -> Edge`
 
 Create a rational (with weights) or non-rational bezier curve. The first and last
 control points represent the start and end of the curve respectively. If weights
@@ -1838,22 +1564,17 @@ are provided, there must be one provided for each control point.
 
 **Parameters:**
 
-- 
-**cntl_pnts** (*sequence**[**VectorLike**]*) – points defining the curve
+- **cntl_pnts** (*sequence[VectorLike]*) – points defining the curve
 
-- 
-**weights** (*list**[**float**]**, **optional*) – control point weights list. Defaults to None.
+- **weights** (*list[float], optional*) – control point weights list. Defaults to None.
 
 **Raises:**
 
-- 
-**ValueError** – Too few control points
+- **ValueError** – Too few control points
 
-- 
-**ValueError** – Too many control points
+- **ValueError** – Too many control points
 
-- 
-**ValueError** – A weight is required for each control point
+- **ValueError** – A weight is required for each control point
 
 **Returns:**
 
@@ -1863,8 +1584,7 @@ bezier curve
 
 *Edge*
 
-**
-*classmethod *make_circle(*radius: float*, *plane: ~build123d.geometry.Plane = Plane((0*, *0*, *0)*, *(1*, *0*, *0)*, *(0*, *0*, *1))*, *start_angle: float = 360.0*, *end_angle: float = 360*, *angular_direction: ~build123d.build_enums.AngularDirection = *) → Edge[source]**
+`classmethod make_circle(radius: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), start_angle: float = 360.0, end_angle: float = 360, angular_direction: AngularDirection = <AngularDirection.COUNTER_CLOCKWISE>) -> Edge`
 
 make circle
 
@@ -1872,20 +1592,15 @@ Create a circle centered on the origin of plane
 
 **Parameters:**
 
-- 
-**radius** (*float*) – circle radius
+- **radius** (*float*) – circle radius
 
-- 
-**plane** (*Plane**, **optional*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – base plane. Defaults to Plane.XY.
 
-- 
-**start_angle** (*float**, **optional*) – start of arc angle. Defaults to 360.0.
+- **start_angle** (*float, optional*) – start of arc angle. Defaults to 360.0.
 
-- 
-**end_angle** (*float**, **optional*) – end of arc angle. Defaults to 360.
+- **end_angle** (*float, optional*) – end of arc angle. Defaults to 360.
 
-- 
-**angular_direction** (*AngularDirection**, **optional*) – arc direction.
+- **angular_direction** (*AngularDirection, optional*) – arc direction.
 Defaults to AngularDirection.COUNTER_CLOCKWISE.
 
 **Returns:**
@@ -1896,42 +1611,31 @@ full or partial circle
 
 *Edge*
 
-**
-*classmethod *make_constrained_arcs(*tangency_one: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *tangency_two: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, ***, *radius: float*, *sagitta: Sagitta = Sagitta.SHORT*) → ShapeList[Edge][source]**
+`classmethod make_constrained_arcs(*args, sagitta: Sagitta = <Sagitta.SHORT>, **kwargs) -> ShapeList[Edge]`
 
-**
-*classmethod *make_constrained_arcs(*tangency_one: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *tangency_two: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, ***, *center_on: Axis | Edge*, *sagitta: Sagitta = Sagitta.SHORT*) → ShapeList[Edge]**
+`classmethod make_constrained_arcs(*args, sagitta: Sagitta = <Sagitta.SHORT>, **kwargs) -> ShapeList[Edge]`
 
-**
-*classmethod *make_constrained_arcs(*tangency_one: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *tangency_two: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *tangency_three: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, ***, *sagitta: Sagitta = Sagitta.SHORT*) → ShapeList[Edge]**
+`classmethod make_constrained_arcs(*args, sagitta: Sagitta = <Sagitta.SHORT>, **kwargs) -> ShapeList[Edge]`
 
-**
-*classmethod *make_constrained_arcs(*tangency_one: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, ***, *center: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → ShapeList[Edge]**
+`classmethod make_constrained_arcs(*args, sagitta: Sagitta = <Sagitta.SHORT>, **kwargs) -> ShapeList[Edge]`
 
-**
-*classmethod *make_constrained_arcs(*tangency_one: tuple[Axis | Edge, Tangency] | Axis | Edge | Vertex | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, ***, *radius: float*, *center_on: Edge*) → ShapeList[Edge]**
+`classmethod make_constrained_arcs(*args, sagitta: Sagitta = <Sagitta.SHORT>, **kwargs) -> ShapeList[Edge]`
 
-**
-*classmethod *make_constrained_lines(*tangency_one: tuple[Edge, Tangency] | Axis | Edge*, *tangency_two: tuple[Edge, Tangency] | Axis | Edge*) → ShapeList[Edge][source]**
+`classmethod make_constrained_lines(*args, **kwargs) -> ShapeList[Edge]`
 
-**
-*classmethod *make_constrained_lines(*tangency_one: tuple[Edge, Tangency] | Edge*, *tangency_two: Vector*) → ShapeList[Edge]**
+`classmethod make_constrained_lines(*args, **kwargs) -> ShapeList[Edge]`
 
-**
-*classmethod *make_constrained_lines(*tangency_one: tuple[Edge, Tangency] | Edge*, *tangency_two: Axis*, ***, *angle: float | None = None*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → ShapeList[Edge]**
+`classmethod make_constrained_lines(*args, **kwargs) -> ShapeList[Edge]`
 
 Create planar line(s) on XY subject to tangency/contact constraints.
 
-### Supported cases
+### Supported cases
 
-- 
-Tangent to two curves
+- Tangent to two curves
 
-- 
-Tangent to one curve and passing through a given point
+- Tangent to one curve and passing through a given point
 
-**
-*classmethod *make_ellipse(*x_radius: float*, *y_radius: float*, *plane: ~build123d.geometry.Plane = Plane((0*, *0*, *0)*, *(1*, *0*, *0)*, *(0*, *0*, *1))*, *start_angle: float = 360.0*, *end_angle: float = 360.0*, *angular_direction: ~build123d.build_enums.AngularDirection = *) → Edge[source]**
+`classmethod make_ellipse(x_radius: float, y_radius: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), start_angle: float = 360.0, end_angle: float = 360.0, angular_direction: AngularDirection = <AngularDirection.COUNTER_CLOCKWISE>) -> Edge`
 
 make ellipse
 
@@ -1939,23 +1643,17 @@ Makes an ellipse centered at the origin of plane.
 
 **Parameters:**
 
-- 
-**x_radius** (*float*) – x radius of the ellipse (along the x-axis of plane)
+- **x_radius** (*float*) – x radius of the ellipse (along the x-axis of plane)
 
-- 
-**y_radius** (*float*) – y radius of the ellipse (along the y-axis of plane)
+- **y_radius** (*float*) – y radius of the ellipse (along the y-axis of plane)
 
-- 
-**plane** (*Plane**, **optional*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – base plane. Defaults to Plane.XY.
 
-- 
-**start_angle** (*float**, **optional*) – Defaults to 360.0.
+- **start_angle** (*float, optional*) – Defaults to 360.0.
 
-- 
-**end_angle** (*float**, **optional*) – Defaults to 360.0.
+- **end_angle** (*float, optional*) – Defaults to 360.0.
 
-- 
-**angular_direction** (*AngularDirection**, **optional*) – arc direction.
+- **angular_direction** (*AngularDirection, optional*) – arc direction.
 Defaults to AngularDirection.COUNTER_CLOCKWISE.
 
 **Returns:**
@@ -1966,8 +1664,7 @@ full or partial ellipse
 
 *Edge*
 
-**
-*classmethod *make_helix(*pitch: float*, *height: float*, *radius: float*, *center: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 0)*, *normal: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 1)*, *angle: float = 0.0*, *lefthand: bool = False*) → Wire[source]**
+`classmethod make_helix(pitch: float, height: float, radius: float, center: VectorLike = (0, 0, 0), normal: VectorLike = (0, 0, 1), angle: float = 0.0, lefthand: bool = False) -> Wire`
 
 Make a helix with a given pitch, height and radius. By default a cylindrical surface is
 used to create the helix. If the :angle: is set (the apex given in degree) a conical
@@ -1975,26 +1672,19 @@ surface is used instead.
 
 **Parameters:**
 
-- 
-**pitch** (*float*) – distance per revolution along normal
+- **pitch** (*float*) – distance per revolution along normal
 
-- 
-**height** (*float*) – total height
+- **height** (*float*) – total height
 
-- 
-**radius** (*float*)
+- **radius** (*float*)
 
-- 
-**center** (*VectorLike**, **optional*) – Defaults to (0, 0, 0).
+- **center** (*VectorLike, optional*) – Defaults to (0, 0, 0).
 
-- 
-**normal** (*VectorLike**, **optional*) – Defaults to (0, 0, 1).
+- **normal** (*VectorLike, optional*) – Defaults to (0, 0, 1).
 
-- 
-**angle** (*float**, **optional*) – conical angle. Defaults to 0.0.
+- **angle** (*float, optional*) – conical angle. Defaults to 0.0.
 
-- 
-**lefthand** (*bool**, **optional*) – Defaults to False.
+- **lefthand** (*bool, optional*) – Defaults to False.
 
 **Returns:**
 
@@ -2004,8 +1694,7 @@ helix
 
 *Wire*
 
-**
-*classmethod *make_hyperbola(*x_radius: float*, *y_radius: float*, *plane: ~build123d.geometry.Plane = Plane((0*, *0*, *0)*, *(1*, *0*, *0)*, *(0*, *0*, *1))*, *start_angle: float = 360.0*, *end_angle: float = 360.0*, *angular_direction: ~build123d.build_enums.AngularDirection = *) → Edge[source]**
+`classmethod make_hyperbola(x_radius: float, y_radius: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), start_angle: float = 360.0, end_angle: float = 360.0, angular_direction: AngularDirection = <AngularDirection.COUNTER_CLOCKWISE>) -> Edge`
 
 make hyperbola
 
@@ -2013,23 +1702,17 @@ Makes a hyperbola centered at the origin of plane.
 
 **Parameters:**
 
-- 
-**x_radius** (*float*) – x radius of the hyperbola (along the x-axis of plane)
+- **x_radius** (*float*) – x radius of the hyperbola (along the x-axis of plane)
 
-- 
-**y_radius** (*float*) – y radius of the hyperbola (along the y-axis of plane)
+- **y_radius** (*float*) – y radius of the hyperbola (along the y-axis of plane)
 
-- 
-**plane** (*Plane**, **optional*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – base plane. Defaults to Plane.XY.
 
-- 
-**start_angle** (*float**, **optional*) – Defaults to 360.0.
+- **start_angle** (*float, optional*) – Defaults to 360.0.
 
-- 
-**end_angle** (*float**, **optional*) – Defaults to 360.0.
+- **end_angle** (*float, optional*) – Defaults to 360.0.
 
-- 
-**angular_direction** (*AngularDirection**, **optional*) – arc direction.
+- **angular_direction** (*AngularDirection, optional*) – arc direction.
 Defaults to AngularDirection.COUNTER_CLOCKWISE.
 
 **Returns:**
@@ -2040,25 +1723,21 @@ full or partial hyperbola
 
 *Edge*
 
-**
-*classmethod *make_line(*point1: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *point2: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Edge[source]**
+`classmethod make_line(point1: VectorLike, point2: VectorLike) -> Edge`
 
 Create a line between two points
 
 **Parameters:**
 
-- 
-**point1** – VectorLike: that represents the first point
+- **point1** – VectorLike: that represents the first point
 
-- 
-**point2** – VectorLike: that represents the second point
+- **point2** – VectorLike: that represents the second point
 
 **Returns:**
 
 A linear edge between the two provided points
 
-**
-*classmethod *make_mid_way(*first: Edge*, *second: Edge*, *middle: float = 0.5*) → Edge[source]**
+`classmethod make_mid_way(first: Edge, second: Edge, middle: float = 0.5) -> Edge`
 
 make line between edges
 
@@ -2068,14 +1747,11 @@ truncated.
 
 **Parameters:**
 
-- 
-**first** (*Edge*) – first reference Edge
+- **first** (*Edge*) – first reference Edge
 
-- 
-**second** (*Edge*) – second reference Edge
+- **second** (*Edge*) – second reference Edge
 
-- 
-**middle** (*float**, **optional*) – factional distance between Edges. Defaults to 0.5.
+- **middle** (*float, optional*) – factional distance between Edges. Defaults to 0.5.
 
 **Returns:**
 
@@ -2085,8 +1761,7 @@ linear Edge between two Edges
 
 *Edge*
 
-**
-*classmethod *make_parabola(*focal_length: float*, *plane: ~build123d.geometry.Plane = Plane((0*, *0*, *0)*, *(1*, *0*, *0)*, *(0*, *0*, *1))*, *start_angle: float = 0.0*, *end_angle: float = 90.0*, *angular_direction: ~build123d.build_enums.AngularDirection = *) → Edge[source]**
+`classmethod make_parabola(focal_length: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), start_angle: float = 0.0, end_angle: float = 90.0, angular_direction: AngularDirection = <AngularDirection.COUNTER_CLOCKWISE>) -> Edge`
 
 make parabola
 
@@ -2094,20 +1769,15 @@ Makes an parabola centered at the origin of plane.
 
 **Parameters:**
 
-- 
-**focal_length** (*float*) – focal length the parabola (distance from the vertex to focus along the x-axis of plane)
+- **focal_length** (*float*) – focal length the parabola (distance from the vertex to focus along the x-axis of plane)
 
-- 
-**plane** (*Plane**, **optional*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – base plane. Defaults to Plane.XY.
 
-- 
-**start_angle** (*float**, **optional*) – Defaults to 0.0.
+- **start_angle** (*float, optional*) – Defaults to 0.0.
 
-- 
-**end_angle** (*float**, **optional*) – Defaults to 90.0.
+- **end_angle** (*float, optional*) – Defaults to 90.0.
 
-- 
-**angular_direction** (*AngularDirection**, **optional*) – arc direction.
+- **angular_direction** (*AngularDirection, optional*) – arc direction.
 Defaults to AngularDirection.COUNTER_CLOCKWISE.
 
 **Returns:**
@@ -2118,8 +1788,7 @@ full or partial parabola
 
 *Edge*
 
-**
-*classmethod *make_spline(*points: list[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]]*, *tangents: list[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]] | None = None*, *periodic: bool = False*, *parameters: list[float] | None = None*, *scale: bool = True*, *tol: float = 1e-06*) → Edge[source]**
+`classmethod make_spline(points: list[VectorLike], tangents: list[VectorLike] | None = None, periodic: bool = False, parameters: list[float] | None = None, scale: bool = True, tol: float = 1e-06) -> Edge`
 
 Spline
 
@@ -2127,46 +1796,37 @@ Interpolate a spline through the provided points.
 
 **Parameters:**
 
-- 
-**points** (*list**[**VectorLike**]*) – the points defining the spline
+- **points** (*list[VectorLike]*) – the points defining the spline
 
-- 
-**tangents** (*list**[**VectorLike**]**, **optional*) – start and finish tangent.
+- **tangents** (*list[VectorLike], optional*) – start and finish tangent.
 Defaults to None.
 
-- 
-**periodic** (*bool**, **optional*) – creation of periodic curves. Defaults to False.
+- **periodic** (*bool, optional*) – creation of periodic curves. Defaults to False.
 
-- 
-**parameters** (*list**[**float**]**, **optional*) – the value of the parameter at each
+- **parameters** (*list[float], optional*) – the value of the parameter at each
 interpolation point. (The interpolated curve is represented as a vector-valued
 function of a scalar parameter.) If periodic == True, then len(parameters)
 must be len(interpolation points) + 1, otherwise len(parameters)
 must be equal to len(interpolation points). Defaults to None.
 
-- 
-**scale** (*bool**, **optional*) – whether to scale the specified tangent vectors before
+- **scale** (*bool, optional*) – whether to scale the specified tangent vectors before
 interpolating. Each tangent is scaled, so it’s length is equal to the derivative
 of the Lagrange interpolated curve. I.e., set this to True, if you want to use
 only the direction of the tangent vectors specified by tangents , but not
 their magnitude. Defaults to True.
 
-- 
-**tol** (*float**, **optional*) – tolerance of the algorithm (consult OCC documentation).
+- **tol** (*float, optional*) – tolerance of the algorithm (consult OCC documentation).
 Used to check that the specified points are not too close to each other, and
 that tangent vectors are not too short. (In either case interpolation may fail.).
 Defaults to 1e-6.
 
 **Raises:**
 
-- 
-**ValueError** – Parameter for each interpolation point
+- **ValueError** – Parameter for each interpolation point
 
-- 
-**ValueError** – Tangent for each interpolation point
+- **ValueError** – Tangent for each interpolation point
 
-- 
-**ValueError** – B-spline interpolation failed
+- **ValueError** – B-spline interpolation failed
 
 **Returns:**
 
@@ -2176,29 +1836,23 @@ the spline
 
 *Edge*
 
-**
-*classmethod *make_spline_approx(*points: list[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]]*, *tol: float = 0.001*, *smoothing: tuple[float, float, float] | None = None*, *min_deg: int = 1*, *max_deg: int = 6*) → Edge[source]**
+`classmethod make_spline_approx(points: list[VectorLike], tol: float = 0.001, smoothing: tuple[float, float, float] | None = None, min_deg: int = 1, max_deg: int = 6) -> Edge`
 
 Approximate a spline through the provided points.
 
 **Parameters:**
 
-- 
-**points** (*list**[**Vector**]*)
+- **points** (*list[Vector]*)
 
-- 
-**tol** (*float**, **optional*) – tolerance of the algorithm. Defaults to 1e-3.
+- **tol** (*float, optional*) – tolerance of the algorithm. Defaults to 1e-3.
 
-- 
-**smoothing** (*Tuple**[**float**, **float**, **float**]**, **optional*) – optional tuple of 3 weights
+- **smoothing** (*Tuple[float, float, float], optional*) – optional tuple of 3 weights
 use for variational smoothing. Defaults to None.
 
-- 
-**min_deg** (*int**, **optional*) – minimum spline degree. Enforced only when smoothing
+- **min_deg** (*int, optional*) – minimum spline degree. Enforced only when smoothing
 is None. Defaults to 1.
 
-- 
-**max_deg** (*int**, **optional*) – maximum spline degree. Defaults to 6.
+- **max_deg** (*int, optional*) – maximum spline degree. Defaults to 6.
 
 **Raises:**
 
@@ -2212,8 +1866,7 @@ spline
 
 *Edge*
 
-**
-*classmethod *make_tangent_arc(*start: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *tangent: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *end: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Edge[source]**
+`classmethod make_tangent_arc(start: VectorLike, tangent: VectorLike, end: VectorLike) -> Edge`
 
 Tangent Arc
 
@@ -2221,14 +1874,11 @@ Makes a tangent arc from point start, in the direction of tangent and ends at en
 
 **Parameters:**
 
-- 
-**start** (*VectorLike*) – start point
+- **start** (*VectorLike*) – start point
 
-- 
-**tangent** (*VectorLike*) – start tangent
+- **tangent** (*VectorLike*) – start tangent
 
-- 
-**end** (*VectorLike*) – end point
+- **end** (*VectorLike*) – end point
 
 **Returns:**
 
@@ -2238,8 +1888,7 @@ circular arc
 
 *Edge*
 
-**
-*classmethod *make_three_point_arc(*point1: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *point2: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *point3: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Edge[source]**
+`classmethod make_three_point_arc(point1: VectorLike, point2: VectorLike, point3: VectorLike) -> Edge`
 
 Three Point Arc
 
@@ -2247,14 +1896,11 @@ Makes a three point arc through the provided points
 
 **Parameters:**
 
-- 
-**point1** (*VectorLike*) – start point
+- **point1** (*VectorLike*) – start point
 
-- 
-**point2** (*VectorLike*) – middle point
+- **point2** (*VectorLike*) – middle point
 
-- 
-**point3** (*VectorLike*) – end point
+- **point3** (*VectorLike*) – end point
 
 **Returns:**
 
@@ -2264,11 +1910,9 @@ a circular arc through the three points
 
 *Edge*
 
-**
-order* = 1.0***
+`order = 1.0`
 
-**
-param_at(*position: float*) → float[source]**
+`param_at(position: float) -> float`
 
 Map a normalized arc-length position to the underlying OCCT parameter.
 
@@ -2294,8 +1938,7 @@ parameter (for wires), as described above.
 
 *float*
 
-**
-param_at_point(*point: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → float[source]**
+`param_at_point(point: VectorLike) -> float`
 
 Return the normalized parameter (∈ [0.0, 1.0]) of the location on this edge
 closest to point.
@@ -2330,14 +1973,11 @@ resolution is returned.
 
 **Raises:**
 
-- 
-**ValueError** – If point is not on the edge within tolerance.
+- **ValueError** – If point is not on the edge within tolerance.
 
-- 
-**ValueError** – Can’t find param on empty edge
+- **ValueError** – Can’t find param on empty edge
 
-- 
-**RuntimeError** – If no parameter can be found (e.g., extremely pathological
+- **RuntimeError** – If no parameter can be found (e.g., extremely pathological
  curves or numerical failure).
 
 **Returns:**
@@ -2349,8 +1989,7 @@ closest location on the edge.
 
 *float*
 
-**
-project_to_shape(*target_object: Shape*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*, *center: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → ShapeList[Edge][source]**
+`project_to_shape(target_object: Shape, direction: VectorLike | None = None, center: VectorLike | None = None) -> ShapeList[Edge]`
 
 Project Edge
 
@@ -2364,23 +2003,17 @@ of the output wires are forced to be the same as self.
 
 **Parameters:**
 
-- 
-**target_object** – Object to project onto
+- **target_object** – Object to project onto
 
-- 
-**direction** – Parallel projection direction. Defaults to None.
+- **direction** – Parallel projection direction. Defaults to None.
 
-- 
-**center** – Conical center of projection. Defaults to None.
+- **center** – Conical center of projection. Defaults to None.
 
-- 
-**target_object** – Shape:
+- **target_object** (*Shape*)
 
-- 
-**direction** – VectorLike: (Default value = None)
+- **direction** – VectorLike: (Default value = None)
 
-- 
-**center** – VectorLike: (Default value = None)
+- **center** – VectorLike: (Default value = None)
 
 **Returns:**
 
@@ -2390,14 +2023,13 @@ Projected Edge(s)
 
 **ValueError** – Only one of direction or center must be provided
 
-**
-reversed(*reconstruct: bool = False*) → Edge[source]**
+`reversed(reconstruct: bool = False) -> Edge`
 
 Return a copy of self with the opposite orientation.
 
 **Parameters:**
 
-**reconstruct** (*bool**, **optional*) – rebuild edge instead of setting OCCT flag.
+**reconstruct** (*bool, optional*) – rebuild edge instead of setting OCCT flag.
 Defaults to False.
 
 **Returns:**
@@ -2408,47 +2040,39 @@ reversed
 
 *Edge*
 
-**
-to_axis() → Axis[source]**
+`to_axis() -> Axis`
 
 Translate a linear Edge to an Axis
 
-**
-to_wire() → Wire[source]**
+`to_wire() -> Wire`
 
 Edge as Wire
 
-**
-trim(*start: float | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *end: float | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Edge[source]**
+`trim(start: float | VectorLike, end: float | VectorLike) -> Edge`
 
-_summary_
+Create a new edge by keeping only the section between start and end.
 
 **Parameters:**
 
-- 
-**start** (*float** | **VectorLike*) – _description_
+- **start** (*float | VectorLike*) – 0.0 <= start < 1.0 or point on edge
 
-- 
-**end** (*float** | **VectorLike*) – _description_
+- **end** (*float | VectorLike*) – 0.0 < end <= 1.0 or point on edge
 
 **Raises:**
 
-- 
-**TypeError** – _description_
+- **TypeError** – invalid input, must be float or VectorLike
 
-- 
-**ValueError** – _description_
+- **ValueError** – can't trim empty edge
 
 **Returns:**
 
-_description_
+trimmed edge
 
 **Return type:**
 
 *Edge*
 
-**
-trim_infinite(*half_length: float*) → Edge[source]**
+`trim_infinite(half_length: float) -> Edge`
 
 Trim an infinite line edge to a finite length.
 
@@ -2465,16 +2089,14 @@ For non-infinite edges, returns self unchanged.
 
 Trimmed edge if infinite, otherwise self
 
-**
-trim_to_length(*start: float | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *length: float*) → Edge[source]**
+`trim_to_length(start: float | VectorLike, length: float) -> Edge`
 
 Create a new edge starting at the given normalized parameter of a
 given length.
 
 **Parameters:**
 
-- 
-**start** (*float** | **VectorLike*) – 0.0 :**
+- **start** (*float | VectorLike*) – 0.0 :**
 
 **ValueError** – can’t trim empty edge
 
@@ -2486,16 +2108,13 @@ trimmed edge
 
 *Edge*
 
-**
-trim_to_other(*other: Shape | Axis | Location | Plane | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Edge | None[source]**
+`trim_to_other(other: Shape | Axis | Location | Plane | VectorLike) -> Edge | None`
 
 Return the shortest Edge of self trimmed by other or None if they don’t intersect
 
-**
-*class *Face(*obj: TopoDS_Face | Plane*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)[source]**
+`class Face(*args: Any, **kwargs: Any)`
 
-**
-*class *Face(*outer_wire: Wire*, *inner_wires: Iterable[Wire] | None = None*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)**
+`class Face(*args: Any, **kwargs: Any)`
 
 A Face in build123d represents a 3D bounded surface within the topological data
 structure. It encapsulates geometric information, defining a face of a 3D shape.
@@ -2503,8 +2122,7 @@ These faces are integral components of complex structures, such as solids and
 shells. Face enables precise modeling and manipulation of surfaces, supporting
 operations like trimming, filleting, and Boolean operations.
 
-**
-*property *area_without_holes*: float***
+`property area_without_holes: float`
 
 Calculate the total surface area of the face, including the areas of any holes.
 
@@ -2520,19 +2138,16 @@ the face is empty.
 
 *float*
 
-**
-*property *axes_of_symmetry*: list[Axis]***
+`property axes_of_symmetry: list[Axis]`
 
 Computes and returns the axes of symmetry for a planar face.
 
 The method determines potential symmetry axes by analyzing the face’s
 geometry:
 
-- 
-It first validates that the face is non-empty and planar.
+- It first validates that the face is non-empty and planar.
 
-- 
-For faces with inner wires (holes), it computes the centroid of the
+- For faces with inner wires (holes), it computes the centroid of the
 holes and the face’s overall center (COG).
 
 If the holes’ centroid significantly deviates from the COG (beyond
@@ -2540,8 +2155,7 @@ a specified tolerance), the symmetry axis is taken along the line
 connecting these points; otherwise, each hole’s center is used to
 generate a candidate axis.
 
-- 
-For faces without holes, candidate directions are derived by sampling
+- For faces without holes, candidate directions are derived by sampling
 midpoints along the outer wire’s edges.
 
 If curved edges are present, additional candidate directions are
@@ -2556,7 +2170,7 @@ small tolerance, the direction is accepted as an axis of symmetry.
 
 **Returns:**
 
-**A list of Axis objects, each defined by the face’s**center and a direction vector, representing the symmetry axes of
+**A list of Axis objects, each defined by the face’s** center and a direction vector, representing the symmetry axes of
 the face.
 
 **Return type:**
@@ -2565,19 +2179,15 @@ the face.
 
 **Raises:**
 
-- 
-**ValueError** – If the face or its underlying representation is empty.
+- **ValueError** – If the face or its underlying representation is empty.
 
-- 
-**ValueError** – If the face is not planar.
+- **ValueError** – If the face is not planar.
 
-**
-*property *axis_of_rotation*: None | Axis***
+`property axis_of_rotation: None | Axis`
 
 Get the rotational axis of a cylinder or torus
 
-**
-center(*center_of: ~build123d.build_enums.CenterOf = *) → Vector[source]**
+`center(center_of: CenterOf = <CenterOf.GEOMETRY>) -> Vector`
 
 Center of Face
 
@@ -2585,7 +2195,7 @@ Return the center based on center_of
 
 **Parameters:**
 
-**center_of** (*CenterOf**, **optional*) – centering option. Defaults to CenterOf.GEOMETRY.
+**center_of** (*CenterOf, optional*) – centering option. Defaults to CenterOf.GEOMETRY.
 
 **Returns:**
 
@@ -2595,38 +2205,30 @@ center
 
 *Vector*
 
-**
-*property *center_location*: Location***
+`property center_location: Location`
 
 Location at the center of face
 
-**
-chamfer_2d(*distance: float*, *distance2: float*, *vertices: Iterable[Vertex]*, *edge: Edge | None = None*) → Face[source]**
+`chamfer_2d(distance: float, distance2: float, vertices: Iterable[Vertex], edge: Edge | None = None) -> Face`
 
 Apply 2D chamfer to a face
 
 **Parameters:**
 
-- 
-**distance** (*float*) – chamfer length
+- **distance** (*float*) – chamfer length
 
-- 
-**distance2** (*float*) – chamfer length
+- **distance2** (*float*) – chamfer length
 
-- 
-**vertices** (*Iterable**[**Vertex**]*) – vertices to chamfer
+- **vertices** (*Iterable[Vertex]*) – vertices to chamfer
 
-- 
-**edge** (*Edge*) – identifies the side where length is measured. The vertices must be
+- **edge** (*Edge*) – identifies the side where length is measured. The vertices must be
 part of the edge
 
 **Raises:**
 
-- 
-**ValueError** – Cannot chamfer at this location
+- **ValueError** – Cannot chamfer at this location
 
-- 
-**ValueError** – One or more vertices are not part of edge
+- **ValueError** – One or more vertices are not part of edge
 
 **Returns:**
 
@@ -2636,8 +2238,7 @@ face with a chamfered corner(s)
 
 *Face*
 
-**
-*classmethod *extrude(*obj: Edge*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Face[source]**
+`classmethod extrude(obj: Edge, direction: VectorLike) -> Face`
 
 Extrude an Edge into a Face.
 
@@ -2647,11 +2248,9 @@ Extrude an Edge into a Face.
 
 **Raises:**
 
-- 
-**ValueError** – Unsupported class
+- **ValueError** – Unsupported class
 
-- 
-**RuntimeError** – Generated invalid result
+- **RuntimeError** – Generated invalid result
 
 **Returns:**
 
@@ -2661,38 +2260,29 @@ extruded shape
 
 *Face*
 
-**
-fillet_2d(*radius: float*, *vertices: Iterable[Vertex]*) → Face[source]**
+`fillet_2d(radius: float, vertices: Iterable[Vertex]) -> Face`
 
 Apply 2D fillet to a face
 
 **Parameters:**
 
-- 
-**radius** – float:
+- **radius** (*float*)
 
-- 
-**vertices** – Iterable[Vertex]:
+- **vertices** (*Iterable[Vertex]*)
 
-Returns:
-
-**
-geom_adaptor() → Geom_Surface[source]**
+`geom_adaptor() -> Geom_Surface`
 
 Return the Geom Surface for this Face
 
-**
-*property *geometry*: None | str***
+`property geometry: None | str`
 
 geometry of planar face
 
-**
-inner_wires() → ShapeList[Wire][source]**
+`inner_wires() -> ShapeList[Wire]`
 
 Extract the inner or hole wires from this Face
 
-**
-*property *is_circular_concave*: bool***
+`property is_circular_concave: bool`
 
 Determine whether a given face is concave relative to its underlying geometry
 for supported geometries: cylinder, sphere, torus.
@@ -2705,8 +2295,7 @@ True if concave; otherwise, False.
 
 *bool*
 
-**
-*property *is_circular_convex*: bool***
+`property is_circular_convex: bool`
 
 Determine whether a given face is convex relative to its underlying geometry
 for supported geometries: cylinder, sphere, torus.
@@ -2719,13 +2308,11 @@ True if convex; otherwise, False.
 
 *bool*
 
-**
-is_coplanar(*plane: Plane*) → bool[source]**
+`is_coplanar(plane: Plane) -> bool`
 
 Is this planar face coplanar with the provided plane
 
-**
-is_inside(*point: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *tolerance: float = 1e-06*) → bool[source]**
+`is_inside(point: VectorLike, tolerance: float = 1e-06) -> bool`
 
 Point inside Face
 
@@ -2734,17 +2321,13 @@ Points on the edge of the Face are considered inside.
 
 **Parameters:**
 
-- 
-**point** (*VectorLike*) – tuple or Vector representing 3D point to be tested
+- **point** (*VectorLike*) – tuple or Vector representing 3D point to be tested
 
-- 
-**tolerance** (*float*) – tolerance for inside determination. Defaults to 1.0e-6.
+- **tolerance** (*float*) – tolerance for inside determination. Defaults to 1.0e-6.
 
-- 
-**point** – VectorLike:
+- **point** (*VectorLike*)
 
-- 
-**tolerance** – float: (Default value = 1.0e-6)
+- **tolerance** – float: (Default value = 1.0e-6)
 
 **Returns:**
 
@@ -2754,21 +2337,17 @@ indicating whether or not point is within Face
 
 *bool*
 
-**
-*property *is_planar*: Plane | None***
+`property is_planar: Plane | None`
 
 Is the face planar even though its geom_type may not be PLANE - if so return Plane
 
-**
-*property *length*: None | float***
+`property length: None | float`
 
 length of planar face
 
-**
-location_at(*surface_point: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*, ***, *x_dir: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → Location[source]**
+`location_at(*args, **kwargs) -> Location`
 
-**
-location_at(*u: float*, *v: float*, ***, *x_dir: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → Location**
+`location_at(*args, **kwargs) -> Location`
 
 location_at
 
@@ -2776,12 +2355,12 @@ Get the location (origin and orientation) on the surface of the face.
 
 This method supports two overloads:
 
-1. location_at(u: float, v: float, *, x_dir: VectorLike | None = None) -> Location
+1. `location_at(u: float, v: float, *, x_dir: VectorLike | None = None) -> Location`
 - Specifies the point in normalized UV parameter space of the face.
 - u and v are floats between 0.0 and 1.0.
 - Optionally override the local X direction using x_dir.
 
-2. location_at(surface_point: VectorLike, *, x_dir: VectorLike | None = None) -> Location
+2. `location_at(surface_point: VectorLike, *, x_dir: VectorLike | None = None) -> Location`
 - Projects the given 3D point onto the face surface.
 - The point must be reasonably close to the face.
 - Optionally override the local X direction using x_dir.
@@ -2791,17 +2370,13 @@ If no arguments are provided, the location at the center of the face
 
 **Parameters:**
 
-- 
-**u** (*float*) – Normalized horizontal surface parameter (optional).
+- **u** (*float*) – Normalized horizontal surface parameter (optional).
 
-- 
-**v** (*float*) – Normalized vertical surface parameter (optional).
+- **v** (*float*) – Normalized vertical surface parameter (optional).
 
-- 
-**surface_point** (*VectorLike*) – A 3D point near the surface (optional).
+- **surface_point** (*VectorLike*) – A 3D point near the surface (optional).
 
-- 
-**x_dir** (*VectorLike**, **optional*) – Direction for the local X axis. If not given,
+- **x_dir** (*VectorLike, optional*) – Direction for the local X axis. If not given,
 the tangent in the U direction is used.
 
 **Returns:**
@@ -2816,29 +2391,23 @@ A full 3D placement at the specified point on the face surface.
 
 **ValueError** – If only one of u or v is provided or invalid keyword args are passed.
 
-**
-*classmethod *make_bezier_surface(*points: list[list[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]]]*, *weights: list[list[float]] | None = None*) → Face[source]**
+`classmethod make_bezier_surface(points: list[list[VectorLike]], weights: list[list[float]] | None = None) -> Face`
 
 Construct a Bézier surface from the provided 2d array of points.
 
 **Parameters:**
 
-- 
-**points** (*list**[**list**[**VectorLike**]**]*) – a 2D list of control points
+- **points** (*list[list[VectorLike]]*) – a 2D list of control points
 
-- 
-**weights** (*list**[**list**[**float**]**]**, **optional*) – control point weights. Defaults to None.
+- **weights** (*list[list[float]], optional*) – control point weights. Defaults to None.
 
 **Raises:**
 
-- 
-**ValueError** – Too few control points
+- **ValueError** – Too few control points
 
-- 
-**ValueError** – Too many control points
+- **ValueError** – Too many control points
 
-- 
-**ValueError** – A weight is required for each control point
+- **ValueError** – A weight is required for each control point
 
 **Returns:**
 
@@ -2848,8 +2417,7 @@ a potentially non-planar face
 
 *Face*
 
-**
-*classmethod *make_gordon_surface(*profiles: Iterable[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | Edge]*, *guides: Iterable[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | Edge]*, *tolerance: float = 0.0003*) → Face[source]**
+`classmethod make_gordon_surface(profiles: Iterable[VectorLike | Edge], guides: Iterable[VectorLike | Edge], tolerance: float = 0.0003) -> Face`
 
 Constructs a Gordon surface from a network of profile and guide curves.
 
@@ -2863,14 +2431,11 @@ Requirements:
 
 **Parameters:**
 
-- 
-**profiles** (*Iterable**[**VectorLike** | **Edge**]*) – Profiles defined as points or edges.
+- **profiles** (*Iterable[VectorLike | Edge]*) – Profiles defined as points or edges.
 
-- 
-**guides** (*Iterable**[**VectorLike** | **Edge**]*) – Guides defined as points or edges.
+- **guides** (*Iterable[VectorLike | Edge]*) – Guides defined as points or edges.
 
-- 
-**tolerance** (*float**, **optional*) – Tolerance used for surface construction and
+- **tolerance** (*float, optional*) – Tolerance used for surface construction and
 intersection calculations.
 
 **Raises:**
@@ -2885,8 +2450,7 @@ the interpolated Gordon surface
 
 *Face*
 
-**
-make_holes(*interior_wires: list[Wire]*) → Face[source]**
+`make_holes(interior_wires: list[Wire]) -> Face`
 
 Make Holes in Face
 
@@ -2901,11 +2465,9 @@ For example, make a series of slots on the curved walls of a cylinder.
 
 **Parameters:**
 
-- 
-**interior_wires** – a list of hole outline wires
+- **interior_wires** – a list of hole outline wires
 
-- 
-**interior_wires** – list[Wire]:
+- **interior_wires** (*list[Wire]*)
 
 **Returns:**
 
@@ -2917,32 +2479,25 @@ For example, make a series of slots on the curved walls of a cylinder.
 
 **Raises:**
 
-- 
-**RuntimeError** – adding interior hole in non-planar face with provided interior_wires
+- **RuntimeError** – adding interior hole in non-planar face with provided interior_wires
 
-- 
-**RuntimeError** – resulting face is not valid
+- **RuntimeError** – resulting face is not valid
 
-**
-*classmethod *make_plane(*plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*) → Face[source]**
+`classmethod make_plane(plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> Face`
 
 Create a unlimited size Face aligned with plane
 
-**
-*classmethod *make_rect(*width: float*, *height: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*) → Face[source]**
+`classmethod make_rect(width: float, height: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> Face`
 
 Make a Rectangle centered on center with the given normal
 
 **Parameters:**
 
-- 
-**width** (*float**, **optional*) – width (local x).
+- **width** (*float, optional*) – width (local x).
 
-- 
-**height** (*float**, **optional*) – height (local y).
+- **height** (*float, optional*) – height (local y).
 
-- 
-**plane** (*Plane**, **optional*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – base plane. Defaults to Plane.XY.
 
 **Returns:**
 
@@ -2952,8 +2507,7 @@ The centered rectangle
 
 *Face*
 
-**
-*classmethod *make_surface(*exterior: Wire | Iterable[Edge]*, *surface_points: Iterable[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]] | None = None*, *interior_wires: Iterable[Wire] | None = None*) → Face[source]**
+`classmethod make_surface(exterior: Wire | Iterable[Edge], surface_points: Iterable[VectorLike] | None = None, interior_wires: Iterable[Wire] | None = None) -> Face`
 
 Create Non-Planar Face
 
@@ -2963,29 +2517,22 @@ interior_wires.
 
 **Parameters:**
 
-- 
-**exterior** (*Union**[**Wire**, **list**[**Edge**]**]*) – Perimeter of face
+- **exterior** (*Union[Wire, list[Edge]]*) – Perimeter of face
 
-- 
-**surface_points** (*list**[**VectorLike**]**, **optional*) – Points on the surface that
+- **surface_points** (*list[VectorLike], optional*) – Points on the surface that
 refine the shape. Defaults to None.
 
-- 
-**interior_wires** (*list**[**Wire**]**, **optional*) – Hole(s) in the face. Defaults to None.
+- **interior_wires** (*list[Wire], optional*) – Hole(s) in the face. Defaults to None.
 
 **Raises:**
 
-- 
-**RuntimeError** – Internal error building face
+- **RuntimeError** – Internal error building face
 
-- 
-**RuntimeError** – Error building non-planar face with provided surface_points
+- **RuntimeError** – Error building non-planar face with provided surface_points
 
-- 
-**RuntimeError** – Error adding interior hole
+- **RuntimeError** – Error adding interior hole
 
-- 
-**RuntimeError** – Generated face is invalid
+- **RuntimeError** – Generated face is invalid
 
 **Returns:**
 
@@ -2995,8 +2542,7 @@ Potentially non-planar face
 
 *Face*
 
-**
-*classmethod *make_surface_from_array_of_points(*points: list[list[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]]]*, *tol: float = 0.01*, *smoothing: tuple[float, float, float] | None = None*, *min_deg: int = 1*, *max_deg: int = 3*) → Face[source]**
+`classmethod make_surface_from_array_of_points(points: list[list[VectorLike]], tol: float = 0.01, smoothing: tuple[float, float, float] | None = None, min_deg: int = 1, max_deg: int = 3) -> Face`
 
 Approximate a spline surface through the provided 2d array of points.
 The first dimension correspond to points on the vertical direction in the parameter
@@ -3006,23 +2552,18 @@ of the parameter space of the face.
 
 **Parameters:**
 
-- 
-**points** (*list**[**list**[**VectorLike**]**]*) – a 2D list of points, first dimension is V
+- **points** (*list[list[VectorLike]]*) – a 2D list of points, first dimension is V
 parameters second is U parameters.
 
-- 
-**tol** (*float**, **optional*) – tolerance of the algorithm. Defaults to 1e-2.
+- **tol** (*float, optional*) – tolerance of the algorithm. Defaults to 1e-2.
 
-- 
-**smoothing** (*Tuple**[**float**, **float**, **float**]**, **optional*) – optional tuple of
+- **smoothing** (*Tuple[float, float, float], optional*) – optional tuple of
 3 weights use for variational smoothing. Defaults to None.
 
-- 
-**min_deg** (*int**, **optional*) – minimum spline degree. Enforced only when
+- **min_deg** (*int, optional*) – minimum spline degree. Enforced only when
 smoothing is None. Defaults to 1.
 
-- 
-**max_deg** (*int**, **optional*) – maximum spline degree. Defaults to 3.
+- **max_deg** (*int, optional*) – maximum spline degree. Defaults to 3.
 
 **Raises:**
 
@@ -3036,11 +2577,9 @@ a potentially non-planar face defined by points
 
 *Face*
 
-**
-*classmethod *make_surface_from_curves(*edge1: Edge*, *edge2: Edge*) → Face[source]**
+`classmethod make_surface_from_curves(*args, **kwargs) -> Face`
 
-**
-*classmethod *make_surface_from_curves(*wire1: Wire*, *wire2: Wire*) → Face**
+`classmethod make_surface_from_curves(*args, **kwargs) -> Face`
 
 make_surface_from_curves
 
@@ -3049,11 +2588,9 @@ these must have the same number of edges.
 
 **Parameters:**
 
-- 
-**curve1** (*Union**[**Edge**,**Wire**]*) – side of surface
+- **curve1** (*Union[Edge,Wire]*) – side of surface
 
-- 
-**curve2** (*Union**[**Edge**,**Wire**]*) – opposite side of surface
+- **curve2** (*Union[Edge,Wire]*) – opposite side of surface
 
 **Returns:**
 
@@ -3063,8 +2600,7 @@ potentially non planar surface
 
 *Face*
 
-**
-*classmethod *make_surface_patch(*edge_face_constraints: Iterable[tuple[Edge, Face, ContinuityLevel]] | None = None*, *edge_constraints: Iterable[Edge] | None = None*, *point_constraints: Iterable[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]] | None = None*) → Face[source]**
+`classmethod make_surface_patch(edge_face_constraints: Iterable[tuple[Edge, Face, ContinuityLevel]] | None = None, edge_constraints: Iterable[Edge] | None = None, point_constraints: Iterable[VectorLike] | None = None) -> Face`
 
 Create a potentially non-planar face patch bounded by exterior edges which can
 be optionally refined using support faces to ensure e.g. tangent surface
@@ -3072,25 +2608,20 @@ continuity. Also can optionally refine the surface using surface points.
 
 **Parameters:**
 
-- 
-**edge_face_constraints** (*list**[**tuple**[**Edge**, **Face**, **ContinuityLevel**]**]**, **optional*) – Edges defining perimeter of face with adjacent support faces subject to
+- **edge_face_constraints** (*list[tuple[Edge, Face, ContinuityLevel]], optional*) – Edges defining perimeter of face with adjacent support faces subject to
 ContinuityLevel. Defaults to None.
 
-- 
-**edge_constraints** (*list**[**Edge**]**, **optional*) – Edges defining perimeter of face
+- **edge_constraints** (*list[Edge], optional*) – Edges defining perimeter of face
 without adjacent support faces. Defaults to None.
 
-- 
-**point_constraints** (*list**[**VectorLike**]**, **optional*) – Points on the surface that
+- **point_constraints** (*list[VectorLike], optional*) – Points on the surface that
 refine the shape. Defaults to None.
 
 **Raises:**
 
-- 
-**RuntimeError** – Error building non-planar face with provided constraints
+- **RuntimeError** – Error building non-planar face with provided constraints
 
-- 
-**RuntimeError** – Generated face is invalid
+- **RuntimeError** – Generated face is invalid
 
 **Returns:**
 
@@ -3100,11 +2631,9 @@ Potentially non-planar face
 
 *Face*
 
-**
-normal_at(*surface_point: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → Vector[source]**
+`normal_at(*args, **kwargs) -> Vector`
 
-**
-normal_at(*u: float*, *v: float*) → Vector**
+`normal_at(*args, **kwargs) -> Vector`
 
 normal_at
 
@@ -3112,7 +2641,7 @@ Computes the normal vector at the desired location on the face.
 
 **Parameters:**
 
-**surface_point** (*VectorLike**, **optional*) – a point that lies on the surface where the normal.
+**surface_point** (*VectorLike, optional*) – a point that lies on the surface where the normal.
 Defaults to None.
 
 **Returns:**
@@ -3123,27 +2652,22 @@ surface normal direction
 
 *Vector*
 
-**
-order* = 2.0***
+`order = 2.0`
 
-**
-outer_wire() → Wire[source]**
+`outer_wire() -> Wire`
 
 Extract the perimeter wire from this Face
 
-**
-position_at(*u: float*, *v: float*) → Vector[source]**
+`position_at(u: float, v: float) -> Vector`
 
 Computes a point on the Face given u, v coordinates.
 
 **Parameters:**
 
-- 
-**u** (*float*) – the horizontal coordinate in the parameter space of the Face,
+- **u** (*float*) – the horizontal coordinate in the parameter space of the Face,
 between 0.0 and 1.0
 
-- 
-**v** (*float*) – the vertical coordinate in the parameter space of the Face,
+- **v** (*float*) – the vertical coordinate in the parameter space of the Face,
 between 0.0 and 1.0
 
 **Returns:**
@@ -3154,8 +2678,7 @@ point on Face
 
 *Vector*
 
-**
-project_to_shape(*target_object: Shape*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → ShapeList[Face | Shell][source]**
+`project_to_shape(target_object: Shape, direction: VectorLike) -> ShapeList[Face | Shell]`
 
 Project Face to target Object
 
@@ -3168,11 +2691,9 @@ returned.
 
 **Parameters:**
 
-- 
-**target_object** (*Shape*) – Object to project onto
+- **target_object** (*Shape*) – Object to project onto
 
-- 
-**direction** (*VectorLike*) – projection direction
+- **direction** (*VectorLike*) – projection direction
 
 **Returns:**
 
@@ -3182,18 +2703,15 @@ Face(s) projected on target object ordered by distance
 
 *ShapeList*[*Face*]
 
-**
-*property *radii*: None | tuple[float, float]***
+`property radii: None | tuple[float, float]`
 
 Return the major and minor radii of a torus otherwise None
 
-**
-*property *radius*: None | float***
+`property radius: None | float`
 
 Return the radius of a cylinder or sphere, otherwise None
 
-**
-*classmethod *revolve(*profile: Edge*, *angle: float*, *axis: Axis*) → Face[source]**
+`classmethod revolve(profile: Edge, angle: float, axis: Axis) -> Face`
 
 sweep
 
@@ -3201,14 +2719,11 @@ Revolve an Edge around an axis.
 
 **Parameters:**
 
-- 
-**profile** (*Edge*) – the object to sweep
+- **profile** (*Edge*) – the object to sweep
 
-- 
-**angle** (*float*) – the angle to revolve through
+- **angle** (*float*) – the angle to revolve through
 
-- 
-**axis** (*Axis*) – rotation Axis
+- **axis** (*Axis*) – rotation Axis
 
 **Returns:**
 
@@ -3218,13 +2733,11 @@ resulting face
 
 *Face*
 
-**
-*property *semi_angle*: None | float***
+`property semi_angle: None | float`
 
 Return the semi angle of a cone, otherwise None
 
-**
-*classmethod *sew_faces(*faces: Iterable[Face]*) → list[ShapeList[Face]][source]**
+`classmethod sew_faces(faces: Iterable[Face]) -> list[ShapeList[Face]]`
 
 sew faces
 
@@ -3232,7 +2745,7 @@ Group contiguous faces and return them in a list of ShapeList
 
 **Parameters:**
 
-**faces** (*Iterable**[**Face**]*) – Faces to sew together
+**faces** (*Iterable[Face]*) – Faces to sew together
 
 **Raises:**
 
@@ -3246,22 +2759,18 @@ grouped contiguous faces
 
 *list*[*ShapeList*[*Face*]]
 
-**
-*classmethod *sweep(*profile: Curve | Edge | Wire*, *path: Curve | Edge | Wire*, *transition=*) → Face[source]**
+`classmethod sweep(profile: Curve | Edge | Wire, path: Curve | Edge | Wire, transition=<Transition.TRANSFORMED>) -> Face`
 
 Sweep a 1D profile along a 1D path. Both the profile and path must be composed
 of only 1 Edge.
 
 **Parameters:**
 
-- 
-**profile** (*Union**[**Curve**,**Edge**,**Wire**]*) – the object to sweep
+- **profile** (*Union[Curve,Edge,Wire]*) – the object to sweep
 
-- 
-**path** (*Union**[**Curve**,**Edge**,**Wire**]*) – the path to follow when sweeping
+- **path** (*Union[Curve,Edge,Wire]*) – the path to follow when sweeping
 
-- 
-**transition** (*Transition**, **optional*) – handling of profile orientation at C1 path
+- **transition** (*Transition, optional*) – handling of profile orientation at C1 path
 discontinuities. Defaults to Transition.TRANSFORMED.
 
 **Raises:**
@@ -3276,8 +2785,7 @@ resulting face, may be non-planar
 
 *Face*
 
-**
-to_arcs(*tolerance: float = 0.001*) → Face[source]**
+`to_arcs(tolerance: float = 0.001) -> Face`
 
 Approximate planar face with arcs and straight line segments.
 
@@ -3287,7 +2795,7 @@ to ensure input faces are in a compatible and canonical form.
 
 **Parameters:**
 
-**tolerance** (*float**, **optional*) – Approximation tolerance. Defaults to 1e-3.
+**tolerance** (*float, optional*) – Approximation tolerance. Defaults to 1e-3.
 
 **Returns:**
 
@@ -3297,23 +2805,19 @@ approximated face
 
 *Face*
 
-**
-*property *volume*: float***
+`property volume: float`
 
 volume - the volume of this Face, which is always zero
 
-**
-*property *width*: None | float***
+`property width: None | float`
 
 width of planar face
 
-**
-wire() → Wire[source]**
+`wire() -> Wire`
 
 Return the outerwire, generate a warning if inner_wires present
 
-**
-without_holes() → Face[source]**
+`without_holes() -> Face`
 
 Remove all of the holes from this face.
 
@@ -3325,14 +2829,11 @@ A new Face instance identical to the original but without any holes.
 
 *Face*
 
-**
-wrap(*planar_shape: Edge*, *surface_loc: Location*, *tolerance: float = 0.001*, *extension_factor: float = 0.1*) → Edge[source]**
+`wrap(planar_shape: T, surface_loc: Location, tolerance: float = 0.001, extension_factor: float = 0.1) -> T`
 
-**
-wrap(*planar_shape: Wire*, *surface_loc: Location*, *tolerance: float = 0.001*, *extension_factor: float = 0.1*) → Wire**
+`wrap(planar_shape: T, surface_loc: Location, tolerance: float = 0.001, extension_factor: float = 0.1) -> T`
 
-**
-wrap(*planar_shape: Face*, *surface_loc: Location*, *tolerance: float = 0.001*, *extension_factor: float = 0.1*) → Face**
+`wrap(planar_shape: T, surface_loc: Location, tolerance: float = 0.001, extension_factor: float = 0.1) -> T`
 
 wrap
 
@@ -3358,17 +2859,13 @@ freeform surfaces while retaining their original proportions.
 
 **Parameters:**
 
-- 
-**planar_shape** (*Edge** | **Wire** | **Face*) – flat shape to wrap around surface
+- **planar_shape** (*Edge | Wire | Face*) – flat shape to wrap around surface
 
-- 
-**surface_loc** (*Location*) – location on surface to wrap
+- **surface_loc** (*Location*) – location on surface to wrap
 
-- 
-**tolerance** (*float**, **optional*) – maximum allowed error. Defaults to 0.001
+- **tolerance** (*float, optional*) – maximum allowed error. Defaults to 0.001
 
-- 
-**extension_factor** (*float**, **optional*) – amount to extend the wrapped first
+- **extension_factor** (*float, optional*) – amount to extend the wrapped first
 and last edges to allow them to cross. Defaults to 0.1
 
 **Raises:**
@@ -3383,8 +2880,7 @@ wrapped shape
 
 *Edge* | *Wire* | *Face*
 
-**
-wrap_faces(*faces: Iterable[Face]*, *path: Wire | Edge*, *start: float = 0.0*) → ShapeList[Face][source]**
+`wrap_faces(faces: Iterable[Face], path: Wire | Edge, start: float = 0.0) -> ShapeList[Face]`
 
 Wrap a sequence of 2D faces onto a 3D surface, aligned along a guiding path.
 
@@ -3406,48 +2902,40 @@ along a reference edge or curve.
 
 **Parameters:**
 
-- 
-**faces** (*Iterable**[**Face**]*) – An iterable of 2D planar faces to be wrapped.
+- **faces** (*Iterable[Face]*) – An iterable of 2D planar faces to be wrapped.
 
-- 
-**path** (*Wire** | **Edge*) – A curve on the target surface that defines the alignment
+- **path** (*Wire | Edge*) – A curve on the target surface that defines the alignment
 direction. The X-position of each face is mapped to a relative position
 along this path.
 
-- 
-**start** (*float**, **optional*) – The relative starting point on the path (between 0.0
+- **start** (*float, optional*) – The relative starting point on the path (between 0.0
 and 1.0) where the first face should be placed. Defaults to 0.0.
 
 **Returns:**
 
-**A list of wrapped face objects, aligned and conformed to the**surface.
+**A list of wrapped face objects, aligned and conformed to the** surface.
 
 **Return type:**
 
 *ShapeList*[*Face*]
 
-**
-*class *Mixin1D(*obj: TopoDS_Shape | None = None*, *label: str = ''*, *color: ColorLike | None = None*, *parent: Compound | None = None*)[source]**
+`class Mixin1D(obj: TopoDS_Shape | None = None, label: str = '', color: ColorLike | None = None, parent: Compound | None = None)`
 
 Methods to add to the Edge and Wire classes
 
-**
-__matmul__(*position: float*) → Vector[source]**
+`__matmul__(position: float) -> Vector`
 
 Position on wire operator @
 
-**
-__mod__(*position: float*) → Vector[source]**
+`__mod__(position: float) -> Vector`
 
 Tangent on wire operator %
 
-**
-*classmethod *cast(*obj: TopoDS_Shape*) → Vertex | Edge | Wire[source]**
+`classmethod cast(obj: TopoDS_Shape) -> Vertex | Edge | Wire`
 
 Returns the right type of wrapper, given a OCCT object
 
-**
-center(*center_of: ~build123d.build_enums.CenterOf = *) → Vector[source]**
+`center(center_of: CenterOf = <CenterOf.GEOMETRY>) -> Vector`
 
 Center of object
 
@@ -3455,7 +2943,7 @@ Return the center based on center_of
 
 **Parameters:**
 
-**center_of** (*CenterOf**, **optional*) – centering option. Defaults to CenterOf.GEOMETRY.
+**center_of** (*CenterOf, optional*) – centering option. Defaults to CenterOf.GEOMETRY.
 
 **Returns:**
 
@@ -3465,8 +2953,7 @@ center
 
 *Vector*
 
-**
-common_plane(**lines: Edge | Wire | None*, *tolerance: float = 1e-06*) → None | Plane[source]**
+`common_plane(*lines: Edge | Wire | None, tolerance: float = 1e-06) -> None | Plane`
 
 Find the plane containing all the edges/wires (including self). If there
 is no common plane return None. If the edges are coaxial, select one
@@ -3474,11 +2961,9 @@ of the infinite number of valid planes.
 
 **Parameters:**
 
-- 
-**lines** (*sequence** of **Edge** | **Wire*) – edges in common with self
+- **lines** (*sequence of Edge | Wire*) – edges in common with self
 
-- 
-**tolerance** (*float*) – amount lines can deviate from plane. Defaults to TOLERANCE.
+- **tolerance** (*float*) – amount lines can deviate from plane. Defaults to TOLERANCE.
 
 **Returns:**
 
@@ -3488,8 +2973,7 @@ Either the common plane or None
 
 *None* | *Plane*
 
-**
-curvature_comb(*count: int = 100*, *max_tooth_size: float | None = None*) → ShapeList[Edge][source]**
+`curvature_comb(count: int = 100, max_tooth_size: float | None = None) -> ShapeList[Edge]`
 
 Build a *curvature comb* for a planar (XY) 1D curve.
 
@@ -3498,21 +2982,17 @@ perpendicular to the curve that visualize the signed curvature κ(u).
 Tooth length is proportional to |κ| and the direction encodes the sign
 (left normal for κ>0, right normal for κ:**
 
-- 
-**count** (*int**, **optional*) – Number of uniformly spaced samples over the normalized
+- **count** (*int, optional*) – Number of uniformly spaced samples over the normalized
 parameter. Increase for a denser comb. Defaults to 100.
 
-- 
-**max_tooth_size** (*float** | **None**, **optional*) – Maximum tooth height in model units.
+- **max_tooth_size** (*float | None, optional*) – Maximum tooth height in model units.
 If None, set to 10% maximum curve dimension. Defaults to None.
 
 **Raises:**
 
-- 
-**ValueError** – Empty curve.
+- **ValueError** – Empty curve.
 
-- 
-**ValueError** – If the curve is not planar on Plane.XY.
+- **ValueError** – If the curve is not planar on Plane.XY.
 
 **Returns:**
 
@@ -3525,17 +3005,13 @@ and oriented along the left normal n̂ = normalize(t) × +Z.
 
 Notes
 
-- 
-On circles, κ = 1/R so tooth length is constant.
+- On circles, κ = 1/R so tooth length is constant.
 
-- 
-On straight segments, κ = 0 so no teeth are drawn.
+- On straight segments, κ = 0 so no teeth are drawn.
 
-- 
-At inflection points κ→0 and the tooth flips direction.
+- At inflection points κ→0 and the tooth flips direction.
 
-- 
-At C0 corners the tangent is discontinuous; nearby teeth may jump.
+- At C0 corners the tangent is discontinuous; nearby teeth may jump.
 C1 yields continuous direction; C2 yields continuous magnitude as well.
 
 Example
@@ -3543,8 +3019,7 @@ Example
 >>> comb = my_wire.curvature_comb(count=200, max_tooth_size=2.0)
 >>> show(my_wire, Curve(comb))
 
-**
-derivative_at(*position: float | ~build123d.geometry.Vector | tuple[float, float] | tuple[float, float, float] | ~collections.abc.Sequence[float], order: int = 2, position_mode: ~build123d.build_enums.PositionMode = *) → Vector[source]**
+`derivative_at(position: float | VectorLike, order: int = 2, position_mode: PositionMode = <PositionMode.PARAMETER>) -> Vector`
 
 Derivative At
 
@@ -3552,14 +3027,11 @@ Generate a derivative along the underlying curve.
 
 **Parameters:**
 
-- 
-**position** (*float** | **VectorLike*) – distance, parameter value or point
+- **position** (*float | VectorLike*) – distance, parameter value or point
 
-- 
-**order** (*int*) – derivative order. Defaults to 2
+- **order** (*int*) – derivative order. Defaults to 2
 
-- 
-**position_mode** (*PositionMode**, **optional*) – position calculation mode. Defaults to
+- **position_mode** (*PositionMode, optional*) – position calculation mode. Defaults to
 PositionMode.PARAMETER.
 
 **Raises:**
@@ -3574,30 +3046,25 @@ position on the underlying curve
 
 *Vector*
 
-**
-end_point() → Vector[source]**
+`end_point() -> Vector`
 
 The end point of this edge.
 
 Note that circles may have identical start and end points.
 
-**
-*classmethod *extrude(*obj: Shape*, *direction: VectorLike*) → Edge | Face | Shell | Solid | Compound[source]**
+`classmethod extrude(obj: Shape, direction: VectorLike) -> Edge | Face | Shell | Solid | Compound`
 
 Unused - only here because Mixin1D is a subclass of Shape
 
-**
-*property *is_closed*: bool***
+`property is_closed: bool`
 
 Are the start and end points equal?
 
-**
-*property *is_forward*: bool***
+`property is_forward: bool`
 
 Does the Edge/Wire loop forward or reverse
 
-**
-*property *is_interior*: bool***
+`property is_interior: bool`
 
 Check if the edge is an interior edge.
 
@@ -3612,13 +3079,11 @@ True if the edge is an interior edge, False otherwise.
 
 *bool*
 
-**
-*property *length*: float***
+`property length: float`
 
 Edge or Wire length
 
-**
-location_at(*distance: float*, *position_mode: ~build123d.build_enums.PositionMode = *, *frame_method: ~build123d.build_enums.FrameMethod = *, *x_dir: ~build123d.geometry.Vector | tuple[float*, *float] | tuple[float*, *float*, *float] | ~collections.abc.Sequence[float] | None = None*) → Location[source]**
+`location_at(distance: float, position_mode: PositionMode = <PositionMode.PARAMETER>, frame_method: FrameMethod = <FrameMethod.FRENET>, x_dir: VectorLike | None = None) -> Location`
 
 Locations along curve
 
@@ -3626,35 +3091,30 @@ Generate a location along the underlying curve.
 
 **Parameters:**
 
-- 
-**distance** (*float*) – distance or parameter value
+- **distance** (*float*) – distance or parameter value
 
-- 
-**position_mode** (*PositionMode**, **optional*) – position calculation mode.
+- **position_mode** (*PositionMode, optional*) – position calculation mode.
 Defaults to PositionMode.PARAMETER.
 
-- 
-**frame_method** (*FrameMethod**, **optional*) – moving frame calculation method.
+- **frame_method** (*FrameMethod, optional*) – moving frame calculation method.
 The FRENET frame can “twist” or flip unexpectedly, especially near flat
 spots. The CORRECTED frame behaves more like a “camera dolly” or
 sweep profile would — it’s smoother and more stable.
 Defaults to FrameMethod.FRENET.
 
-- 
-**x_dir** (*VectorLike**, **optional*) – override the x_dir to help with plane
+- **x_dir** (*VectorLike, optional*) – override the x_dir to help with plane
 creation along a 1D shape. Must be perpendicular to shapes tangent.
 Defaults to None.
 
 **Returns:**
 
-**A Location object representing local coordinate system**at the specified distance.
+**A Location object representing local coordinate system** at the specified distance.
 
 **Return type:**
 
 *Location*
 
-**
-locations(*distances: ~collections.abc.Iterable[float], position_mode: ~build123d.build_enums.PositionMode = , frame_method: ~build123d.build_enums.FrameMethod = , x_dir: ~build123d.geometry.Vector | tuple[float, float] | tuple[float, float, float] | ~collections.abc.Sequence[float] | None = None*) → list[Location][source]**
+`locations(distances: Iterable[float], position_mode: PositionMode = <PositionMode.PARAMETER>, frame_method: FrameMethod = <FrameMethod.FRENET>, x_dir: VectorLike | None = None) -> list[Location]`
 
 Locations along curve
 
@@ -3662,32 +3122,27 @@ Generate location along the curve
 
 **Parameters:**
 
-- 
-**distances** (*Iterable**[**float**]*) – distance or parameter values
+- **distances** (*Iterable[float]*) – distance or parameter values
 
-- 
-**position_mode** (*PositionMode**, **optional*) – position calculation mode.
+- **position_mode** (*PositionMode, optional*) – position calculation mode.
 Defaults to PositionMode.PARAMETER.
 
-- 
-**frame_method** (*FrameMethod**, **optional*) – moving frame calculation method.
+- **frame_method** (*FrameMethod, optional*) – moving frame calculation method.
 Defaults to FrameMethod.FRENET.
 
-- 
-**x_dir** (*VectorLike**, **optional*) – override the x_dir to help with plane
+- **x_dir** (*VectorLike, optional*) – override the x_dir to help with plane
 creation along a 1D shape. Must be perpendicular to shapes tangent.
 Defaults to None.
 
 **Returns:**
 
-**A list of Location objects representing local coordinate**systems at the specified distances.
+**A list of Location objects representing local coordinate** systems at the specified distances.
 
 **Return type:**
 
 *list*[*Location*]
 
-**
-normal() → Vector[source]**
+`normal() -> Vector`
 
 Calculate the normal Vector. Only possible for planar curves.
 
@@ -3697,10 +3152,7 @@ normal vector
 
 Args:
 
-Returns:
-
-**
-offset_2d(*distance: float*, *kind: ~build123d.build_enums.Kind = *, *side: ~build123d.build_enums.Side = *, *closed: bool = True*) → Edge | Wire[source]**
+`offset_2d(distance: float, kind: Kind = <Kind.ARC>, side: Side = <Side.BOTH>, closed: bool = True) -> Edge | Wire`
 
 2d Offset
 
@@ -3708,26 +3160,20 @@ Offsets a planar edge/wire
 
 **Parameters:**
 
-- 
-**distance** (*float*) – distance from edge/wire to offset
+- **distance** (*float*) – distance from edge/wire to offset
 
-- 
-**kind** (*Kind**, **optional*) – offset corner transition. Defaults to Kind.ARC.
+- **kind** (*Kind, optional*) – offset corner transition. Defaults to Kind.ARC.
 
-- 
-**side** (*Side**, **optional*) – side to place offset. Defaults to Side.BOTH.
+- **side** (*Side, optional*) – side to place offset. Defaults to Side.BOTH.
 
-- 
-**closed** (*bool**, **optional*) – if Side!=BOTH, close the LEFT or RIGHT
+- **closed** (*bool, optional*) – if Side!=BOTH, close the LEFT or RIGHT
 offset. Defaults to True.
 
 **Raises:**
 
-- 
-**RuntimeError** – Multiple Wires generated
+- **RuntimeError** – Multiple Wires generated
 
-- 
-**RuntimeError** – Unexpected result type
+- **RuntimeError** – Unexpected result type
 
 **Returns:**
 
@@ -3737,21 +3183,17 @@ offset wire
 
 *Wire*
 
-**
-perpendicular_line(*length: float*, *u_value: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*) → Edge[source]**
+`perpendicular_line(length: float, u_value: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> Edge`
 
 Create a line on the given plane perpendicular to and centered on beginning of self
 
 **Parameters:**
 
-- 
-**length** (*float*) – line length
+- **length** (*float*) – line length
 
-- 
-**u_value** (*float*) – position along line between 0.0 and 1.0
+- **u_value** (*float*) – position along line between 0.0 and 1.0
 
-- 
-**plane** (*Plane**, **optional*) – plane containing perpendicular line. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – plane containing perpendicular line. Defaults to Plane.XY.
 
 **Returns:**
 
@@ -3761,8 +3203,7 @@ perpendicular line
 
 *Edge*
 
-**
-position_at(*position: float*, *position_mode: ~build123d.build_enums.PositionMode = *) → Vector[source]**
+`position_at(position: float, position_mode: PositionMode = <PositionMode.PARAMETER>) -> Vector`
 
 Position At
 
@@ -3770,11 +3211,9 @@ Generate a position along the underlying Wire.
 
 **Parameters:**
 
-- 
-**position** (*float*) – distance or parameter value
+- **position** (*float*) – distance or parameter value
 
-- 
-**position_mode** (*PositionMode**, **optional*) – position calculation mode. Defaults to
+- **position_mode** (*PositionMode, optional*) – position calculation mode. Defaults to
 PositionMode.PARAMETER.
 
 **Returns:**
@@ -3785,8 +3224,7 @@ position on the underlying curve
 
 *Vector*
 
-**
-positions(*distances: ~collections.abc.Iterable[float] | None = None*, *position_mode: ~build123d.build_enums.PositionMode = *, *deflection: float | None = None*) → list[Vector][source]**
+`positions(distances: Iterable[float] | None = None, position_mode: PositionMode = <PositionMode.PARAMETER>, deflection: float | None = None) -> list[Vector]`
 
 Positions along curve
 
@@ -3794,16 +3232,13 @@ Generate positions along the underlying curve
 
 **Parameters:**
 
-- 
-**distances** (*Iterable**[**float**] **| **None**, **optional*) – distance or parameter values.
+- **distances** (*Iterable[float] | None, optional*) – distance or parameter values.
 Defaults to None.
 
-- 
-**position_mode** (*PositionMode**, **optional*) – position calculation mode only applies
+- **position_mode** (*PositionMode, optional*) – position calculation mode only applies
 when using distances. Defaults to PositionMode.PARAMETER.
 
-- 
-**deflection** (*float** | **None**, **optional*) – maximum deflection between the curve and
+- **deflection** (*float | None, optional*) – maximum deflection between the curve and
 the polygon that results from the computed points. Defaults to None.
 
 **Returns:**
@@ -3814,44 +3249,33 @@ positions along curve
 
 *list*[*Vector*]
 
-**
-project(*face: Face*, *direction: VectorLike*, *closest: bool = True*) → Edge | Wire | ShapeList[Edge | Wire][source]**
+`project(face: Face, direction: VectorLike, closest: bool = True) -> Edge | Wire | ShapeList[Edge | Wire]`
 
 Project onto a face along the specified direction
 
 **Parameters:**
 
-- 
-**face** – Face:
+- **face** (*Face*)
 
-- 
-**direction** – VectorLike:
+- **direction** (*VectorLike*)
 
-- 
-**closest** – bool: (Default value = True)
+- **closest** – bool: (Default value = True)
 
-Returns:
-
-**
-project_to_viewport(*viewport_origin: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *viewport_up: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 1)*, *look_at: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*, *focus: float | None = None*) → tuple[ShapeList[Edge], ShapeList[Edge]][source]**
+`project_to_viewport(viewport_origin: VectorLike, viewport_up: VectorLike = (0, 0, 1), look_at: VectorLike | None = None, focus: float | None = None) -> tuple[ShapeList[Edge], ShapeList[Edge]]`
 
 Project a shape onto a viewport returning visible and hidden Edges.
 
 **Parameters:**
 
-- 
-**viewport_origin** (*VectorLike*) – location of viewport
+- **viewport_origin** (*VectorLike*) – location of viewport
 
-- 
-**viewport_up** (*VectorLike**, **optional*) – direction of the viewport y axis.
+- **viewport_up** (*VectorLike, optional*) – direction of the viewport y axis.
 Defaults to (0, 0, 1).
 
-- 
-**look_at** (*VectorLike**, **optional*) – point to look at.
+- **look_at** (*VectorLike, optional*) – point to look at.
 Defaults to None (center of shape).
 
-- 
-**focus** (*float**, **optional*) – the focal length for perspective projection
+- **focus** (*float, optional*) – the focal length for perspective projection
 Defaults to None (orthographic projection)
 
 **Returns:**
@@ -3862,8 +3286,7 @@ visible & hidden Edges
 
 *tuple*[*ShapeList*[*Edge*],*ShapeList*[*Edge*]]
 
-**
-*property *radius*: float***
+`property radius: float`
 
 Calculate the radius.
 
@@ -3879,29 +3302,24 @@ radius
 
 **ValueError** – if kernel can not reduce the shape to a circular edge
 
-**
-start_point() → Vector[source]**
+`start_point() -> Vector`
 
 The start point of this edge
 
 Note that circles may have identical start and end points.
 
-**
-tangent_angle_at(*location_param: float = 0.5*, *position_mode: ~build123d.build_enums.PositionMode = *, *plane: ~build123d.geometry.Plane = Plane((0*, *0*, *0)*, *(1*, *0*, *0)*, *(0*, *0*, *1))*) → float[source]**
+`tangent_angle_at(location_param: float = 0.5, position_mode: PositionMode = <PositionMode.PARAMETER>, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> float`
 
 Compute the tangent angle at the specified location
 
 **Parameters:**
 
-- 
-**location_param** (*float**, **optional*) – distance or parameter value. Defaults to 0.5.
+- **location_param** (*float, optional*) – distance or parameter value. Defaults to 0.5.
 
-- 
-**position_mode** (*PositionMode**, **optional*) – position calculation mode.
+- **position_mode** (*PositionMode, optional*) – position calculation mode.
 Defaults to PositionMode.PARAMETER.
 
-- 
-**plane** (*Plane**, **optional*) – plane line was constructed on. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – plane line was constructed on. Defaults to Plane.XY.
 
 **Returns:**
 
@@ -3911,20 +3329,17 @@ angle in degrees between 0 and 360
 
 *float*
 
-**
-tangent_at(*position: float | ~build123d.geometry.Vector | tuple[float*, *float] | tuple[float*, *float*, *float] | ~collections.abc.Sequence[float] = 0.5*, *position_mode: ~build123d.build_enums.PositionMode = *) → Vector[source]**
+`tangent_at(position: float | VectorLike = 0.5, position_mode: PositionMode = <PositionMode.PARAMETER>) -> Vector`
 
 Find the tangent at a given position on the 1D shape where the position
 is either a float (or int) parameter or a point that lies on the shape.
 
 **Parameters:**
 
-- 
-**position** (*float** | **VectorLike*) – distance, parameter value, or
+- **position** (*float | VectorLike*) – distance, parameter value, or
 point on shape. Defaults to 0.5.
 
-- 
-**position_mode** (*PositionMode**, **optional*) – position calculation mode.
+- **position_mode** (*PositionMode, optional*) – position calculation mode.
 Defaults to PositionMode.PARAMETER.
 
 **Returns:**
@@ -3935,28 +3350,23 @@ tangent value
 
 *Vector*
 
-**
-*property *volume*: float***
+`property volume: float`
 
 volume - the volume of this Edge or Wire, which is always zero
 
-**
-*class *Mixin2D(*obj: TopoDS_Shape | None = None*, *label: str = ''*, *color: ColorLike | None = None*, *parent: Compound | None = None*)[source]**
+`class Mixin2D(obj: TopoDS_Shape | None = None, label: str = '', color: ColorLike | None = None, parent: Compound | None = None)`
 
 Additional methods to add to Face and Shell class
 
-**
-*classmethod *cast(*obj: TopoDS_Shape*) → Vertex | Edge | Wire | Face | Shell[source]**
+`classmethod cast(obj: TopoDS_Shape) -> Vertex | Edge | Wire | Face | Shell`
 
 Returns the right type of wrapper, given a OCCT object
 
-**
-*classmethod *extrude(*obj: Shape*, *direction: VectorLike*) → Edge | Face | Shell | Solid | Compound[source]**
+`classmethod extrude(obj: Shape, direction: VectorLike) -> Edge | Face | Shell | Solid | Compound`
 
 Unused - only here because Mixin1D is a subclass of Shape
 
-**
-find_intersection_points(*other: Axis*, *tolerance: float = 1e-06*) → list[tuple[Vector, Vector]][source]**
+`find_intersection_points(other: Axis, tolerance: float = 1e-06) -> list[tuple[Vector, Vector]]`
 
 Find point and normal at intersection
 
@@ -3974,36 +3384,29 @@ Point and normal of intersection
 
 *list*[*tuple*[*Vector*, *Vector*]]
 
-**
-*abstract *location_at(**args: Any*, ***kwargs: Any*) → Location[source]**
+`abstract location_at(*args: Any, **kwargs: Any) -> Location`
 
 A location from a face or shell
 
-**
-offset(*amount: float*) → Self[source]**
+`offset(amount: float) -> Self`
 
 Return a copy of self moved along the normal by amount
 
-**
-project_to_viewport(*viewport_origin: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *viewport_up: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 1)*, *look_at: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*, *focus: float | None = None*) → tuple[ShapeList[Edge], ShapeList[Edge]][source]**
+`project_to_viewport(viewport_origin: VectorLike, viewport_up: VectorLike = (0, 0, 1), look_at: VectorLike | None = None, focus: float | None = None) -> tuple[ShapeList[Edge], ShapeList[Edge]]`
 
 Project a shape onto a viewport returning visible and hidden Edges.
 
 **Parameters:**
 
-- 
-**viewport_origin** (*VectorLike*) – location of viewport
+- **viewport_origin** (*VectorLike*) – location of viewport
 
-- 
-**viewport_up** (*VectorLike**, **optional*) – direction of the viewport y axis.
+- **viewport_up** (*VectorLike, optional*) – direction of the viewport y axis.
 Defaults to (0, 0, 1).
 
-- 
-**look_at** (*VectorLike**, **optional*) – point to look at.
+- **look_at** (*VectorLike, optional*) – point to look at.
 Defaults to None (center of shape).
 
-- 
-**focus** (*float**, **optional*) – the focal length for perspective projection
+- **focus** (*float, optional*) – the focal length for perspective projection
 Defaults to None (orthographic projection)
 
 **Returns:**
@@ -4014,8 +3417,7 @@ visible & hidden Edges
 
 *tuple*[*ShapeList*[*Edge*],*ShapeList*[*Edge*]]
 
-**
-touch(*other: Shape*, *tolerance: float = 1e-06*, *found_faces: ShapeList | None = None*, *found_edges: ShapeList | None = None*) → ShapeList[source]**
+`touch(other: Shape, tolerance: float = 1e-06, found_faces: ShapeList | None = None, found_edges: ShapeList | None = None) -> ShapeList`
 
 Find boundary contacts between this 2D shape and another shape.
 
@@ -4028,34 +3430,27 @@ For Face/Shell:
 
 **Parameters:**
 
-- 
-**other** – Shape to find contacts with
+- **other** – Shape to find contacts with
 
-- 
-**tolerance** – tolerance for contact detection
+- **tolerance** – tolerance for contact detection
 
-- 
-**found_faces** – pre-found faces to filter against (from Mixin3D.touch)
+- **found_faces** – pre-found faces to filter against (from Mixin3D.touch)
 
-- 
-**found_edges** – pre-found edges to filter against (from Mixin3D.touch)
+- **found_edges** – pre-found edges to filter against (from Mixin3D.touch)
 
 **Returns:**
 
 ShapeList of contact shapes (Vertex only for 2D+2D)
 
-**
-*class *Mixin3D(*obj: TopoDS_Shape | None = None*, *label: str = ''*, *color: ColorLike | None = None*, *parent: Compound | None = None*)[source]**
+`class Mixin3D(obj: TopoDS_Shape | None = None, label: str = '', color: ColorLike | None = None, parent: Compound | None = None)`
 
 Additional methods to add to 3D Shape classes
 
-**
-*classmethod *cast(*obj: TopoDS_Shape*) → Self[source]**
+`classmethod cast(obj: TopoDS_Shape) -> Self`
 
 Returns the right type of wrapper, given a OCCT object
 
-**
-center(*center_of: ~build123d.build_enums.CenterOf = *) → Vector[source]**
+`center(center_of: CenterOf = <CenterOf.MASS>) -> Vector`
 
 Return center of object
 
@@ -4063,15 +3458,13 @@ Find center of object
 
 **Parameters:**
 
-**center_of** (*CenterOf**, **optional*) – center option. Defaults to CenterOf.MASS.
+**center_of** (*CenterOf, optional*) – center option. Defaults to CenterOf.MASS.
 
 **Raises:**
 
-- 
-**ValueError** – Center of GEOMETRY is not supported for this object
+- **ValueError** – Center of GEOMETRY is not supported for this object
 
-- 
-**NotImplementedError** – Unable to calculate center of mass of this object
+- **NotImplementedError** – Unable to calculate center of mass of this object
 
 **Returns:**
 
@@ -4081,8 +3474,7 @@ center
 
 *Vector*
 
-**
-chamfer(*length: float*, *length2: float | None*, *edge_list: Iterable[Edge]*, *face: Face | None = None*) → Self[source]**
+`chamfer(length: float, length2: float | None, edge_list: Iterable[Edge], face: Face | None = None) -> Solid | Part`
 
 Chamfer
 
@@ -4090,19 +3482,15 @@ Chamfers the specified edges of this solid.
 
 **Parameters:**
 
-- 
-**length** (*float*) – length > 0, the length (length) of the chamfer
+- **length** (*float*) – length > 0, the length (length) of the chamfer
 
-- 
-**length2** (*Optional**[**float**]*) – length2 > 0, optional parameter for asymmetrical
+- **length2** (*Optional[float]*) – length2 > 0, optional parameter for asymmetrical
 chamfer. Should be None if not required.
 
-- 
-**edge_list** (*Iterable**[**Edge**]*) – a list of Edge objects, which must belong to
+- **edge_list** (*Iterable[Edge]*) – a list of Edge objects, which must belong to
 this solid
 
-- 
-**face** (*Face**, **optional*) – identifies the side where length is measured. The edge(s)
+- **face** (*Face, optional*) – identifies the side where length is measured. The edge(s)
 must be part of the face
 
 **Returns:**
@@ -4113,33 +3501,25 @@ Chamfered solid
 
 Self
 
-**
-dprism(*basis: Face | None*, *bounds: list[Face | Wire]*, *depth: float | None = None*, *taper: float = 0*, *up_to_face: Face | None = None*, *thru_all: bool = True*, *additive: bool = True*) → Solid[source]**
+`dprism(basis: Face | None, bounds: list[Face | Wire], depth: float | None = None, taper: float = 0, up_to_face: Face | None = None, thru_all: bool = True, additive: bool = True) -> Solid`
 
 Make a prismatic feature (additive or subtractive)
 
 **Parameters:**
 
-- 
-**basis** (*Optional**[**Face**]*) – face to perform the operation on
+- **basis** (*Optional[Face]*) – face to perform the operation on
 
-- 
-**bounds** (*list**[**Union**[**Face**,**Wire**]**]*) – list of profiles
+- **bounds** (*list[Union[Face,Wire]]*) – list of profiles
 
-- 
-**depth** (*float**, **optional*) – depth of the cut or extrusion. Defaults to None.
+- **depth** (*float, optional*) – depth of the cut or extrusion. Defaults to None.
 
-- 
-**taper** (*float**, **optional*) – in degrees. Defaults to 0.
+- **taper** (*float, optional*) – in degrees. Defaults to 0.
 
-- 
-**up_to_face** (*Face**, **optional*) – a face to extrude until. Defaults to None.
+- **up_to_face** (*Face, optional*) – a face to extrude until. Defaults to None.
 
-- 
-**thru_all** (*bool**, **optional*) – cut thru_all. Defaults to True.
+- **thru_all** (*bool, optional*) – cut thru_all. Defaults to True.
 
-- 
-**additive** (*bool**, **optional*) – Defaults to True.
+- **additive** (*bool, optional*) – Defaults to True.
 
 **Returns:**
 
@@ -4149,13 +3529,11 @@ prismatic feature
 
 *Solid*
 
-**
-*classmethod *extrude(*obj: Shape*, *direction: VectorLike*) → Edge | Face | Shell | Solid | Compound[source]**
+`classmethod extrude(obj: Shape, direction: VectorLike) -> Edge | Face | Shell | Solid | Compound`
 
 Unused - only here because Mixin1D is a subclass of Shape
 
-**
-fillet(*radius: float*, *edge_list: Iterable[Edge]*) → Self[source]**
+`fillet(radius: float, edge_list: Iterable[Edge]) -> Solid | Part`
 
 Fillet
 
@@ -4163,11 +3541,9 @@ Fillets the specified edges of this solid.
 
 **Parameters:**
 
-- 
-**radius** (*float*) – float > 0, the radius of the fillet
+- **radius** (*float*) – float > 0, the radius of the fillet
 
-- 
-**edge_list** (*Iterable**[**Edge**]*) – a list of Edge objects, which must belong to this solid
+- **edge_list** (*Iterable[Edge]*) – a list of Edge objects, which must belong to this solid
 
 **Returns:**
 
@@ -4177,8 +3553,7 @@ Filleted solid
 
 *Any*
 
-**
-find_intersection_points(*other: Axis*, *tolerance: float = 1e-06*) → list[tuple[Vector, Vector]]**
+`find_intersection_points(other: Axis, tolerance: float = 1e-06) -> list[tuple[Vector, Vector]]`
 
 Find point and normal at intersection
 
@@ -4196,8 +3571,7 @@ Point and normal of intersection
 
 *list*[*tuple*[*Vector*, *Vector*]]
 
-**
-hollow(*faces: ~collections.abc.Iterable[~topology.two_d.Face] | None*, *thickness: float*, *tolerance: float = 0.0001*, *kind: ~build123d.build_enums.Kind = *) → Solid[source]**
+`hollow(faces: Iterable[Face] | None, thickness: float, tolerance: float = 0.0001, kind: Kind = <Kind.ARC>) -> Solid`
 
 Hollow
 
@@ -4205,21 +3579,15 @@ Return the outer shelled solid of self.
 
 **Parameters:**
 
-- 
-**faces** (*Optional**[**Iterable**[**Face**]**]*) – faces to be removed,
+- **faces** (*Optional[Iterable[Face]]*) – faces to be removed,
+which must be part of the solid. Can be an empty list.
 
-- 
-**list.** (*which must be part** of **the solid. Can be an empty*)
-
-- 
-**thickness** (*float*) – shell thickness - positive shells outwards, negative
+- **thickness** (*float*) – shell thickness - positive shells outwards, negative
 shells inwards.
 
-- 
-**tolerance** (*float**, **optional*) – modelling tolerance of the method. Defaults to 0.0001.
+- **tolerance** (*float, optional*) – modelling tolerance of the method. Defaults to 0.0001.
 
-- 
-**kind** (*Kind**, **optional*) – intersection type. Defaults to Kind.ARC.
+- **kind** (*Kind, optional*) – intersection type. Defaults to Kind.ARC.
 
 **Raises:**
 
@@ -4233,32 +3601,26 @@ A hollow solid.
 
 *Solid*
 
-**
-is_inside(*point: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *tolerance: float = 1e-06*) → bool[source]**
+`is_inside(point: VectorLike, tolerance: float = 1e-06) -> bool`
 
 Returns whether or not the point is inside a solid or compound
 object within the specified tolerance.
 
 **Parameters:**
 
-- 
-**point** – tuple or Vector representing 3D point to be tested
+- **point** – tuple or Vector representing 3D point to be tested
 
-- 
-**tolerance** – tolerance for inside determination, default=1.0e-6
+- **tolerance** – tolerance for inside determination, default=1.0e-6
 
-- 
-**point** – VectorLike:
+- **point** (*VectorLike*)
 
-- 
-**tolerance** – float: (Default value = 1.0e-6)
+- **tolerance** – float: (Default value = 1.0e-6)
 
 **Returns:**
 
 bool indicating whether or not point is within solid
 
-**
-max_fillet(*edge_list: Iterable[Edge]*, *tolerance=0.1*, *max_iterations: int = 10*) → float[source]**
+`max_fillet(edge_list: Iterable[Edge], tolerance=0.1, max_iterations: int = 10) -> float`
 
 Find Maximum Fillet Size
 
@@ -4272,22 +3634,17 @@ max_fillet_radius = my_shape.max_fillet(shape_edges, tolerance=0.5, max_iteratio
 
 **Parameters:**
 
-- 
-**edge_list** (*Iterable**[**Edge**]*) – a sequence of Edge objects, which must belong to this solid
+- **edge_list** (*Iterable[Edge]*) – a sequence of Edge objects, which must belong to this solid
 
-- 
-**tolerance** (*float**, **optional*) – maximum error from actual value. Defaults to 0.1.
+- **tolerance** (*float, optional*) – maximum error from actual value. Defaults to 0.1.
 
-- 
-**max_iterations** (*int**, **optional*) – maximum number of recursive iterations. Defaults to 10.
+- **max_iterations** (*int, optional*) – maximum number of recursive iterations. Defaults to 10.
 
 **Raises:**
 
-- 
-**RuntimeError** – failed to find the max value
+- **RuntimeError** – failed to find the max value
 
-- 
-**ValueError** – the provided Shape is invalid
+- **ValueError** – the provided Shape is invalid
 
 **Returns:**
 
@@ -4297,8 +3654,7 @@ maximum fillet radius
 
 *float*
 
-**
-offset_3d(*openings: ~collections.abc.Iterable[~topology.two_d.Face] | None*, *thickness: float*, *tolerance: float = 0.0001*, *kind: ~build123d.build_enums.Kind = *) → Solid[source]**
+`offset_3d(openings: Iterable[Face] | None, thickness: float, tolerance: float = 0.0001, kind: Kind = <Kind.ARC>) -> Solid`
 
 Shell
 
@@ -4306,18 +3662,14 @@ Make an offset solid of self.
 
 **Parameters:**
 
-- 
-**openings** (*Optional**[**Iterable**[**Face**]**]*) – faces to be removed,
+- **openings** (*Optional[Iterable[Face]]*) – faces to be removed,
 which must be part of the solid. Can be an empty list.
 
-- 
-**thickness** (*float*) – offset amount - positive offset outwards, negative inwards
+- **thickness** (*float*) – offset amount - positive offset outwards, negative inwards
 
-- 
-**tolerance** (*float**, **optional*) – modelling tolerance of the method. Defaults to 0.0001.
+- **tolerance** (*float, optional*) – modelling tolerance of the method. Defaults to 0.0001.
 
-- 
-**kind** (*Kind**, **optional*) – intersection type. Defaults to Kind.ARC.
+- **kind** (*Kind, optional*) – intersection type. Defaults to Kind.ARC.
 
 **Raises:**
 
@@ -4331,26 +3683,21 @@ A shelled solid.
 
 *Solid*
 
-**
-project_to_viewport(*viewport_origin: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *viewport_up: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 1)*, *look_at: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*, *focus: float | None = None*) → tuple[ShapeList[Edge], ShapeList[Edge]][source]**
+`project_to_viewport(viewport_origin: VectorLike, viewport_up: VectorLike = (0, 0, 1), look_at: VectorLike | None = None, focus: float | None = None) -> tuple[ShapeList[Edge], ShapeList[Edge]]`
 
 Project a shape onto a viewport returning visible and hidden Edges.
 
 **Parameters:**
 
-- 
-**viewport_origin** (*VectorLike*) – location of viewport
+- **viewport_origin** (*VectorLike*) – location of viewport
 
-- 
-**viewport_up** (*VectorLike**, **optional*) – direction of the viewport y axis.
+- **viewport_up** (*VectorLike, optional*) – direction of the viewport y axis.
 Defaults to (0, 0, 1).
 
-- 
-**look_at** (*VectorLike**, **optional*) – point to look at.
+- **look_at** (*VectorLike, optional*) – point to look at.
 Defaults to None (center of shape).
 
-- 
-**focus** (*float**, **optional*) – the focal length for perspective projection
+- **focus** (*float, optional*) – the focal length for perspective projection
 Defaults to None (orthographic projection)
 
 **Returns:**
@@ -4361,57 +3708,43 @@ visible & hidden Edges
 
 *tuple*[*ShapeList*[*Edge*],*ShapeList*[*Edge*]]
 
-**
-*class *Shape(*obj: TopoDS_Shape | None = None*, *label: str = ''*, *color: ColorLike | None = None*, *parent: Compound | None = None*)[source]**
+`class Shape(obj: TopoDS_Shape | None = None, label: str = '', color: ColorLike | None = None, parent: Compound | None = None)`
 
 Base class for all CAD objects such as Edge, Face, Solid, etc.
 
 **Parameters:**
 
-- 
-**obj** (*TopoDS_Shape**, **optional*) – OCCT object. Defaults to None.
+- **obj** (*TopoDS_Shape, optional*) – OCCT object. Defaults to None.
 
-- 
-**label** (*str**, **optional*) – Defaults to ‘’.
+- **label** (*str, optional*) – Defaults to ‘’.
 
-- 
-**color** (*ColorLike**, **optional*) – Defaults to None.
+- **color** (*ColorLike, optional*) – Defaults to None.
 
-- 
-**parent** (*Compound**, **optional*) – assembly parent. Defaults to None.
+- **parent** (*Compound, optional*) – assembly parent. Defaults to None.
 
 **Variables:**
 
-- 
-**wrapped** (*TopoDS_Shape*) – the OCP object
+- **wrapped** (*TopoDS_Shape*) – the OCP object
 
-- 
-**label** (*str*) – user assigned label
+- **label** (*str*) – user assigned label
 
-- 
-**color** (*Color*) – object color
+- **color** (*Color*) – object color
 
-- 
-**(****dict****[****str** (*joints*) – Joint]): dictionary of joints bound to this object (Solid only)
+- **joints** (*dict[str, Joint]*) – dictionary of joints bound to this object (Solid only)
 
-- 
-**children** (*Shape*) – list of assembly children of this object (Compound only)
+- **children** (*Shape*) – list of assembly children of this object (Compound only)
 
-- 
-**topo_parent** (*Shape*) – assembly parent of this object
+- **topo_parent** (*Shape*) – assembly parent of this object
 
-**
-__add__(*other: None | Shape | Iterable[Shape]*) → Self | ShapeList[Self][source]**
+`__add__(other)`
 
 fuse shape to self operator +
 
-**
-__and__(*other: Shape | Iterable[Shape]*) → None | Self | ShapeList[Self][source]**
+`__and__(other: Shape | Iterable[Shape]) -> None | Self | Compound`
 
 intersect shape with self operator &
 
-**
-__copy__() → Self[source]**
+`__copy__() -> Self`
 
 Return shallow copy or reference of self
 
@@ -4423,13 +3756,11 @@ sharing the TopoDS_TShape, the memory size of such assemblies can be greatly red
 
 Changes to the CAD structure of the base object will be reflected in all instances.
 
-**
-__deepcopy__(*memo*) → Self[source]**
+`__deepcopy__(memo) -> Self`
 
 Return deepcopy of self
 
-**
-__eq__(*other*) → bool[source]**
+`__eq__(other) -> bool`
 
 Check if two shapes are the same.
 
@@ -4449,34 +3780,29 @@ True if the shapes are the same, False otherwise.
 
 *bool*
 
-**
-__hash__() → int[source]**
+`__hash__() -> int`
 
 Return hash code
 
-**
-__rmul__(*other*)[source]**
+`__rmul__(other: Plane | Location | Iterable[Plane | Location])`
 
-right multiply for positioning operator *
+right multiply for positioning operator `*`
 
-**
-__sub__(*other: None | Shape | Iterable[Shape]*) → Self | ShapeList[Self][source]**
+`__sub__(other)`
 
 cut shape from self operator -
 
-**
-*property *area*: float***
+`property area: float`
 
 area -the surface area of all faces in this Shape
 
-**
-bounding_box(*tolerance: float | None = None*, *optimal: bool = True*) → BoundBox[source]**
+`bounding_box(tolerance: float | None = None, optimal: bool = True) -> BoundBox`
 
 Create a bounding box for this Shape.
 
 **Parameters:**
 
-**tolerance** (*float**, **optional*) – Defaults to None.
+**tolerance** (*float, optional*) – Defaults to None.
 
 **Returns:**
 
@@ -4486,13 +3812,11 @@ A box sized to contain this Shape
 
 *BoundBox*
 
-**
-*abstract classmethod *cast(*obj: TopoDS_Shape*) → Self[source]**
+`abstract classmethod cast(obj: TopoDS_Shape) -> Self`
 
 Returns the right type of wrapper, given a OCCT object
 
-**
-clean() → Self[source]**
+`clean() -> Self`
 
 Remove internal edges
 
@@ -4504,19 +3828,16 @@ Original object with extraneous internal edges removed
 
 *Shape*
 
-**
-closest_points(*other: Shape | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → tuple[Vector, Vector][source]**
+`closest_points(other: Shape | VectorLike) -> tuple[Vector, Vector]`
 
 Points on two shapes where the distance between them is minimal
 
-**
-*property *color*: None | Color***
+`property color: None | Color`
 
 Get the shape’s color. If it’s None, get the color of the nearest
 ancestor, assign it to this Shape and return this value.
 
-**
-*static *combined_center(*objects: ~collections.abc.Iterable[~topology.shape_core.Shape], center_of: ~build123d.build_enums.CenterOf = *) → Vector[source]**
+`static combined_center(objects: Iterable[Shape], center_of: CenterOf = <CenterOf.MASS>) -> Vector`
 
 combined center
 
@@ -4524,11 +3845,9 @@ Calculates the center of a multiple objects.
 
 **Parameters:**
 
-- 
-**objects** (*Iterable**[**Shape**]*) – list of objects
+- **objects** (*Iterable[Shape]*) – list of objects
 
-- 
-**center_of** (*CenterOf**, **optional*) – centering option. Defaults to CenterOf.MASS.
+- **center_of** (*CenterOf, optional*) – centering option. Defaults to CenterOf.MASS.
 
 **Raises:**
 
@@ -4542,33 +3861,25 @@ center of multiple objects
 
 *Vector*
 
-**
-compound() → Compound | None[source]**
+`compound() -> Compound`
 
 Return the Compound
 
-**
-compounds() → ShapeList[Compound][source]**
+`compounds() -> ShapeList[Compound]`
 
 compounds - all the compounds in this Shape
 
-**
-*static *compute_mass(*obj: Shape*) → float[source]**
+`static compute_mass(obj: Shape) -> float`
 
 Calculates the ‘mass’ of an object.
 
 **Parameters:**
 
-- 
-**obj** – Compute the mass of this object
+- **obj** – Compute the mass of this object
 
-- 
-**obj** – Shape:
+- **obj** (*Shape*)
 
-Returns:
-
-**
-copy_attributes_to(*target: Shape*, *exceptions: Iterable[str] | None = None*)[source]**
+`copy_attributes_to(target: Shape, exceptions: Iterable[str] | None = None)`
 
 Copy common object attributes to target
 
@@ -4576,85 +3887,71 @@ Note that preset attributes of target will not be overridden.
 
 **Parameters:**
 
-- 
-**target** (*Shape*) – object to gain attributes
+- **target** (*Shape*) – object to gain attributes
 
-- 
-**exceptions** (*Iterable**[**str**]**, **optional*) – attributes not to copy
+- **exceptions** (*Iterable[str], optional*) – attributes not to copy
 
 **Raises:**
 
 **ValueError** – invalid attribute
 
-**
-cut(**to_cut: Shape*) → Self | ShapeList[Self][source]**
+`cut(*to_cut: Shape) -> Self | Compound`
 
 Remove the positional arguments from this Shape.
 
 **Parameters:**
 
-***to_cut** – Shape:
+- **\*to_cut** (*Shape*) – the shapes to remove
 
 **Returns:**
 
-**Resulting object may be of a different class than self**or a ShapeList if multiple non-Compound object created
+**Resulting object may be of a different class than self** or a ShapeList if multiple non-Compound object created
 
 **Return type:**
 
 Self | *ShapeList*[Self]
 
-**
-distance(*other: Shape*) → float[source]**
+`distance(other: Shape) -> float`
 
 Minimal distance between two shapes
 
 **Parameters:**
 
-**other** – Shape:
+- **other** (*Shape*)
 
-Returns:
-
-**
-distance_to(*other: Shape | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → float[source]**
+`distance_to(other: Shape | VectorLike) -> float`
 
 Minimal distance between two shapes
 
-**
-distance_to_with_closest_points(*other: Shape | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → tuple[float, Vector, Vector][source]**
+`distance_to_with_closest_points(other: Shape | VectorLike) -> tuple[float, Vector, Vector]`
 
 Minimal distance between two shapes and the points on each shape
 
-**
-distances(**others: Shape*) → Iterator[float][source]**
+`distances(*others: Shape) -> Iterator[float]`
 
 Minimal distances to between self and other shapes
 
 **Parameters:**
 
-***others** – Shape:
+- **\*others** (*Shape*) – the shapes to measure to
 
-Returns:
+`downcast_LUT: dict`
 
-**
-downcast_LUT* = { 0>: method Compound of PyCapsule object>, 1>: method CompSolid of PyCapsule object>, 6>: method Edge of PyCapsule object>, 4>: method Face of PyCapsule object>, 3>: method Shell of PyCapsule object>, 2>: method Solid of PyCapsule object>, 7>: method Vertex of PyCapsule object>, 5>: method Wire of PyCapsule object>}***
+Maps each OCCT shape type (`TopAbs_ShapeEnum`) to the OCP function that downcasts a `TopoDS_Shape` of that type.
 
-**
-edge() → Edge | None[source]**
+`edge() -> Edge`
 
 Return the Edge
 
-**
-edges() → ShapeList[Edge][source]**
+`edges() -> ShapeList[Edge]`
 
 edges - all the edges in this Shape - subclasses may override
 
-**
-entities(*topo_type: Literal['Vertex', 'Edge', 'Wire', 'Face', 'Shell', 'Solid', 'Compound']*) → list[TopoDS_Shape][source]**
+`entities(topo_type: Shapes) -> list[TopoDS_Shape]`
 
 Return all of the TopoDS sub entities of the given type
 
-**
-*abstract classmethod *extrude(*obj: Shape*, *direction: VectorLike*) → Edge | Face | Shell | Solid | Compound[source]**
+`abstract classmethod extrude(obj: Shape, direction: VectorLike) -> Edge | Face | Shell | Solid | Compound`
 
 Extrude a Shape in the provided direction.
 * Vertices generate Edges
@@ -4669,11 +3966,9 @@ Extrude a Shape in the provided direction.
 
 **Raises:**
 
-- 
-**ValueError** – Unsupported class
+- **ValueError** – Unsupported class
 
-- 
-**RuntimeError** – Generated invalid result
+- **RuntimeError** – Generated invalid result
 
 **Returns:**
 
@@ -4683,18 +3978,15 @@ extruded shape
 
 *Edge* | *Face* | *Shell* | *Solid* | *Compound*
 
-**
-face() → Face | None[source]**
+`face() -> Face`
 
 Return the Face
 
-**
-faces() → ShapeList[Face][source]**
+`faces() -> ShapeList[Face]`
 
 faces - all the faces in this Shape
 
-**
-faces_intersected_by_axis(*axis: Axis*, *tol: float = 0.0001*) → ShapeList[Face][source]**
+`faces_intersected_by_axis(axis: Axis, tol: float = 0.0001) -> ShapeList[Face]`
 
 Line Intersection
 
@@ -4702,11 +3994,9 @@ Computes the intersections between the provided axis and the faces of this Shape
 
 **Parameters:**
 
-- 
-**axis** (*Axis*) – Axis on which the intersection line rests
+- **axis** (*Axis*) – Axis on which the intersection line rests
 
-- 
-**tol** (*float**, **optional*) – Intersection tolerance. Defaults to 1e-4.
+- **tol** (*float, optional*) – Intersection tolerance. Defaults to 1e-4.
 
 **Returns:**
 
@@ -4716,43 +4006,39 @@ A list of intersected faces sorted by distance from axis.position
 
 *list*[*Face*]
 
-**
-fix() → Self[source]**
+`fix() -> Self`
 
 fix - try to fix shape if not valid
 
-**
-fuse(**to_fuse: Shape*, *glue: bool = False*, *tol: float | None = None*) → Self | ShapeList[Self][source]**
+`fuse(*to_fuse: Shape, glue: bool = False, tol: float | None = None) -> Self | Compound`
 
 Fuse a sequence of shapes into a single shape.
 
 **Parameters:**
 
-- 
-**to_fuse** (*sequence Shape*) – shapes to fuse
+- **to_fuse** (*sequence Shape*) – shapes to fuse
 
-- 
-**glue** (*bool**, **optional*) – performance improvement for some shapes. Defaults to False.
+- **glue** (*bool, optional*) – performance improvement for some shapes. Defaults to False.
 
-- 
-**tol** (*float**, **optional*) – tolerance. Defaults to None.
+- **tol** (*float, optional*) – tolerance. Defaults to None.
 
 **Returns:**
 
-**Resulting object may be of a different class than self**or a ShapeList if multiple non-Compound object created
+**Resulting object may be of a different class than self** or a ShapeList if multiple non-Compound object created
 
 **Return type:**
 
 Self | *ShapeList*[Self]
 
-**
-geom_LUT_EDGE*: dict[GeomAbs_CurveType, GeomType]** = { 6>: , 5>: , 1>: , 2>: , 3>: , 0>: , 7>: , 8>: , 4>: }***
+`geom_LUT_EDGE: dict[GeomAbs_CurveType, GeomType]`
 
-**
-geom_LUT_FACE*: dict[GeomAbs_SurfaceType, GeomType]** = { 6>: , 5>: , 2>: , 1>: , 9>: , 10>: , 0>: , 3>: , 8>: , 7>: , 4>: }***
+Maps each OCCT curve type to the build123d `GeomType` reported for an edge.
 
-**
-*property *geom_type*: GeomType***
+`geom_LUT_FACE: dict[GeomAbs_SurfaceType, GeomType]`
+
+Maps each OCCT surface type to the build123d `GeomType` reported for a face.
+
+`property geom_type: GeomType`
 
 Gets the underlying geometry type.
 
@@ -4764,19 +4050,16 @@ The geometry type of the shape
 
 *GeomType*
 
-**
-*static *get_shape_list(*shape: Shape*, *entity_type: Literal['Vertex', 'Edge', 'Wire', 'Face', 'Shell', 'Solid', 'Compound']*) → ShapeList[source]**
+`static get_shape_list(shape: Shape, entity_type: Literal['Vertex', 'Edge', 'Wire', 'Face', 'Shell', 'Solid', 'Compound']) -> ShapeList`
 
 Helper to extract entities of a specific type from a shape.
 
-**
-*static *get_single_shape(*shape: Shape*, *entity_type: Literal['Vertex', 'Edge', 'Wire', 'Face', 'Shell', 'Solid', 'Compound']*) → Shape | None[source]**
+`static get_single_shape(shape: Shape, entity_type: Literal['Vertex', 'Edge', 'Wire', 'Face', 'Shell', 'Solid', 'Compound']) -> Shape`
 
 Helper to extract a single entity of a specific type from a shape,
 with a warning if count != 1.
 
-**
-get_top_level_shapes() → ShapeList[Shape][source]**
+`get_top_level_shapes() -> ShapeList[Shape]`
 
 Retrieve the first level of child shapes from the shape.
 
@@ -4800,8 +4083,7 @@ If the current shape is a compound containing both simple shapes
 (e.g., edges, vertices) and other compounds, the method returns a list
 of only the simple shapes directly contained at the top level.
 
-**
-*property *global_location*: Location***
+`property global_location: Location`
 
 The location of this Shape relative to the global coordinate system.
 
@@ -4816,8 +4098,7 @@ Note
 This is only meaningful when the Shape is part of an assembly tree
 where parent-child relationships define relative placements.
 
-**
-intersect(**to_intersect: Shape | Vector | Location | Axis | Plane*, *tolerance: float = 1e-06*, *include_touched: bool = False*) → ShapeList | None[source]**
+`intersect(*to_intersect: Shape | Vector | Location | Axis | Plane, tolerance: float = 1e-06, include_touched: bool = False) -> ShapeList | None`
 
 Find where bodies/interiors meet (overlap or crossing geometry).
 
@@ -4826,34 +4107,29 @@ geometry conversion and delegates to subclass _intersect() implementations.
 
 **Semantics:**
 
-- 
-Multiple arguments use AND (chaining): c.intersect(s1, s2) = c ∩ s1 ∩ s2
+- Multiple arguments use AND (chaining): c.intersect(s1, s2) = c ∩ s1 ∩ s2
 
-- 
-Compound arguments use OR (distribution): c.intersect(Compound([s1, s2]))
+- Compound arguments use OR (distribution): c.intersect(Compound([s1, s2]))
 = (c ∩ s1) ∪ (c ∩ s2)
 
 **Parameters:**
 
-- 
-**to_intersect** – Shape(s) or geometry objects to intersect with
+- **to_intersect** – Shape(s) or geometry objects to intersect with
 
-- 
-**tolerance** – tolerance for intersection detection
+- **tolerance** – tolerance for intersection detection
 
-- 
-**include_touched** – if True, include boundary contacts without interior
+- **include_touched** – if True, include boundary contacts without interior
 overlap (only relevant when Solids are involved)
 
 **Returns:**
 
 ShapeList of intersection results, or None if no intersection
 
-**
-inverse_shape_LUT* = {'CompSolid': 1>, 'Compound': 0>, 'Edge': 6>, 'Face': 4>, 'Shell': 3>, 'Solid': 2>, 'Vertex': 7>, 'Wire': 5>}***
+`inverse_shape_LUT: dict`
 
-**
-is_equal(*other: Shape*) → bool[source]**
+Maps each build123d shape class name to its OCCT shape type (`TopAbs_ShapeEnum`).
+
+`is_equal(other: Shape) -> bool`
 
 Returns True if two shapes are equal, i.e. if they share the same
 TShape with the same Locations and Orientations. Also see
@@ -4861,12 +4137,9 @@ TShape with the same Locations and Orientations. Also see
 
 **Parameters:**
 
-**other** – Shape:
+- **other** (*Shape*)
 
-Returns:
-
-**
-*property *is_manifold*: bool***
+`property is_manifold: bool`
 
 Check if each edge in the given Shape has exactly two faces associated with it
 (skipping degenerate edges). If so, the shape is manifold.
@@ -4879,20 +4152,17 @@ is the shape manifold or water tight
 
 *bool*
 
-**
-*property *is_null*: bool***
+`property is_null: bool`
 
 Returns true if this shape is null. In other words, it references no
 underlying shape with the potential to be given a location and an
 orientation.
 
-**
-*property *is_planar_face*: bool***
+`property is_planar_face: bool`
 
 Is the shape a planar face even though its geom_type may not be PLANE
 
-**
-is_same(*other: Shape*) → bool[source]**
+`is_same(other: Shape) -> bool`
 
 Returns True if other and this shape are same, i.e. if they share the
 same TShape with the same Locations. Orientations may differ. Also see
@@ -4900,30 +4170,23 @@ same TShape with the same Locations. Orientations may differ. Also see
 
 **Parameters:**
 
-**other** – Shape:
+- **other** (*Shape*)
 
-Returns:
-
-**
-*property *is_valid*: bool***
+`property is_valid: bool`
 
 Returns True if no defect is detected on the shape S or any of its
 subshapes. See the OCCT docs on BRepCheck_Analyzer::IsValid for a full
 description of what is checked.
 
-**
-locate(*loc: Location*) → Self[source]**
+`locate(loc: Location) -> Self`
 
 Apply a location in absolute sense to self
 
 **Parameters:**
 
-**loc** – Location:
+- **loc** (*Location*)
 
-Returns:
-
-**
-located(*loc: Location*) → Self[source]**
+`located(loc: Location) -> Self`
 
 Apply a location in absolute sense to a copy of self
 
@@ -4939,13 +4202,11 @@ copy of Shape at location
 
 *Shape*
 
-**
-*property *location*: Location***
+`property location: Location`
 
 Get this Shape’s Location
 
-**
-*property *matrix_of_inertia*: list[list[float]]***
+`property matrix_of_inertia: list[list[float]]`
 
 Compute the inertia matrix (moment of inertia tensor) of the shape.
 
@@ -4981,30 +4242,22 @@ Example
 
 Notes
 
-- 
-The inertia matrix is computed relative to the shape’s center of mass.
+- The inertia matrix is computed relative to the shape’s center of mass.
 
-- 
-It is commonly used in structural analysis, mechanical simulations,
+- It is commonly used in structural analysis, mechanical simulations,
 and physics-based motion calculations.
 
-**
-mesh(*tolerance: float*, *angular_tolerance: float = 0.1*)[source]**
+`mesh(tolerance: float, angular_tolerance: float = 0.1)`
 
 Generate triangulation if none exists.
 
 **Parameters:**
 
-- 
-**tolerance** – float:
+- **tolerance** (*float*)
 
-- 
-**angular_tolerance** – float: (Default value = 0.1)
+- **angular_tolerance** – float: (Default value = 0.1)
 
-Returns:
-
-**
-mirror(*mirror_plane: Plane | None = None*) → Self[source]**
+`mirror(mirror_plane: Plane | None = None) -> Self`
 
 Applies a mirror transform to this Shape. Does not duplicate objects
 about the plane.
@@ -5017,19 +4270,15 @@ about the plane.
 
 The mirrored shape
 
-**
-move(*loc: Location*) → Self[source]**
+`move(loc: Location) -> Self`
 
 Apply a location in relative sense (i.e. update current location) to self
 
 **Parameters:**
 
-**loc** – Location:
+- **loc** (*Location*)
 
-Returns:
-
-**
-moved(*loc: Location*) → Self[source]**
+`moved(loc: Location | Plane) -> Self`
 
 Apply a location in relative sense (i.e. update current location) to a copy of self
 
@@ -5045,13 +4294,11 @@ copy of Shape moved to relative location
 
 *Shape*
 
-**
-*property *orientation*: Vector***
+`property orientation: Vector`
 
 Get the orientation component of this Shape’s Location
 
-**
-oriented_bounding_box() → OrientedBoundBox[source]**
+`oriented_bounding_box() -> OrientedBoundBox`
 
 Create an oriented bounding box for this Shape.
 
@@ -5063,13 +4310,11 @@ A box oriented and sized to contain this Shape
 
 OrientedBoundBox
 
-**
-*property *position*: Vector***
+`property position: Vector`
 
 Get the position component of this Shape’s Location
 
-**
-*property *principal_properties*: list[tuple[Vector, float]]***
+`property principal_properties: list[tuple[Vector, float]]`
 
 Compute the principal moments of inertia and their corresponding axes.
 
@@ -5091,8 +4336,7 @@ Example
 (Vector(0, 1, 0), 1000.0),
 (Vector(0, 0, 1), 300.0)]
 
-**
-project_faces(*faces: list[Face] | Compound*, *path: Wire | Edge*, *start: float = 0*) → ShapeList[Face][source]**
+`project_faces(faces: list[Face] | Compound, path: Wire | Edge, start: float = 0) -> ShapeList[Face]`
 
 Projected Faces following the given path on Shape
 
@@ -5104,21 +4348,17 @@ the shape at a position along the path.
 
 **Parameters:**
 
-- 
-**faces** (*Union**[**list**[**Face**]**, **Compound**]*) – faces to project
+- **faces** (*Union[list[Face], Compound]*) – faces to project
 
-- 
-**path** – Path on the Shape to follow
+- **path** – Path on the Shape to follow
 
-- 
-**start** – Relative location on path to start the faces. Defaults to 0.
+- **start** – Relative location on path to start the faces. Defaults to 0.
 
 **Returns:**
 
 The projected faces
 
-**
-radius_of_gyration(*axis: Axis*) → float[source]**
+`radius_of_gyration(axis: Axis) -> float`
 
 Compute the radius of gyration of the shape about a given axis.
 
@@ -5150,14 +4390,11 @@ Example
 
 Notes
 
-- 
-The radius of gyration is computed based on the shape’s mass properties.
+- The radius of gyration is computed based on the shape’s mass properties.
 
-- 
-It is useful for evaluating structural stability and rotational behavior.
+- It is useful for evaluating structural stability and rotational behavior.
 
-**
-relocate(*loc: Location*)[source]**
+`relocate(loc: Location)`
 
 Change the location of self while keeping it geometrically similar
 
@@ -5165,8 +4402,7 @@ Change the location of self while keeping it geometrically similar
 
 **loc** (*Location*) – new location to set for self
 
-**
-rotate(*axis: Axis*, *angle: float*, *transform: bool = False*) → Self[source]**
+`rotate(axis: Axis, angle: float, transform: bool = False) -> Self`
 
 rotate a copy
 
@@ -5174,54 +4410,46 @@ Rotates a shape around an axis.
 
 **Parameters:**
 
-- 
-**axis** (*Axis*) – rotation Axis
+- **axis** (*Axis*) – rotation Axis
 
-- 
-**angle** (*float*) – angle to rotate, in degrees
+- **angle** (*float*) – angle to rotate, in degrees
 
-- 
-**transform** (*bool*) – regenerate the shape instead of just changing its location.
+- **transform** (*bool*) – regenerate the shape instead of just changing its location.
 Defaults to False.
 
 **Returns:**
 
 a copy of the shape, rotated
 
-**
-scale(*factor: float*) → Self[source]**
+`scale(factor: float | tuple[float, float, float], about: VectorLike | None = None) -> Self`
 
 Scales this shape through a transformation.
 
 **Parameters:**
 
-**factor** – float:
+- **factor** (*float*)
 
-Returns:
+`shape_LUT: dict`
 
-**
-shape_LUT* = { 0>: 'Compound', 1>: 'CompSolid', 6>: 'Edge', 4>: 'Face', 3>: 'Shell', 2>: 'Solid', 7>: 'Vertex', 5>: 'Wire'}***
+Maps each OCCT shape type (`TopAbs_ShapeEnum`) to the name of the build123d class for that type.
 
-**
-shape_properties_LUT*: dict[TopAbs_ShapeEnum, Callable[[TopoDS_Shape, GProp_GProps], None] | None]** = { 0>: method VolumeProperties_s of PyCapsule object>, 1>: method VolumeProperties_s of PyCapsule object>, 6>: method LinearProperties_s of PyCapsule object>, 4>: method SurfaceProperties_s of PyCapsule object>, 3>: method SurfaceProperties_s of PyCapsule object>, 2>: method VolumeProperties_s of PyCapsule object>, 7>: None, 5>: method LinearProperties_s of PyCapsule object>}***
+`shape_properties_LUT: dict[TopAbs_ShapeEnum, Callable[[TopoDS_Shape, GProp_GProps], None] | None]`
 
-**
-*property *shape_type*: Literal['Vertex', 'Edge', 'Wire', 'Face', 'Shell', 'Solid', 'Compound']***
+Maps each OCCT shape type to the OCCT function that computes its mass properties.
+
+`property shape_type: Literal['Vertex', 'Edge', 'Wire', 'Face', 'Shell', 'Solid', 'Compound']`
 
 Return the shape type string for this class
 
-**
-shell() → Shell | None[source]**
+`shell() -> Shell`
 
 Return the Shell
 
-**
-shells() → ShapeList[Shell][source]**
+`shells() -> ShapeList[Shell]`
 
 shells - all the shells in this Shape
 
-**
-show_topology(*limit_class: Literal['Compound', 'Edge', 'Face', 'Shell', 'Solid', 'Vertex', 'Wire'] = 'Vertex'*, *show_center: bool | None = None*) → str[source]**
+`show_topology(limit_class: Literal['Compound', 'Edge', 'Face', 'Shell', 'Solid', 'Vertex', 'Wire'] = 'Vertex', show_center: bool | None = None) -> str`
 
 Display internal topology
 
@@ -5242,8 +4470,7 @@ c1 is the root Compound at 0x7f4a4cafafa0, Location(...))
 
 - **limit_class** – type of displayed leaf node. Defaults to ‘Vertex’.
 
-- 
-**show_center** (*bool**, **optional*) – If None, shows the Location of Compound ‘assemblies’
+- **show_center** (*bool, optional*) – If None, shows the Location of Compound ‘assemblies’
 and the bounding box center of Shapes. True or False forces the display.
 Defaults to None.
 
@@ -5255,30 +4482,23 @@ tree representation of internal structure
 
 *str*
 
-**
-solid() → Solid | None[source]**
+`solid() -> Solid`
 
 Return the Solid
 
-**
-solids() → ShapeList[Solid][source]**
+`solids() -> ShapeList[Solid]`
 
 solids - all the solids in this Shape
 
-**
-split(*tool: TrimmingTool*, *keep: Literal[Keep.TOP, Keep.BOTTOM]*) → Self | list[Self] | None[source]**
+`split(tool: TrimmingTool, keep: Keep = <Keep.TOP>)`
 
-**
-split(*tool: TrimmingTool*, *keep: Literal[Keep.ALL]*) → list[Self]**
+`split(tool: TrimmingTool, keep: Keep = <Keep.TOP>)`
 
-**
-split(*tool: TrimmingTool*, *keep: Literal[Keep.BOTH]*) → tuple[Self | list[Self] | None, Self | list[Self] | None]**
+`split(tool: TrimmingTool, keep: Keep = <Keep.TOP>)`
 
-**
-split(*tool: TrimmingTool*, *keep: Literal[Keep.INSIDE, Keep.OUTSIDE]*) → None**
+`split(tool: TrimmingTool, keep: Keep = <Keep.TOP>)`
 
-**
-split(*tool: TrimmingTool*) → Self | list[Self] | None**
+`split(tool: TrimmingTool, keep: Keep = <Keep.TOP>)`
 
 split
 
@@ -5286,11 +4506,9 @@ Split this shape by the provided plane or face.
 
 **Parameters:**
 
-- 
-**surface** (*Plane** | **Face*) – surface to segment shape
+- **surface** (*Plane | Face*) – surface to segment shape
 
-- 
-**keep** (*Keep**, **optional*) – which object(s) to save. Defaults to Keep.TOP.
+- **keep** (*Keep, optional*) – which object(s) to save. Defaults to Keep.TOP.
 
 **Returns:**
 
@@ -5305,26 +4523,20 @@ result of split
 Self | list[Self] | None,
 Tuple[Self | list[Self] | None]: The result of the split operation.
 
-- 
-**Keep.TOP**: Returns the top as a Self or list[Self], or None
+- **Keep.TOP**: Returns the top as a Self or list[Self], or None
 if no top is found.
 
-- 
-**Keep.BOTTOM**: Returns the bottom as a Self or list[Self], or None
+- **Keep.BOTTOM**: Returns the bottom as a Self or list[Self], or None
 if no bottom is found.
 
-- 
-**Keep.BOTH**: Returns a tuple (inside, outside) where each element is
+- **Keep.BOTH**: Returns a tuple (inside, outside) where each element is
 either a Self or list[Self], or None if no corresponding part is found.
 
-**
-split_by_perimeter(*perimeter: Edge | Wire*, *keep: Literal[Keep.INSIDE, Keep.OUTSIDE]*) → Face | Shell | ShapeList[Face] | None[source]**
+`split_by_perimeter(perimeter: Edge | Wire, keep: Keep = <Keep.INSIDE>)`
 
-**
-split_by_perimeter(*perimeter: Edge | Wire*, *keep: Literal[Keep.BOTH]*) → tuple[Face | Shell | ShapeList[Face] | None, Face | Shell | ShapeList[Face] | None]**
+`split_by_perimeter(perimeter: Edge | Wire, keep: Keep = <Keep.INSIDE>)`
 
-**
-split_by_perimeter(*perimeter: Edge | Wire*) → Face | Shell | ShapeList[Face] | None**
+`split_by_perimeter(perimeter: Edge | Wire, keep: Keep = <Keep.INSIDE>)`
 
 split_by_perimeter
 
@@ -5335,39 +4547,31 @@ Note: this method may fail if the perimeter intersects shape edges.
 
 **Parameters:**
 
-- 
-**perimeter** (*Union**[**Edge**,**Wire**]*) – closed perimeter
+- **perimeter** (*Union[Edge,Wire]*) – closed perimeter
 
-- 
-**keep** (*Keep**, **optional*) – which object(s) to return. Defaults to Keep.INSIDE.
+- **keep** (*Keep, optional*) – which object(s) to return. Defaults to Keep.INSIDE.
 
 **Raises:**
 
-- 
-**ValueError** – perimeter must be closed
+- **ValueError** – perimeter must be closed
 
-- 
-**ValueError** – keep must be one of Keep.INSIDE|OUTSIDE|BOTH
+- **ValueError** – keep must be one of Keep.INSIDE|OUTSIDE|BOTH
 
 **Returns:**
 
 Union[Face | Shell | ShapeList[Face] | None,
 Tuple[Face | Shell | ShapeList[Face] | None]: The result of the split operation.
 
-- 
-**Keep.INSIDE**: Returns the inside part as a Shell or Face, or None
+- **Keep.INSIDE**: Returns the inside part as a Shell or Face, or None
 if no inside part is found.
 
-- 
-**Keep.OUTSIDE**: Returns the outside part as a Shell or Face, or None
+- **Keep.OUTSIDE**: Returns the outside part as a Shell or Face, or None
 if no outside part is found.
 
-- 
-**Keep.BOTH**: Returns a tuple (inside, outside) where each element is
+- **Keep.BOTH**: Returns a tuple (inside, outside) where each element is
 either a Shell, Face, or None if no corresponding part is found.
 
-**
-*property *static_moments*: tuple[float, float, float]***
+`property static_moments: tuple[float, float, float]`
 
 Compute the static moments (first moments of mass) of the shape.
 
@@ -5393,13 +4597,11 @@ Example
 >>> obj.static_moments
 (150.0, 200.0, 50.0)
 
-**
-tessellate(*tolerance: float*, *angular_tolerance: float = 0.1*) → tuple[list[Vector], list[tuple[int, int, int]]][source]**
+`tessellate(tolerance: float, angular_tolerance: float = 0.1) -> tuple[list[Vector], list[tuple[int, int, int]]]`
 
 General triangulated approximation
 
-**
-to_splines(*degree: int = 3*, *tolerance: float = 0.001*, *nurbs: bool = False*) → Self[source]**
+`to_splines(degree: int = 3, tolerance: float = 0.001, nurbs: bool = False) -> Self`
 
 A shape-processing utility that forces all geometry in a shape to be converted into
 BSplines. It’s useful when working with tools or export formats that require uniform
@@ -5407,14 +4609,11 @@ geometry, or for downstream processing that only understands BSpline representat
 
 **Parameters:**
 
-- 
-**degree** (*int**, **optional*) – Maximum degree. Defaults to 3.
+- **degree** (*int, optional*) – Maximum degree. Defaults to 3.
 
-- 
-**tolerance** (*float**, **optional*) – Approximation tolerance. Defaults to 1e-3.
+- **tolerance** (*float, optional*) – Approximation tolerance. Defaults to 1e-3.
 
-- 
-**nurbs** (*bool**, **optional*) – Use rational splines. Defaults to False.
+- **nurbs** (*bool, optional*) – Use rational splines. Defaults to False.
 
 **Returns:**
 
@@ -5424,8 +4623,7 @@ Approximated shape
 
 Self
 
-**
-touch(*other: Shape*, *tolerance: float = 1e-06*) → ShapeList[source]**
+`touch(other: Shape, tolerance: float = 1e-06) -> ShapeList`
 
 Find boundary contacts between this shape and another.
 
@@ -5434,18 +4632,15 @@ Compound) override this to provide actual touch detection.
 
 **Parameters:**
 
-- 
-**other** – Shape to find contacts with
+- **other** – Shape to find contacts with
 
-- 
-**tolerance** – tolerance for contact detection
+- **tolerance** – tolerance for contact detection
 
 **Returns:**
 
 ShapeList of contact shapes (empty for base implementation)
 
-**
-transform_geometry(*t_matrix: Matrix*) → Self[source]**
+`transform_geometry(t_matrix: Matrix) -> Self`
 
 Apply affine transform
 
@@ -5469,8 +4664,7 @@ a copy of the object, but with geometry transformed
 
 *Shape*
 
-**
-transform_shape(*t_matrix: Matrix*) → Self[source]**
+`transform_shape(t_matrix: Matrix) -> Self`
 
 Apply affine transform without changing type
 
@@ -5490,8 +4684,7 @@ copy of transformed shape with all objects keeping their type
 
 *Shape*
 
-**
-transformed(*rotate: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 0)*, *offset: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] = (0, 0, 0)*) → Self[source]**
+`transformed(rotate: VectorLike = (0, 0, 0), offset: VectorLike = (0, 0, 0)) -> Self`
 
 Transform Shape
 
@@ -5499,12 +4692,10 @@ Rotate and translate the Shape by the three angles (in degrees) and offset.
 
 **Parameters:**
 
-- 
-**rotate** (*VectorLike**, **optional*) – 3-tuple of angles to rotate, in degrees.
+- **rotate** (*VectorLike, optional*) – 3-tuple of angles to rotate, in degrees.
 Defaults to (0, 0, 0).
 
-- 
-**offset** (*VectorLike**, **optional*) – 3-tuple to offset. Defaults to (0, 0, 0).
+- **offset** (*VectorLike, optional*) – 3-tuple to offset. Defaults to (0, 0, 0).
 
 **Returns:**
 
@@ -5514,116 +4705,98 @@ transformed object
 
 *Shape*
 
-**
-translate(*vector: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *transform: bool = False*) → Self[source]**
+`translate(vector: VectorLike, transform: bool = False) -> Self`
 
 Translates this shape through a transformation.
 
 **Parameters:**
 
-- 
-**vector** (*VectorLike*) – relative movement vector
+- **vector** (*VectorLike*) – relative movement vector
 
-- 
-**transform** (*bool*) – regenerate the shape instead of just changing its location
+- **transform** (*bool*) – regenerate the shape instead of just changing its location
 Defaults to False.
 
 **Returns:**
 
 object with a relative move applied
 
-**
-vertex() → Vertex | None[source]**
+`vertex() -> Vertex`
 
 Return the Vertex
 
-**
-vertices() → ShapeList[Vertex][source]**
+`vertices() -> ShapeList[Vertex]`
 
 vertices - all the vertices in this Shape
 
-**
-wire() → Wire | None[source]**
+`wire() -> Wire`
 
 Return the Wire
 
-**
-wires() → ShapeList[Wire][source]**
+`wires() -> ShapeList[Wire]`
 
 wires - all the wires in this Shape
 
-**
-*property *wrapped**
+`property wrapped`
 
-**
-*class *ShapeList(*iterable=()*, */*)[source]**
+`class ShapeList(iterable=())`
 
 Subclass of list with custom filter and sort methods appropriate to CAD
 
-**
-__and__(*other: ShapeList*) → ShapeList[T][source]**
+`__and__(other: ShapeList) -> ShapeList[T]`
 
 Intersect two ShapeLists operator &
 
-**
-__getitem__(*key: SupportsIndex*) → T[source]**
+`__getitem__(key: SupportsIndex | slice) -> T | ShapeList[T]`
 
-**
-__getitem__(*key: slice*) → ShapeList[T]**
+`__getitem__(key: SupportsIndex | slice) -> T | ShapeList[T]`
 
 Return slices of ShapeList as ShapeList
 
-**
-__gt__(*sort_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))*) → ShapeList[T][source]**
+`__gt__(sort_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))) -> ShapeList[T]`
 
 Sort operator >
 
-**
-__lshift__(*group_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))*) → ShapeList[T][source]**
+`__lshift__(group_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))) -> ShapeList[T]`
 
-Group and select smallest group operator __lt__(*sort_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))*) → ShapeList[T][source]**
+Group and select smallest group operator <<
 
-Reverse sort operator __or__(*filter_by: Axis | GeomType = Axis((0, 0, 0), (0, 0, 1))*) → ShapeList[T][source]**
+`__lt__(sort_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))) -> ShapeList[T]`
+
+Reverse sort operator <
+
+`__or__(filter_by: Axis | GeomType = Axis((0, 0, 0), (0, 0, 1))) -> ShapeList[T]`
 
 Filter by axis or geomtype operator |
 
-**
-__rshift__(*group_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))*) → ShapeList[T][source]**
+`__rshift__(group_by: Axis | SortBy = Axis((0, 0, 0), (0, 0, 1))) -> ShapeList[T]`
 
 Group and select largest group operator >>
 
-**
-__sub__(*other: ShapeList*) → ShapeList[T][source]**
+`__sub__(other: ShapeList) -> ShapeList[T]`
 
 Differences between two ShapeLists operator -
 
-**
-center() → Vector[source]**
+`center() -> Vector`
 
 The average of the center of objects within the ShapeList
 
-**
-compound() → Compound[source]**
+`compound() -> Compound`
 
 Return the Compound
 
-**
-compounds() → ShapeList[Compound][source]**
+`compounds() -> ShapeList[Compound]`
 
 compounds - all the compounds in this ShapeList
 
-**
-edge() → Edge[source]**
+`edge() -> Edge`
 
 Return the Edge
 
-**
-edges() → ShapeList[Edge][source]**
+`edges() -> ShapeList[Edge]`
 
 edges - all the edges in this ShapeList
 
-**
-expand() → ShapeList[source]**
+`expand() -> ShapeList`
 
 Expand by dissolving compounds, wires, and shells, filtering nulls.
 
@@ -5632,18 +4805,15 @@ Expand by dissolving compounds, wires, and shells, filtering nulls.
 ShapeList with compounds dissolved to children, wires to edges,
 shells to faces, and nulls filtered out
 
-**
-face() → Face[source]**
+`face() -> Face`
 
 Return the Face
 
-**
-faces() → ShapeList[Face][source]**
+`faces() -> ShapeList[Face]`
 
 faces - all the faces in this ShapeList
 
-**
-filter_by(*filter_by: ShapePredicate | Axis | Plane | GeomType | property*, *reverse: bool = False*, *tolerance: float = 1e-05*) → ShapeList[T][source]**
+`filter_by(filter_by: Callable[[T], bool] | Axis | Plane | GeomType | property, reverse: bool = False, tolerance: float = 1e-05) -> ShapeList[T]`
 
 filter by Axis, Plane, or GeomType
 
@@ -5655,16 +4825,13 @@ objects.
 
 **Parameters:**
 
-- 
-**filter_by** (*Union**[**Axis**,**Plane**,**GeomType**]*) – axis, plane, or geom type to filter
+- **filter_by** (*Union[Axis,Plane,GeomType]*) – axis, plane, or geom type to filter
 and possibly sort by. Filtering by a plane returns faces/edges parallel
 to that plane.
 
-- 
-**reverse** (*bool**, **optional*) – invert the geom type filter. Defaults to False.
+- **reverse** (*bool, optional*) – invert the geom type filter. Defaults to False.
 
-- 
-**tolerance** (*float**, **optional*) – maximum deviation from axis. Defaults to 1e-5.
+- **tolerance** (*float, optional*) – maximum deviation from axis. Defaults to 1e-5.
 
 **Raises:**
 
@@ -5678,8 +4845,7 @@ filtered list of objects
 
 *ShapeList*
 
-**
-filter_by_position(*axis: Axis*, *minimum: float*, *maximum: float*, *inclusive: tuple[bool, bool] = (True, True)*) → ShapeList[T][source]**
+`filter_by_position(axis: Axis, minimum: float, maximum: float, inclusive: tuple[bool, bool] = (True, True)) -> ShapeList[T]`
 
 filter by position
 
@@ -5688,17 +4854,13 @@ min and max values can be inclusive or exclusive depending on the inclusive tupl
 
 **Parameters:**
 
-- 
-**axis** (*Axis*) – axis to sort by
+- **axis** (*Axis*) – axis to sort by
 
-- 
-**minimum** (*float*) – minimum value
+- **minimum** (*float*) – minimum value
 
-- 
-**maximum** (*float*) – maximum value
+- **maximum** (*float*) – maximum value
 
-- 
-**inclusive** (*tuple**[**bool**, **bool**]**, **optional*) – include min,max values.
+- **inclusive** (*tuple[bool, bool], optional*) – include min,max values.
 Defaults to (True, True).
 
 **Returns:**
@@ -5709,13 +4871,11 @@ filtered object list
 
 *ShapeList*
 
-**
-*property *first*: T***
+`property first: T`
 
 First element in the ShapeList
 
-**
-group_by(*group_by: Callable[[Shape], K] | Axis | Edge | Wire | SortBy | property = Axis((0, 0, 0), (0, 0, 1))*, *reverse=False*, *tol_digits=6*) → GroupBy[T, K][source]**
+`group_by(group_by: Callable[[T], K] | Axis | Edge | Wire | SortBy | property = Axis((0, 0, 0), (0, 0, 1)), reverse: bool = False, tol_digits: int = 6) -> GroupBy[T, K]`
 
 group by
 
@@ -5724,14 +4884,11 @@ Note that not all group_by criteria apply to all objects.
 
 **Parameters:**
 
-- 
-**group_by** (*SortBy**, **optional*) – group and sort criteria. Defaults to Axis.Z.
+- **group_by** (*SortBy, optional*) – group and sort criteria. Defaults to Axis.Z.
 
-- 
-**reverse** (*bool**, **optional*) – flip order of sort. Defaults to False.
+- **reverse** (*bool, optional*) – flip order of sort. Defaults to False.
 
-- 
-**tol_digits** (*int**, **optional*) – Tolerance for building the group keys by
+- **tol_digits** (*int, optional*) – Tolerance for building the group keys by
 round(key, tol_digits)
 
 **Returns:**
@@ -5742,33 +4899,27 @@ sorted list of ShapeLists
 
 GroupBy[K, *ShapeList*]
 
-**
-*property *last*: T***
+`property last: T`
 
 Last element in the ShapeList
 
-**
-shell() → Shell[source]**
+`shell() -> Shell`
 
 Return the Shell
 
-**
-shells() → ShapeList[Shell][source]**
+`shells() -> ShapeList[Shell]`
 
 shells - all the shells in this ShapeList
 
-**
-solid() → Solid[source]**
+`solid() -> Solid`
 
 Return the Solid
 
-**
-solids() → ShapeList[Solid][source]**
+`solids() -> ShapeList[Solid]`
 
 solids - all the solids in this ShapeList
 
-**
-sort_by(*sort_by: Axis | Callable[[T], K] | Edge | Wire | SortBy | property = Axis((0, 0, 0), (0, 0, 1))*, *reverse: bool = False*) → ShapeList[T][source]**
+`sort_by(sort_by: Callable[[T], K] | Axis | Edge | Wire | SortBy | property = Axis((0, 0, 0), (0, 0, 1)), reverse: bool = False) -> ShapeList[T]`
 
 sort by
 
@@ -5777,23 +4928,18 @@ objects.
 
 **Parameters:**
 
-- 
-**sort_by** (*Axis** | **Callable**[**[**T**]**, **K**] **| **Edge** | **Wire** | **SortBy**, **optional*) – sort criteria.
+- **sort_by** (*Axis | Callable[[T], K] | Edge | Wire | SortBy, optional*) – sort criteria.
 Defaults to Axis.Z.
 
-- 
-**reverse** (*bool**, **optional*) – flip order of sort. Defaults to False.
+- **reverse** (*bool, optional*) – flip order of sort. Defaults to False.
 
 **Raises:**
 
-- 
-**ValueError** – Cannot sort by an empty axis
+- **ValueError** – Cannot sort by an empty axis
 
-- 
-**ValueError** – Cannot sort by an empty object
+- **ValueError** – Cannot sort by an empty object
 
-- 
-**ValueError** – Invalid sort_by criteria provided
+- **ValueError** – Invalid sort_by criteria provided
 
 **Returns:**
 
@@ -5803,8 +4949,7 @@ sorted list of objects
 
 *ShapeList*
 
-**
-sort_by_distance(*other: Shape | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *reverse: bool = False*) → ShapeList[T][source]**
+`sort_by_distance(other: Shape | VectorLike, reverse: bool = False) -> ShapeList[T]`
 
 Sort by distance
 
@@ -5812,11 +4957,9 @@ Sort by minimal distance between objects and other
 
 **Parameters:**
 
-- 
-**other** (*Union**[**Shape**,**VectorLike**]*) – reference object
+- **other** (*Union[Shape,VectorLike]*) – reference object
 
-- 
-**reverse** (*bool**, **optional*) – flip order of sort. Defaults to False.
+- **reverse** (*bool, optional*) – flip order of sort. Defaults to False.
 
 **Returns:**
 
@@ -5826,28 +4969,23 @@ Sorted shapes
 
 *ShapeList*
 
-**
-vertex() → Vertex[source]**
+`vertex() -> Vertex`
 
 Return the Vertex
 
-**
-vertices() → ShapeList[Vertex][source]**
+`vertices() -> ShapeList[Vertex]`
 
 vertices - all the vertices in this ShapeList
 
-**
-wire() → Wire[source]**
+`wire() -> Wire`
 
 Return the Wire
 
-**
-wires() → ShapeList[Wire][source]**
+`wires() -> ShapeList[Wire]`
 
 wires - all the wires in this ShapeList
 
-**
-*class *Shell(*obj: TopoDS_Shell | Face | Iterable[Face] | None = None*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)[source]**
+`class Shell(obj: TopoDS_Shell | Face | Iterable[Face] | None = None, label: str = '', color: Color | None = None, parent: Compound | None = None)`
 
 A Shell is a fundamental component in build123d’s topological data structure
 representing a connected set of faces forming a closed surface in 3D space. As
@@ -5857,13 +4995,11 @@ in representing complex shapes with voids and surfaces. This hierarchical struct
 allows for efficient handling of surfaces within a model, supporting various
 operations and analyses.
 
-**
-center() → Vector[source]**
+`center() -> Vector`
 
 Center of mass of the shell
 
-**
-*classmethod *extrude(*obj: Wire*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Shell[source]**
+`classmethod extrude(obj: Wire, direction: VectorLike) -> Shell`
 
 Extrude a Wire into a Shell.
 
@@ -5873,11 +5009,9 @@ Extrude a Wire into a Shell.
 
 **Raises:**
 
-- 
-**ValueError** – Unsupported class
+- **ValueError** – Unsupported class
 
-- 
-**RuntimeError** – Generated invalid result
+- **RuntimeError** – Generated invalid result
 
 **Returns:**
 
@@ -5887,18 +5021,15 @@ extruded shape
 
 *Edge*
 
-**
-location_at(*surface_point: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, ***, *x_dir: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → Location[source]**
+`location_at(surface_point: VectorLike, *, x_dir: VectorLike | None = None) -> Location`
 
 Get the location (origin and orientation) on the surface of the shell.
 
 **Parameters:**
 
-- 
-**surface_point** (*VectorLike*) – A 3D point near the surface.
+- **surface_point** (*VectorLike*) – A 3D point near the surface.
 
-- 
-**x_dir** (*VectorLike**, **optional*) – Direction for the local X axis. If not given,
+- **x_dir** (*VectorLike, optional*) – Direction for the local X axis. If not given,
 the tangent in the U direction is used.
 
 **Returns:**
@@ -5909,8 +5040,7 @@ A full 3D placement at the specified point on the shell surface.
 
 *Location*
 
-**
-*classmethod *make_loft(*objs: Iterable[Vertex | Wire]*, *ruled: bool = False*) → Shell[source]**
+`classmethod make_loft(objs: Iterable[Vertex | Wire], ruled: bool = False) -> Shell`
 
 make loft
 
@@ -5920,11 +5050,9 @@ between wires. Wires may be closed or opened.
 
 **Parameters:**
 
-- 
-**objs** (*list**[**Vertex**, **Wire**]*) – wire perimeters or vertices
+- **objs** (*list[Vertex, Wire]*) – wire perimeters or vertices
 
-- 
-**ruled** (*bool**, **optional*) – stepped or smooth. Defaults to False (smooth).
+- **ruled** (*bool, optional*) – stepped or smooth. Defaults to False (smooth).
 
 **Raises:**
 
@@ -5938,11 +5066,9 @@ Lofted object
 
 *Shell*
 
-**
-order* = 2.5***
+`order = 2.5`
 
-**
-*classmethod *revolve(*profile: Curve | Wire*, *angle: float*, *axis: Axis*) → Face[source]**
+`classmethod revolve(profile: Curve | Wire, angle: float, axis: Axis) -> Face`
 
 sweep
 
@@ -5950,14 +5076,11 @@ Revolve a 1D profile around an axis.
 
 **Parameters:**
 
-- 
-**profile** (*Curve** | **Wire*) – the object to revolve
+- **profile** (*Curve | Wire*) – the object to revolve
 
-- 
-**angle** (*float*) – the angle to revolve through
+- **angle** (*float*) – the angle to revolve through
 
-- 
-**axis** (*Axis*) – rotation Axis
+- **axis** (*Axis*) – rotation Axis
 
 **Returns:**
 
@@ -5967,21 +5090,17 @@ resulting shell
 
 *Shell*
 
-**
-*classmethod *sweep(*profile: Curve | Edge | Wire*, *path: Curve | Edge | Wire*, *transition=*) → Shell[source]**
+`classmethod sweep(profile: Curve | Edge | Wire, path: Curve | Edge | Wire, transition=<Transition.TRANSFORMED>) -> Shell`
 
 Sweep a 1D profile along a 1D path
 
 **Parameters:**
 
-- 
-**profile** (*Union**[**Curve**, **Edge**, **Wire**]*) – the object to sweep
+- **profile** (*Union[Curve, Edge, Wire]*) – the object to sweep
 
-- 
-**path** (*Union**[**Curve**, **Edge**, **Wire**]*) – the path to follow when sweeping
+- **path** (*Union[Curve, Edge, Wire]*) – the path to follow when sweeping
 
-- 
-**transition** (*Transition**, **optional*) – handling of profile orientation at C1 path
+- **transition** (*Transition, optional*) – handling of profile orientation at C1 path
 discontinuities. Defaults to Transition.TRANSFORMED.
 
 **Returns:**
@@ -5992,13 +5111,11 @@ resulting Shell, may be non-planar
 
 *Shell*
 
-**
-*property *volume*: float***
+`property volume: float`
 
 volume - the volume of this Shell if manifold, otherwise zero
 
-**
-*class *Solid(*obj: TopoDS_Solid | Shell | None = None*, *label: str = ''*, *color: Color | None = None*, *material: str = ''*, *joints: dict[str, Joint] | None = None*, *parent: Compound | None = None*)[source]**
+`class Solid(obj: TopoDS_Solid | Shell | None = None, label: str = '', color: Color | None = None, material: str = '', joints: dict[str, Joint] | None = None, parent: Compound | None = None)`
 
 A Solid in build123d represents a three-dimensional solid geometry
 in a topological structure. A solid is a closed and bounded volume, enclosing
@@ -6007,21 +5124,17 @@ well-defined manner. Solid modeling operations, such as Boolean
 operations (union, intersection, and difference), are often performed on
 Solid objects to create or modify complex geometries.
 
-**
-draft(*faces: Iterable[Face]*, *neutral_plane: Plane*, *angle: float*) → Solid[source]**
+`draft(faces: Iterable[Face], neutral_plane: Plane, angle: float) -> Solid`
 
 Apply a draft angle to the given faces of the solid.
 
 **Parameters:**
 
-- 
-**faces** – Faces to which the draft should be applied.
+- **faces** – Faces to which the draft should be applied.
 
-- 
-**neutral_plane** – Plane defining the neutral direction and position.
+- **neutral_plane** – Plane defining the neutral direction and position.
 
-- 
-**angle** – Draft angle in degrees.
+- **angle** – Draft angle in degrees.
 
 **Returns:**
 
@@ -6031,8 +5144,7 @@ Solid with the specified draft angles applied.
 
 **RuntimeError** – If draft application fails on any face or during build.
 
-**
-*classmethod *extrude(*obj: Face*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Solid[source]**
+`classmethod extrude(obj: Face, direction: VectorLike) -> Solid`
 
 Extrude a Face into a Solid.
 
@@ -6042,11 +5154,9 @@ Extrude a Face into a Solid.
 
 **Raises:**
 
-- 
-**ValueError** – Unsupported class
+- **ValueError** – Unsupported class
 
-- 
-**RuntimeError** – Generated invalid result
+- **RuntimeError** – Generated invalid result
 
 **Returns:**
 
@@ -6056,8 +5166,7 @@ extruded shape
 
 *Edge*
 
-**
-*classmethod *extrude_linear_with_rotation(*section: Face | Wire*, *center: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *normal: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *angle: float*, *inner_wires: list[Wire] | None = None*) → Solid[source]**
+`classmethod extrude_linear_with_rotation(section: Face | Wire, center: VectorLike, normal: VectorLike, angle: float, inner_wires: list[Wire] | None = None) -> Solid`
 
 Extrude with Rotation
 
@@ -6066,20 +5175,15 @@ extrusion vector.
 
 **Parameters:**
 
-- 
-**section** (*Union**[**Face**,**Wire**]*) – cross section
+- **section** (*Union[Face,Wire]*) – cross section
 
-- 
-**vec_center** (*VectorLike*) – the center point about which to rotate
+- **vec_center** (*VectorLike*) – the center point about which to rotate
 
-- 
-**vec_normal** (*VectorLike*) – a vector along which to extrude the wires
+- **vec_normal** (*VectorLike*) – a vector along which to extrude the wires
 
-- 
-**angle** (*float*) – the angle to rotate through while extruding
+- **angle** (*float*) – the angle to rotate through while extruding
 
-- 
-**inner_wires** (*list**[**Wire**]**, **optional*) – holes - only used if section is of type Wire.
+- **inner_wires** (*list[Wire], optional*) – holes - only used if section is of type Wire.
 Defaults to None.
 
 **Returns:**
@@ -6090,8 +5194,7 @@ extruded object
 
 *Solid*
 
-**
-*classmethod *extrude_taper(*profile: Face*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *taper: float*, *flip_inner: bool = True*) → Solid[source]**
+`classmethod extrude_taper(profile: Face, direction: VectorLike, taper: float, flip_inner: bool = True) -> Solid`
 
 Extrude a cross section with a taper
 
@@ -6105,18 +5208,14 @@ with a 2D offset set at the appropriate direction.
 
 **Parameters:**
 
-- 
-**section** (*Face**]*) – cross section
+- **section** (*Face]*) – cross section
 
-- 
-**normal** (*VectorLike*) – a vector along which to extrude the wires. The length
+- **normal** (*VectorLike*) – a vector along which to extrude the wires. The length
 of the vector controls the length of the extrusion.
 
-- 
-**taper** (*float*) – taper angle in degrees.
+- **taper** (*float*) – taper angle in degrees.
 
-- 
-**flip_inner** (*bool**, **optional*) – outer and inner geometry have opposite tapers to
+- **flip_inner** (*bool, optional*) – outer and inner geometry have opposite tapers to
 allow for part extraction when injection molding.
 
 **Returns:**
@@ -6127,18 +5226,15 @@ extruded cross section
 
 *Solid*
 
-**
-*classmethod *extrude_until(*profile: Face*, *target: Compound | Solid*, *direction: VectorLike*, *until: Until = *) → Solid[source]**
+`classmethod extrude_until(profile: Face, target: Compound | Solid, direction: VectorLike, until: Until = <Until.NEXT>) -> Solid`
 
 Extrude profile in the provided direction until it encounters a
 bounding surface on the target. The termination surface is chosen
 according to the until option:
 
-- 
-`Until.NEXT` — Extrude forward until the first intersecting surface.
+- `Until.NEXT` — Extrude forward until the first intersecting surface.
 
-- 
-`Until.LAST` — Extrude forward through all intersections, stopping at
+- `Until.LAST` — Extrude forward through all intersections, stopping at
 
 the farthest surface.
 * `Until.PREVIOUS` — Reverse the extrusion direction and stop at the
@@ -6157,17 +5253,13 @@ Partial overlaps may yield open or invalid solids.
 
 **Parameters:**
 
-- 
-**profile** (*Face*) – The face to extrude.
+- **profile** (*Face*) – The face to extrude.
 
-- 
-**target** (*Union**[**Compound**, **Solid**]*) – The object that limits the extrusion.
+- **target** (*Union[Compound, Solid]*) – The object that limits the extrusion.
 
-- 
-**direction** (*VectorLike*) – Extrusion direction.
+- **direction** (*VectorLike*) – Extrusion direction.
 
-- 
-**until** (*Until**, **optional*) – Surface selection mode controlling which
+- **until** (*Until, optional*) – Surface selection mode controlling which
 intersection to stop at. Defaults to `Until.NEXT`.
 
 **Raises:**
@@ -6182,13 +5274,11 @@ The extruded and limited solid.
 
 *Solid*
 
-**
-*classmethod *from_bounding_box(*bbox: BoundBox | OrientedBoundBox*) → Solid[source]**
+`classmethod from_bounding_box(bbox: BoundBox | OrientedBoundBox) -> Solid`
 
 A box of the same dimensions and location
 
-**
-*classmethod *make_box(*length: float*, *width: float*, *height: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*) → Solid[source]**
+`classmethod make_box(length: float, width: float, height: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> Solid`
 
 make box
 
@@ -6196,17 +5286,13 @@ Make a box at the origin of plane extending in positive direction of each axis.
 
 **Parameters:**
 
-- 
-**length** (*float*)
+- **length** (*float*)
 
-- 
-**width** (*float*)
+- **width** (*float*)
 
-- 
-**height** (*float*)
+- **height** (*float*)
 
-- 
-**plane** (*Plane**, **optional*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – base plane. Defaults to Plane.XY.
 
 **Returns:**
 
@@ -6216,8 +5302,7 @@ Box
 
 *Solid*
 
-**
-*classmethod *make_cone(*base_radius: float*, *top_radius: float*, *height: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*, *angle: float = 360*) → Solid[source]**
+`classmethod make_cone(base_radius: float, top_radius: float, height: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), angle: float = 360) -> Solid`
 
 make cone
 
@@ -6225,20 +5310,15 @@ Make a cone with given radii and height
 
 **Parameters:**
 
-- 
-**base_radius** (*float*)
+- **base_radius** (*float*)
 
-- 
-**top_radius** (*float*)
+- **top_radius** (*float*)
 
-- 
-**height** (*float*)
+- **height** (*float*)
 
-- 
-**plane** (*Plane*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane*) – base plane. Defaults to Plane.XY.
 
-- 
-**angle** (*float**, **optional*) – arc size. Defaults to 360.
+- **angle** (*float, optional*) – arc size. Defaults to 360.
 
 **Returns:**
 
@@ -6248,8 +5328,7 @@ Full or partial cone
 
 *Solid*
 
-**
-*classmethod *make_cylinder(*radius: float*, *height: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*, *angle: float = 360*) → Solid[source]**
+`classmethod make_cylinder(radius: float, height: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), angle: float = 360) -> Solid`
 
 make cylinder
 
@@ -6257,17 +5336,13 @@ Make a cylinder with a given radius and height with the base center on plane ori
 
 **Parameters:**
 
-- 
-**radius** (*float*)
+- **radius** (*float*)
 
-- 
-**height** (*float*)
+- **height** (*float*)
 
-- 
-**plane** (*Plane*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane*) – base plane. Defaults to Plane.XY.
 
-- 
-**angle** (*float**, **optional*) – arc size. Defaults to 360.
+- **angle** (*float, optional*) – arc size. Defaults to 360.
 
 **Returns:**
 
@@ -6277,8 +5352,7 @@ Full or partial cylinder
 
 *Solid*
 
-**
-*classmethod *make_loft(*objs: Iterable[Vertex | Wire]*, *ruled: bool = False*) → Solid[source]**
+`classmethod make_loft(objs: Iterable[Vertex | Wire], ruled: bool = False) -> Solid`
 
 make loft
 
@@ -6288,11 +5362,9 @@ nor between wires.
 
 **Parameters:**
 
-- 
-**objs** (*list**[**Vertex**, **Wire**]*) – wire perimeters or vertices
+- **objs** (*list[Vertex, Wire]*) – wire perimeters or vertices
 
-- 
-**ruled** (*bool**, **optional*) – stepped or smooth. Defaults to False (smooth).
+- **ruled** (*bool, optional*) – stepped or smooth. Defaults to False (smooth).
 
 **Raises:**
 
@@ -6306,8 +5378,7 @@ Lofted object
 
 *Solid*
 
-**
-*classmethod *make_sphere(*radius: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*, *angle1: float = -90*, *angle2: float = 90*, *angle3: float = 360*) → Solid[source]**
+`classmethod make_sphere(radius: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), angle1: float = -90, angle2: float = 90, angle3: float = 360) -> Solid`
 
 Sphere
 
@@ -6315,20 +5386,15 @@ Make a full or partial sphere - with a given radius center on the origin or plan
 
 **Parameters:**
 
-- 
-**radius** (*float*)
+- **radius** (*float*)
 
-- 
-**plane** (*Plane*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane*) – base plane. Defaults to Plane.XY.
 
-- 
-**angle1** (*float**, **optional*) – Defaults to -90.
+- **angle1** (*float, optional*) – Defaults to -90.
 
-- 
-**angle2** (*float**, **optional*) – Defaults to 90.
+- **angle2** (*float, optional*) – Defaults to 90.
 
-- 
-**angle3** (*float**, **optional*) – Defaults to 360.
+- **angle3** (*float, optional*) – Defaults to 360.
 
 **Returns:**
 
@@ -6338,8 +5404,7 @@ sphere
 
 *Solid*
 
-**
-*classmethod *make_torus(*major_radius: float*, *minor_radius: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*, *start_angle: float = 0*, *end_angle: float = 360*, *major_angle: float = 360*) → Solid[source]**
+`classmethod make_torus(major_radius: float, minor_radius: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), start_angle: float = 0, end_angle: float = 360, major_angle: float = 360) -> Solid`
 
 make torus
 
@@ -6347,20 +5412,15 @@ Make a torus with a given radii and angles
 
 **Parameters:**
 
-- 
-**major_radius** (*float*)
+- **major_radius** (*float*)
 
-- 
-**minor_radius** (*float*)
+- **minor_radius** (*float*)
 
-- 
-**plane** (*Plane*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane*) – base plane. Defaults to Plane.XY.
 
-- 
-**start_angle** (*float**, **optional*) – start major arc. Defaults to 0.
+- **start_angle** (*float, optional*) – start major arc. Defaults to 0.
 
-- 
-**end_angle** (*float**, **optional*) – end major arc. Defaults to 360.
+- **end_angle** (*float, optional*) – end major arc. Defaults to 360.
 
 **Returns:**
 
@@ -6370,36 +5430,27 @@ Full or partial torus
 
 *Solid*
 
-**
-*classmethod *make_wedge(*delta_x: float*, *delta_y: float*, *delta_z: float*, *min_x: float*, *min_z: float*, *max_x: float*, *max_z: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*) → Solid[source]**
+`classmethod make_wedge(delta_x: float, delta_y: float, delta_z: float, min_x: float, min_z: float, max_x: float, max_z: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> Solid`
 
 Make a wedge
 
 **Parameters:**
 
-- 
-**delta_x** (*float*)
+- **delta_x** (*float*)
 
-- 
-**delta_y** (*float*)
+- **delta_y** (*float*)
 
-- 
-**delta_z** (*float*)
+- **delta_z** (*float*)
 
-- 
-**min_x** (*float*)
+- **min_x** (*float*)
 
-- 
-**min_z** (*float*)
+- **min_z** (*float*)
 
-- 
-**max_x** (*float*)
+- **max_x** (*float*)
 
-- 
-**max_z** (*float*)
+- **max_z** (*float*)
 
-- 
-**plane** (*Plane*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane*) – base plane. Defaults to Plane.XY.
 
 **Returns:**
 
@@ -6409,11 +5460,9 @@ wedge
 
 *Solid*
 
-**
-order* = 3.0***
+`order = 3.0`
 
-**
-*classmethod *revolve(*section: Face | Wire*, *angle: float*, *axis: Axis*, *inner_wires: list[Wire] | None = None*) → Solid[source]**
+`classmethod revolve(section: Face | Wire, angle: float, axis: Axis, inner_wires: list[Wire] | None = None) -> Solid`
 
 Revolve
 
@@ -6421,17 +5470,13 @@ Revolve a cross section about the given Axis by the given angle.
 
 **Parameters:**
 
-- 
-**section** (*Union**[**Face**,**Wire**]*) – cross section
+- **section** (*Union[Face,Wire]*) – cross section
 
-- 
-**angle** (*float*) – the angle to revolve through
+- **angle** (*float*) – the angle to revolve through
 
-- 
-**axis** (*Axis*) – rotation Axis
+- **axis** (*Axis*) – rotation Axis
 
-- 
-**inner_wires** (*list**[**Wire**]**, **optional*) – holes - only used if section is of type Wire.
+- **inner_wires** (*list[Wire], optional*) – holes - only used if section is of type Wire.
 Defaults to [].
 
 **Returns:**
@@ -6442,8 +5487,7 @@ the revolved cross section
 
 *Solid*
 
-**
-*classmethod *sweep(*section: ~topology.two_d.Face | ~topology.one_d.Wire*, *path: ~topology.one_d.Wire | ~topology.one_d.Edge*, *inner_wires: list[~topology.one_d.Wire] | None = None*, *make_solid: bool = True*, *is_frenet: bool = False*, *mode: ~build123d.geometry.Vector | ~topology.one_d.Wire | ~topology.one_d.Edge | None = None*, *transition: ~build123d.build_enums.Transition = *) → Solid[source]**
+`classmethod sweep(section: Face | Wire, path: Wire | Edge, inner_wires: list[Wire] | None = None, make_solid: bool = True, is_frenet: bool = False, mode: Vector | Wire | Edge | None = None, transition: Transition = <Transition.TRANSFORMED>) -> Solid`
 
 Sweep
 
@@ -6466,27 +5510,20 @@ http://en.wikipedia.org/wiki/Frenet%E2%80%93Serret_formulas.
 
 **Parameters:**
 
-- 
-**section** (*Union**[**Face**, **Wire**]*) – cross section to sweep
+- **section** (*Union[Face, Wire]*) – cross section to sweep
 
-- 
-**path** (*Union**[**Wire**, **Edge**]*) – sweep path
+- **path** (*Union[Wire, Edge]*) – sweep path
 
-- 
-**inner_wires** (*list**[**Wire**]*) – holes - only used if section is a wire
+- **inner_wires** (*list[Wire]*) – holes - only used if section is a wire
 
-- 
-**make_solid** (*bool**, **optional*) – return Solid or Shell. Defaults to True.
+- **make_solid** (*bool, optional*) – return Solid or Shell. Defaults to True.
 
-- 
-**is_frenet** (*bool**, **optional*) – Frenet mode. Defaults to False.
+- **is_frenet** (*bool, optional*) – Frenet mode. Defaults to False.
 
-- 
-**mode** (*Union**[**Vector**, **Wire**, **Edge**, **None**]**, **optional*) – additional sweep
+- **mode** (*Union[Vector, Wire, Edge, None], optional*) – additional sweep
 mode parameters. Defaults to None.
 
-- 
-**transition** (*Transition**, **optional*) – handling of profile orientation at C1 path
+- **transition** (*Transition, optional*) – handling of profile orientation at C1 path
 discontinuities. Defaults to Transition.TRANSFORMED.
 
 **Returns:**
@@ -6497,8 +5534,7 @@ the swept cross section
 
 *Solid*
 
-**
-*classmethod *sweep_multi(*profiles: Iterable[Wire | Face]*, *path: Wire | Edge*, *make_solid: bool = True*, *is_frenet: bool = False*, *binormal: Vector | Wire | Edge | None = None*) → Solid[source]**
+`classmethod sweep_multi(profiles: Iterable[Wire | Face], path: Wire | Edge, make_solid: bool = True, is_frenet: bool = False, binormal: Vector | Wire | Edge | None = None) -> Solid`
 
 Multi section sweep
 
@@ -6521,20 +5557,15 @@ http://en.wikipedia.org/wiki/Frenet%E2%80%93Serret_formulas.
 
 **Parameters:**
 
-- 
-**profiles** (*Iterable**[**Union**[**Wire**, **Face**]**]*) – list of profiles
+- **profiles** (*Iterable[Union[Wire, Face]]*) – list of profiles
 
-- 
-**path** (*Union**[**Wire**, **Edge**]*) – The wire to sweep the face resulting from the wires over
+- **path** (*Union[Wire, Edge]*) – The wire to sweep the face resulting from the wires over
 
-- 
-**make_solid** (*bool**, **optional*) – Solid or Shell. Defaults to True.
+- **make_solid** (*bool, optional*) – Solid or Shell. Defaults to True.
 
-- 
-**is_frenet** (*bool**, **optional*) – Select frenet mode. Defaults to False.
+- **is_frenet** (*bool, optional*) – Select frenet mode. Defaults to False.
 
-- 
-**binormal** (*Union**[**Vector**, **Wire**, **Edge**, **None**]**, **optional*) – additional sweep mode parameters.
+- **binormal** (*Union[Vector, Wire, Edge, None], optional*) – additional sweep mode parameters.
 Defaults to None.
 
 **Returns:**
@@ -6545,8 +5576,7 @@ swept object
 
 *Solid*
 
-**
-*classmethod *thicken(*surface: Face | Shell*, *depth: float*, *normal_override: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → Solid[source]**
+`classmethod thicken(surface: Face | Shell, depth: float, normal_override: VectorLike | None = None) -> Solid`
 
 Thicken Face or Shell
 
@@ -6557,11 +5587,9 @@ Non-planar faces are thickened both towards and away from the center of the sphe
 
 **Parameters:**
 
-- 
-**depth** (*float*) – Amount to thicken face(s), can be positive or negative.
+- **depth** (*float*) – Amount to thicken face(s), can be positive or negative.
 
-- 
-**normal_override** (*Vector**, **optional*) – Face only. The normal_override vector can be
+- **normal_override** (*Vector, optional*) – Face only. The normal_override vector can be
 used to indicate which way is ‘up’, potentially flipping the face normal
 direction such that many faces with different normals all go in the same
 direction (direction need only be +/- 90 degrees from the face normal).
@@ -6579,8 +5607,7 @@ The resulting Solid object
 
 *Solid*
 
-**
-touch(*other: Shape*, *tolerance: float = 1e-06*, *found_solids: ShapeList | None = None*) → ShapeList[Vertex | Edge | Face][source]**
+`touch(other: Shape, tolerance: float = 1e-06, found_solids: ShapeList | None = None) -> ShapeList[Vertex | Edge | Face]`
 
 Find where this Solid’s boundary contacts another shape.
 
@@ -6593,38 +5620,29 @@ Returns geometry where boundaries contact without interior overlap:
 
 **Parameters:**
 
-- 
-**other** – Shape to check boundary contacts with
+- **other** – Shape to check boundary contacts with
 
-- 
-**tolerance** – tolerance for contact detection
+- **tolerance** – tolerance for contact detection
 
-- 
-**found_solids** – pre-found intersection solids to filter against
+- **found_solids** – pre-found intersection solids to filter against
 
 **Returns:**
 
 ShapeList of boundary contact geometry (empty if no contact)
 
-**
-*property *volume*: float***
+`property volume: float`
 
 volume - the volume of this Solid
 
-**
-*class *Wire(*obj: TopoDS_Wire*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)[source]**
+`class Wire(*args, **kwargs)`
 
-**
-*class *Wire(*edge: Edge*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)**
+`class Wire(*args, **kwargs)`
 
-**
-*class *Wire(*wire: Wire*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)**
+`class Wire(*args, **kwargs)`
 
-**
-*class *Wire(*wire: Curve*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)**
+`class Wire(*args, **kwargs)`
 
-**
-*class *Wire(*edges: Iterable[Edge]*, *sequenced: bool = False*, *label: str = ''*, *color: Color | None = None*, *parent: Compound | None = None*)**
+`class Wire(*args, **kwargs)`
 
 A Wire in build123d is a topological entity representing a connected sequence
 of edges forming a continuous curve or path in 3D space. Wires are essential
@@ -6632,24 +5650,19 @@ components in modeling complex objects, defining boundaries for surfaces or
 solids. They store information about the connectivity and order of edges,
 allowing precise definition of paths within a 3D model.
 
-**
-chamfer_2d(*distance: float*, *distance2: float*, *vertices: Iterable[Vertex]*, *edge: Edge | None = None*) → Wire[source]**
+`chamfer_2d(distance: float, distance2: float, vertices: Iterable[Vertex], edge: Edge | None = None) -> Wire`
 
 Apply 2D chamfer to a wire
 
 **Parameters:**
 
-- 
-**distance** (*float*) – chamfer length
+- **distance** (*float*) – chamfer length
 
-- 
-**distance2** (*float*) – chamfer length
+- **distance2** (*float*) – chamfer length
 
-- 
-**vertices** (*Iterable**[**Vertex**]*) – vertices to chamfer
+- **vertices** (*Iterable[Vertex]*) – vertices to chamfer
 
-- 
-**edge** (*Edge*) – identifies the side where length is measured. The vertices must be
+- **edge** (*Edge*) – identifies the side where length is measured. The vertices must be
 part of the edge
 
 **Returns:**
@@ -6660,23 +5673,19 @@ chamfered wire
 
 *Wire*
 
-**
-close() → Wire[source]**
+`close() -> Wire`
 
 Close a Wire
 
-**
-*classmethod *combine(*wires: Iterable[Wire | Edge]*, *tol: float = 1e-09*) → ShapeList[Wire][source]**
+`classmethod combine(wires: Iterable[Wire | Edge], tol: float = 1e-09) -> ShapeList[Wire]`
 
 Combine a list of wires and edges into a list of Wires.
 
 **Parameters:**
 
-- 
-**wires** (*Iterable**[**Wire** | **Edge**]*) – unsorted
+- **wires** (*Iterable[Wire | Edge]*) – unsorted
 
-- 
-**tol** (*float**, **optional*) – tolerance. Defaults to 1e-9.
+- **tol** (*float, optional*) – tolerance. Defaults to 1e-9.
 
 **Returns:**
 
@@ -6686,36 +5695,29 @@ Wires
 
 *ShapeList*[*Wire*]
 
-**
-edges() → ShapeList[Edge][source]**
+`edges() -> ShapeList[Edge]`
 
 edges - all the edges in this Shape
 
-**
-*classmethod *extrude(*obj: Shape*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Wire[source]**
+`classmethod extrude(obj: Shape, direction: VectorLike) -> Wire`
 
 extrude - invalid operation for Wire
 
-**
-fillet_2d(*radius: float*, *vertices: Iterable[Vertex]*) → Wire[source]**
+`fillet_2d(radius: float, vertices: Iterable[Vertex]) -> Wire`
 
 Apply 2D fillet to a wire
 
 **Parameters:**
 
-- 
-**radius** (*float*)
+- **radius** (*float*)
 
-- 
-**vertices** (*Iterable**[**Vertex**]*) – vertices to fillet
+- **vertices** (*Iterable[Vertex]*) – vertices to fillet
 
 **Raises:**
 
-- 
-**RuntimeError** – Internal error
+- **RuntimeError** – Internal error
 
-- 
-**ValueError** – empty wire
+- **ValueError** – empty wire
 
 **Returns:**
 
@@ -6725,8 +5727,7 @@ filleted wire
 
 *Wire*
 
-**
-fix_degenerate_edges(*precision: float*) → Wire[source]**
+`fix_degenerate_edges(precision: float) -> Wire`
 
 Fix a Wire that contains degenerate (very small) edges
 
@@ -6742,13 +5743,11 @@ fixed wire
 
 *Wire*
 
-**
-geom_adaptor() → BRepAdaptor_CompCurve[source]**
+`geom_adaptor() -> BRepAdaptor_CompCurve`
 
 Return the Geom Comp Curve for this Wire
 
-**
-geom_equal(*other: Wire*, *tol: float = 1e-06*, *num_interpolation_points: int = 5*) → bool[source]**
+`geom_equal(other: Wire, tol: float = 1e-06, num_interpolation_points: int = 5) -> bool`
 
 Compare two wires for geometric equality within tolerance.
 
@@ -6758,14 +5757,11 @@ same geometry will return True.
 
 **Parameters:**
 
-- 
-**other** – Wire to compare with
+- **other** – Wire to compare with
 
-- 
-**tol** – Tolerance for numeric comparisons. Defaults to 1e-6.
+- **tol** – Tolerance for numeric comparisons. Defaults to 1e-6.
 
-- 
-**num_interpolation_points** – Number of points to sample for unknown
+- **num_interpolation_points** – Number of points to sample for unknown
 curve types. Defaults to 5.
 
 **Returns:**
@@ -6776,18 +5772,15 @@ True if wires are geometrically equal within tolerance
 
 *bool*
 
-**
-*classmethod *make_circle(*radius: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*) → Wire[source]**
+`classmethod make_circle(radius: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> Wire`
 
 Makes a circle centered at the origin of plane
 
 **Parameters:**
 
-- 
-**radius** (*float*) – circle radius
+- **radius** (*float*) – circle radius
 
-- 
-**plane** (*Plane*) – base plane. Defaults to Plane.XY
+- **plane** (*Plane*) – base plane. Defaults to Plane.XY
 
 **Returns:**
 
@@ -6797,8 +5790,7 @@ a circle
 
 *Wire*
 
-**
-*classmethod *make_convex_hull(*edges: Iterable[Edge]*, *tolerance: float = 0.001*) → Wire[source]**
+`classmethod make_convex_hull(edges: Iterable[Edge], tolerance: float = 0.001) -> Wire`
 
 Create a wire of minimum length enclosing all of the provided edges.
 
@@ -6806,11 +5798,9 @@ Note that edges can’t overlap each other.
 
 **Parameters:**
 
-- 
-**edges** (*Iterable**[**Edge**]*) – edges defining the convex hull
+- **edges** (*Iterable[Edge]*) – edges defining the convex hull
 
-- 
-**tolerance** (*float*) – allowable error as a fraction of each edge length.
+- **tolerance** (*float*) – allowable error as a fraction of each edge length.
 Defaults to 1e-3.
 
 **Raises:**
@@ -6825,8 +5815,7 @@ convex hull perimeter
 
 *Wire*
 
-**
-*classmethod *make_ellipse(*x_radius: float*, *y_radius: float*, *plane: ~build123d.geometry.Plane = Plane((0*, *0*, *0)*, *(1*, *0*, *0)*, *(0*, *0*, *1))*, *start_angle: float = 360.0*, *end_angle: float = 360.0*, *angular_direction: ~build123d.build_enums.AngularDirection = *, *closed: bool = True*) → Wire[source]**
+`classmethod make_ellipse(x_radius: float, y_radius: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1)), start_angle: float = 360.0, end_angle: float = 360.0, angular_direction: AngularDirection = <AngularDirection.COUNTER_CLOCKWISE>, closed: bool = True) -> Wire`
 
 make ellipse
 
@@ -6834,27 +5823,20 @@ Makes an ellipse centered at the origin of plane.
 
 **Parameters:**
 
-- 
-**x_radius** (*float*) – x radius of the ellipse (along the x-axis of plane)
+- **x_radius** (*float*) – x radius of the ellipse (along the x-axis of plane)
 
-- 
-**y_radius** (*float*) – y radius of the ellipse (along the y-axis of plane)
+- **y_radius** (*float*) – y radius of the ellipse (along the y-axis of plane)
 
-- 
-**plane** (*Plane**, **optional*) – base plane. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – base plane. Defaults to Plane.XY.
 
-- 
-**start_angle** (*float**, **optional*) – _description_. Defaults to 360.0.
+- **start_angle** (*float, optional*) – ellipse parameter angle in degrees at which the arc starts: the point is (x_radius·cos θ, y_radius·sin θ) in the plane, so this is not the polar angle from the x-axis. Equal start and end angles make the full ellipse. Defaults to 360.0.
 
-- 
-**end_angle** (*float**, **optional*) – _description_. Defaults to 360.0.
+- **end_angle** (*float, optional*) – ellipse parameter angle in degrees at which the arc ends. Defaults to 360.0.
 
-- 
-**angular_direction** (*AngularDirection**, **optional*) – arc direction.
+- **angular_direction** (*AngularDirection, optional*) – arc direction.
 Defaults to AngularDirection.COUNTER_CLOCKWISE.
 
-- 
-**closed** (*bool**, **optional*) – close the arc. Defaults to True.
+- **closed** (*bool, optional*) – close the arc. Defaults to True.
 
 **Returns:**
 
@@ -6864,18 +5846,15 @@ an ellipse
 
 *Wire*
 
-**
-*classmethod *make_polygon(*vertices: Iterable[Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]]*, *close: bool = True*) → Wire[source]**
+`classmethod make_polygon(vertices: Iterable[VectorLike], close: bool = True) -> Wire`
 
 Create an irregular polygon by defining vertices
 
 **Parameters:**
 
-- 
-**vertices** (*Iterable**[**VectorLike**]*)
+- **vertices** (*Iterable[VectorLike]*)
 
-- 
-**close** (*bool**, **optional*) – close the polygon. Defaults to True.
+- **close** (*bool, optional*) – close the polygon. Defaults to True.
 
 **Returns:**
 
@@ -6885,8 +5864,7 @@ an irregular polygon
 
 *Wire*
 
-**
-*classmethod *make_rect(*width: float*, *height: float*, *plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))*) → Wire[source]**
+`classmethod make_rect(width: float, height: float, plane: Plane = Plane((0, 0, 0), (1, 0, 0), (0, 0, 1))) -> Wire`
 
 Make Rectangle
 
@@ -6894,14 +5872,11 @@ Make a Rectangle centered on center with the given normal
 
 **Parameters:**
 
-- 
-**width** (*float*) – width (local x)
+- **width** (*float*) – width (local x)
 
-- 
-**height** (*float*) – height (local y)
+- **height** (*float*) – height (local y)
 
-- 
-**plane** (*Plane**, **optional*) – plane containing rectangle. Defaults to Plane.XY.
+- **plane** (*Plane, optional*) – plane containing rectangle. Defaults to Plane.XY.
 
 **Returns:**
 
@@ -6911,28 +5886,23 @@ The centered rectangle
 
 *Wire*
 
-**
-order* = 1.5***
+`order = 1.5`
 
-**
-*static *order_chamfer_edges(*reference_edge: Edge | None*, *edges: tuple[Edge, Edge]*) → tuple[Edge, Edge][source]**
+`static order_chamfer_edges(reference_edge: Edge | None, edges: tuple[Edge, Edge]) -> tuple[Edge, Edge]`
 
 Order the edges of a chamfer relative to a reference Edge
 
-**
-order_edges() → ShapeList[Edge][source]**
+`order_edges() -> ShapeList[Edge]`
 
 Return the edges in self ordered by wire direction and orientation
 
-**
-param_at(*position: float*) → float[source]**
+`param_at(position: float) -> float`
 
 Return the OCCT comp-curve parameter corresponding to the given wire position.
 This is *not* the edge composite parameter; it is the parameter of the wire’s
 BRepAdaptor_CompCurve.
 
-**
-param_at_point(*point: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → float[source]**
+`param_at_point(point: VectorLike) -> float`
 
 Return the normalized wire parameter for the point closest to this wire.
 
@@ -6940,11 +5910,9 @@ This method projects the given point onto the wire, finds the nearest edge,
 and accumulates arc lengths to determine the fractional position along the
 entire wire. The result is normalized to the interval [0.0, 1.0], where:
 
-- 
-0.0 corresponds to the start of the wire
+- 0.0 corresponds to the start of the wire
 
-- 
-1.0 corresponds to the end of the wire
+- 1.0 corresponds to the end of the wire
 
 Unlike the edge version of this method, the returned value is **not**
 an OCCT curve parameter, but a normalized parameter across the wire as a whole.
@@ -6966,8 +5934,7 @@ position of the projected point along the wire.
 
 *float*
 
-**
-project_to_shape(*target_object: Shape*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*, *center: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float] | None = None*) → ShapeList[Wire][source]**
+`project_to_shape(target_object: Shape, direction: VectorLike | None = None, center: VectorLike | None = None) -> ShapeList[Wire]`
 
 Project Wire
 
@@ -6981,23 +5948,17 @@ of the output wires are forced to be the same as self.
 
 **Parameters:**
 
-- 
-**target_object** – Object to project onto
+- **target_object** – Object to project onto
 
-- 
-**direction** – Parallel projection direction. Defaults to None.
+- **direction** – Parallel projection direction. Defaults to None.
 
-- 
-**center** – Conical center of projection. Defaults to None.
+- **center** – Conical center of projection. Defaults to None.
 
-- 
-**target_object** – Shape:
+- **target_object** (*Shape*)
 
-- 
-**direction** – VectorLike: (Default value = None)
+- **direction** – VectorLike: (Default value = None)
 
-- 
-**center** – VectorLike: (Default value = None)
+- **center** – VectorLike: (Default value = None)
 
 **Returns:**
 
@@ -7007,8 +5968,7 @@ Projected wire(s)
 
 **ValueError** – Only one of direction or center must be provided
 
-**
-stitch(*other: Wire*) → Wire[source]**
+`stitch(other: Wire) -> Wire`
 
 Attempt to stitch wires
 
@@ -7028,20 +5988,17 @@ stitched wires
 
 *Wire*
 
-**
-to_wire() → Wire[source]**
+`to_wire() -> Wire`
 
 Return Wire - used as a pair with Edge.to_wire when self is Wire | Edge
 
-**
-trim(*start: float | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*, *end: float | Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Wire[source]**
+`trim(start: float | VectorLike, end: float | VectorLike) -> Wire`
 
 Trim a wire between [start, end] normalized over total length.
 
 **Parameters:**
 
-- 
-**start** (*float** | **VectorLike*) – normalized start position (0.0 to 0.0 to 1.0) or point
+- **start** (*float | VectorLike*) – normalized start position (0.0 to 0.0 to 1.0) or point
 
 **Returns:**
 
@@ -7051,17 +6008,13 @@ trimmed Wire
 
 *Wire*
 
-**
-*class *Vertex[source]**
+`class Vertex(*args, **kwargs)`
 
-**
-*class *Vertex(*ocp_vx: TopoDS_Vertex*)**
+`class Vertex(*args, **kwargs)`
 
-**
-*class *Vertex(*X: float*, *Y: float*, *Z: float*)**
+`class Vertex(*args, **kwargs)`
 
-**
-*class *Vertex(*v: Iterable[float]*)**
+`class Vertex(*args, **kwargs)`
 
 A Vertex in build123d represents a zero-dimensional point in the topological
 data structure. It marks the endpoints of edges within a 3D model, defining precise
@@ -7070,8 +6023,7 @@ and the connectivity between edges, facilitating accurate representation and
 manipulation of 3D shapes. They hold coordinate information and are essential
 for constructing complex structures like wires, faces, and solids.
 
-**
-__add__(*other: Vertex | Vector | tuple[float, float, float]*) → Vertex[source]**
+`__add__(other: Vertex | Vector | tuple[float, float, float]) -> Vertex`
 
 Add
 
@@ -7093,8 +6045,7 @@ Example
 
 part.faces(“>z”).vertices(“Vertex , Vector or tuple of float values to a Vertex.
 
-**
-__sub__(*other: Vertex | Vector | tuple*) → Vertex[source]**
+`__sub__(other: Vertex | Vector | tuple) -> Vertex`
 
 Subtract
 
@@ -7116,36 +6067,29 @@ Example
 
 part.faces(“>z”).vertices(“
 
-**
-*classmethod *cast(*obj: TopoDS_Shape*) → Self[source]**
+`classmethod cast(obj: TopoDS_Shape) -> Self`
 
 Returns the right type of wrapper, given a OCCT object
 
-**
-center() → Vector[source]**
+`center() -> Vector`
 
 The center of a vertex is itself!
 
-**
-*classmethod *extrude(*obj: Shape*, *direction: Vector | tuple[float, float] | tuple[float, float, float] | Sequence[float]*) → Vertex[source]**
+`classmethod extrude(obj: Shape, direction: VectorLike) -> Vertex`
 
 extrude - invalid operation for Vertex
 
-**
-order* = 0.0***
+`order = 0.0`
 
-**
-split(*tool: TrimmingTool*, *keep: Keep = *)[source]**
+`split(tool: TrimmingTool, keep: Keep = <Keep.TOP>)`
 
 split - not implemented
 
-**
-to_tuple() → tuple[float, float, float][source]**
+`to_tuple() -> tuple[float, float, float]`
 
 Return vertex as three tuple of floats
 
-**
-transform_shape(*t_matrix: Matrix*) → Vertex[source]**
+`transform_shape(t_matrix: Matrix) -> Vertex`
 
 Apply affine transform without changing type
 
@@ -7165,63 +6109,53 @@ copy of transformed shape with all objects keeping their type
 
 *Vertex*
 
-**
-vertex() → Vertex[source]**
+`vertex() -> Vertex`
 
 Return the Vertex
 
-**
-vertices() → ShapeList[Vertex][source]**
+`vertices() -> ShapeList[Vertex]`
 
 vertices - all the vertices in this Shape
 
-**
-*property *volume*: float***
+`property volume: float`
 
 volume - the volume of this Vertex, which is always zero
 
-**
-*class *Curve(*obj: TopoDS_Compound | Iterable[Shape] | None = None*, *label: str = ''*, *color: Color | None = None*, *material: str = ''*, *joints: dict[str, Joint] | None = None*, *parent: Compound | None = None*, *children: Sequence[Shape] | None = None*)[source]**
+`class Curve(obj: TopoDS_Compound | Iterable[Shape] | None = None, label: str = '', color: Color | None = None, material: str = '', joints: dict[str, Joint] | None = None, parent: Compound | None = None, children: Sequence[Shape] | None = None)`
 
 A Compound containing 1D objects - aka Edges
 
-**
-__matmul__(*position: float*) → Vector[source]**
+`__matmul__(position: float) -> Vector`
 
 Position on curve operator @ - only works if continuous
 
-**
-__mod__(*position: float*) → Vector[source]**
+`__mod__(position: float) -> Vector`
 
 Tangent on wire operator % - only works if continuous
 
-**
-wires() → ShapeList[Wire][source]**
+`wires() -> ShapeList[Wire]`
 
 A list of wires created from the edges
 
-**
-*class *Part(*obj: TopoDS_Compound | Iterable[Shape] | None = None*, *label: str = ''*, *color: Color | None = None*, *material: str = ''*, *joints: dict[str, Joint] | None = None*, *parent: Compound | None = None*, *children: Sequence[Shape] | None = None*)[source]**
+`class Part(obj: TopoDS_Compound | Iterable[Shape] | None = None, label: str = '', color: Color | None = None, material: str = '', joints: dict[str, Joint] | None = None, parent: Compound | None = None, children: Sequence[Shape] | None = None)`
 
 A Compound containing 3D objects - aka Solids
 
-**
-*class *Sketch(*obj: TopoDS_Compound | Iterable[Shape] | None = None*, *label: str = ''*, *color: Color | None = None*, *material: str = ''*, *joints: dict[str, Joint] | None = None*, *parent: Compound | None = None*, *children: Sequence[Shape] | None = None*)[source]**
+`class Sketch(obj: TopoDS_Compound | Iterable[Shape] | None = None, label: str = '', color: Color | None = None, material: str = '', joints: dict[str, Joint] | None = None, parent: Compound | None = None, children: Sequence[Shape] | None = None)`
 
 A Compound containing 2D objects - aka Faces
 
-## Import/Export
+## Import/Export
 
 Methods and functions specific to exporting and importing build123d objects are defined below.
 
-**
-import_brep(*file_name: PathLike | str | bytes*) → Shape[source]**
+`import_brep(file_name: os.PathLike | str | bytes) -> build123d.topology.shape_core.Shape`
 
 Import shape from a BREP file
 
 **Parameters:**
 
-**file_name** (*Union**[**PathLike**, **str**, **bytes**]*) – brep file
+**file_name** (*Union[PathLike, str, bytes]*) – brep file
 
 **Raises:**
 
@@ -7235,14 +6169,13 @@ build123d object
 
 *Shape*
 
-**
-import_step(*filename: PathLike | str | bytes*) → Compound[source]**
+`import_step(filename: os.PathLike | str | bytes) -> build123d.topology.composite.Compound`
 
 Extract shapes from a STEP file and return them as a Compound object.
 
 **Parameters:**
 
-**file_name** (*Union**[**PathLike**, **str**, **bytes**]*) – file path of STEP file to import
+**file_name** (*Union[PathLike, str, bytes]*) – file path of STEP file to import
 
 **Raises:**
 
@@ -7256,8 +6189,7 @@ contents of STEP file
 
 *Compound*
 
-**
-import_stl(*file_name: ~os.PathLike | str | bytes*, *model_unit: ~build123d.build_enums.Unit = *) → Face[source]**
+`import_stl(file_name: os.PathLike | str | bytes, model_unit: build123d.build_enums.Unit = <Unit.MM>) -> build123d.topology.two_d.Face`
 
 Extract shape from an STL file and return it as a Face reference object.
 
@@ -7267,20 +6199,16 @@ of the STL file.
 
 **Parameters:**
 
-- 
-**file_name** (*Union**[**PathLike**, **str**, **bytes**]*) – file path of STL file to import
+- **file_name** (*Union[PathLike, str, bytes]*) – file path of STL file to import
 
-- 
-**model_unit** (*Unit**, **optional*) – the default unit used when creating the model. For
+- **model_unit** (*Unit, optional*) – the default unit used when creating the model. For
 example, Blender defaults to Unit.M. Defaults to Unit.MM.
 
 **Raises:**
 
-- 
-**ValueError** – Could not import file
+- **ValueError** – Could not import file
 
-- 
-**ValueError** – Invalid model_unit
+- **ValueError** – Invalid model_unit
 
 **Returns:**
 
@@ -7290,26 +6218,20 @@ STL model
 
 *Face*
 
-**
-import_svg(*svg_file: str | ~pathlib.Path | ~typing.TextIO*, ***, *flip_y: bool = True*, *align: ~build123d.build_enums.Align | tuple[~build123d.build_enums.Align*, *~build123d.build_enums.Align] | None = *, *ignore_visibility: bool = False*, *label_by: ~typing.Literal['id'*, *'class'*, *'inkscape:label'] | str = 'id'*, *is_inkscape_label: bool | None = None*) → ShapeList[Wire | Face][source]**
+`import_svg(svg_file: str | pathlib.Path | typing.TextIO, *, flip_y: bool = True, align: build123d.build_enums.Align | tuple[build123d.build_enums.Align, build123d.build_enums.Align] | None = <Align.MIN>, ignore_visibility: bool = False, label_by: Union[Literal['id', 'class', 'inkscape:label'], str] = 'id', is_inkscape_label: bool | None = None) -> build123d.topology.shape_core.ShapeList[build123d.topology.one_d.Wire | build123d.topology.two_d.Face]`
 
 **Parameters:**
 
-- 
-**svg_file** (*Union**[**str**, **Path**, **TextIO**]*) – svg file
+- **svg_file** (*Union[str, Path, TextIO]*) – svg file
 
-- 
-**flip_y** (*bool**, **optional*) – flip objects to compensate for svg orientation. Defaults to True.
+- **flip_y** (*bool, optional*) – flip objects to compensate for svg orientation. Defaults to True.
 
-- 
-**align** (*Align** | **tuple**[**Align**, **Align**] **| **None**, **optional*) – alignment of the SVG’s viewbox,
+- **align** (*Align | tuple[Align, Align] | None, optional*) – alignment of the SVG’s viewbox,
 if None, the viewbox’s origin will be at (0,0,0). Defaults to Align.MIN.
 
-- 
-**ignore_visibility** (*bool**, **optional*) – Defaults to False.
+- **ignore_visibility** (*bool, optional*) – Defaults to False.
 
-- 
-**label_by** (*str**, **optional*) – XML attribute to use for imported shapes’ label property.
+- **label_by** (*str, optional*) – XML attribute to use for imported shapes’ label property.
 Defaults to “id”.
 Use inkscape:label to read labels set from Inkscape’s “Layers and Objects” panel.
 
@@ -7325,8 +6247,7 @@ objects contained in svg
 
 *ShapeList*[*Union*[*Wire*, *Face*]]
 
-**
-import_svg_as_buildline_code(*file_name: PathLike | str | bytes*, *precision: int = 6*) → tuple[str, str][source]**
+`import_svg_as_buildline_code(file_name: os.PathLike | str | bytes, precision: int = 6) -> tuple[str, str]`
 
 translate_to_buildline_code
 
@@ -7334,11 +6255,9 @@ Translate the contents of the given svg file into executable build123d/BuildLine
 
 **Parameters:**
 
-- 
-**file_name** (*PathLike** | **str** | **bytes**]*) – svg file name
+- **file_name** (*PathLike | str | bytes]*) – svg file name
 
-- 
-**precision** (*int*) – # digits to round values to. Defaults to # digits in TOLERANCE
+- **precision** (*int*) – # digits to round values to. Defaults to # digits in TOLERANCE
 
 **Returns:**
 
@@ -7348,48 +6267,40 @@ code, builder instance name
 
 *tuple*[*str*, *str*]
 
-## Joint Object
+## Joint Object
 
 Base Joint class which is used to position Solid and Compound objects relative to each
 other are defined below. The Joints section contains the class description of the
 derived Joint classes.
 
-**
-*class *Joint(*label: str*, *parent: BuildPart | Solid | Compound*)[source]**
+`class Joint(label: str, parent: BuildPart | Solid | Compound)`
 
 Abstract Base Joint class - used to join two components together
 
 **Parameters:**
 
-**parent** (*Union**[**Solid**, **Compound**]*) – object that joint to bound to
+**parent** (*Union[Solid, Compound]*) – object that joint to bound to
 
 **Variables:**
 
-- 
-**label** (*str*) – user assigned label
+- **label** (*str*) – user assigned label
 
-- 
-**parent** (*Shape*) – object joint is bound to
+- **parent** (*Shape*) – object joint is bound to
 
-- 
-**connected_to** (*Joint*) – joint that is connect to this joint
+- **connected_to** (*Joint*) – joint that is connect to this joint
 
-**
-*abstract *connect_to(**args*, ***kwargs*)[source]**
+`abstract connect_to(*args, **kwargs)`
 
 All derived classes must provide a connect_to method
 
-**
-*abstract property *location*: Location***
+`abstract property location: Location`
 
 Location of joint
 
-**
-*abstract *relative_to(**args*, ***kwargs*) → Location[source]**
+`abstract relative_to(*args, **kwargs) -> Location`
 
 Return relative location to another joint
 
-**
-*abstract property *symbol*: Compound***
+`abstract property symbol: Compound`
 
 A CAD object positioned in global space to illustrate the joint
