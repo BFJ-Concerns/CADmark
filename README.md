@@ -107,7 +107,7 @@ directly.
 git clone https://github.com/BFJ-Concerns/CADmark.git
 cd CADmark
 just bootstrap       # create .venv with the pinned build123d and OCP
-just run             # build and open the start view
+just run             # build CADmark and open the start view
 ```
 
 `just bootstrap` runs `scripts/bootstrap-python-runtime`, which finds Python

@@ -45,6 +45,9 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - The chat's send button read "Send 1 comments" with a single pending
   comment; it now reads "Send 1 comment"
+- `just run` on a fresh checkout opened an application that could not run
+  scripts: it built only the `cadmark` binary, not the kernel worker the
+  application starts. It now builds both
 
 ## [0.2.1] - 2026-09-24
 
