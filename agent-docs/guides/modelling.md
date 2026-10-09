@@ -151,18 +151,20 @@ works on the outside may consume a thin inside wall. Inspect a section and
 check validity after each change. For bed-facing edges in FFF/FDM, consult
 the 3D-printing guide (`agent-docs/guides/3d-printing.md`) before choosing the finish.
 
-## Exports that keep every face
+## Exports checked by reading them back
 
 Search terms: STEP, export refused, offset curve, faces missing, B-spline
 conversion, check_export.
 
-Every solid export is proven: the STEP, STL or 3MF file is read back and
-compared with the model — solids and faces for STEP, closed surfaces for STL
-and 3MF, volume and size for both. A file that does not reproduce the part
-is refused and removed. A STEP refusal names the faces the format lost with
+Every solid export is checked: the STEP, STL or 3MF file is read back and
+compared with the model — solid and face counts for STEP, closed-shell
+counts for STL and 3MF, and volume and size within a set tolerance for
+both. These figures catch lost faces and lost or distorted volume, though
+different geometry could share them. A file that fails the comparison is
+refused and removed. A STEP refusal names the faces the format lost with
 their surface and curve kinds; an STL or 3MF refusal states the shell count,
 volume or size that differs. Drawing exports (SVG, DXF) are written without
-a read-back check. `check_export` runs the same proof inside a turn without
+a read-back check. `check_export` runs the same check inside a turn without
 keeping a file, and gives the same answer.
 
 Faces built on an offset of a conic or spline cannot be written to STEP as
