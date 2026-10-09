@@ -80,7 +80,7 @@ Add the pocket allowance to `across_flats` before halving it.
 
 Keep fit calibration separate from nominal hardware dimensions. Print a
 short coupon with the same orientation and process before committing to a
-long thread or full enclosure. The [3D-printing guide](3d-printing.md)
+long thread or full enclosure. The 3D-printing guide (`agent-docs/guides/3d-printing.md`)
 covers process assumptions and clearance conventions.
 
 ## Holes, counterbores, and horizontal holes
@@ -149,7 +149,7 @@ When a fillet fails, reduce the radius, check neighbouring wall thickness
 and short edges, and try the intended edges individually. A fillet that
 works on the outside may consume a thin inside wall. Inspect a section and
 check validity after each change. For bed-facing edges in FFF/FDM, consult
-the [3D-printing guide](3d-printing.md) before choosing the finish.
+the 3D-printing guide (`agent-docs/guides/3d-printing.md`) before choosing the finish.
 
 ## Exports that keep every face
 
@@ -191,5 +191,5 @@ none.
 
 API evidence: the installed build123d 0.11.1 implementations of `Helix`,
 `Polygon`, `RegularPolygon`, `sweep`, `Box`, and `Cylinder`, plus the bundled
-[operations](../../docs/build123d/operations.md) and
-[topology selection](../../docs/build123d/topology_selection.md) references.
+operations (`docs/build123d/operations.md`) and topology selection
+(`docs/build123d/topology_selection.md`) references.
