@@ -73,12 +73,12 @@ The [printing guide](3d-printing.md) helps choose a finish for bed-facing
 edges. A valid result still needs a visual check that the intended edges
 changed.
 
-## Exports that keep every face
+## Exports checked by reading them back
 
-Every solid export is proven: the file is read back and compared with the model — solids and faces for STEP, closed surfaces for STL and 3MF, volume and size for both. Drawing formats (SVG, DXF) are written without a read-back check. A file that does not reproduce the part is refused and removed, and the message names what was lost — for STEP, the faces and their surface kinds; for STL and 3MF, the discrepancy in shell count, volume or size.
+Every solid export is checked: the file is read back and compared with the model — solid and face counts for STEP, closed-shell counts for STL and 3MF, and volume and size within a set tolerance for both. These figures catch lost faces and lost or distorted volume, though different geometry could share them. Drawing formats (SVG, DXF) are written without a read-back check. A file that fails the comparison is refused and removed, and the message names what differed — for STEP, the faces and their surface kinds; for STL and 3MF, the discrepancy in shell count, volume or size.
 
 A part built on an offset of an ellipse or spline — using `offset` in a sketch, or `offset_2d` on a wire, then extruding or revolving it — gives faces that the STEP writer cannot carry as they are. CADmark converts those faces to B-splines before writing. The export message states the measured volume deviation, which is accepted within the 1 % mesh-format tolerance.
 
 Offsets of lines and arcs simplify to lines and arcs exactly and need no conversion. STL and 3MF carry offset geometry as triangles and need none either.
 
-If the AI is working on a part with curved or offset geometry, ask it to run `check_export` before calling the part finished — it runs the same proof without keeping a file.
+If the AI is working on a part with curved or offset geometry, ask it to run `check_export` before calling the part finished — it runs the same check without keeping a file.
