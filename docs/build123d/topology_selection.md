@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/topology_selection.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/topology_selection.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
+
 # Topology Selection and Exploration
 
 Topology is the structure of build123d geometric features. Traversing the topology of a part is often required to specify objects for an operation or to locate a CAD feature. Selectors allow selection of topology objects into a ShapeList. Operators are powerful methods that further explore and refine a ShapeList for subsequent operations.

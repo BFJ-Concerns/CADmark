@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/direct_api_reference.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/direct_api_reference.html), Copyright 2022 Gumyr, under the [Apache License 2.0](LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../NOTICE).
+
 # Direct API Reference
 
 The Direct API is an interface layer between the primary user interface API
@@ -3158,8 +3160,6 @@ project_to_shape(*target_object: Shape*, *direction: Vector | tuple[float, float
 Project Face to target Object
 
 Project a Face onto a Shape generating new Face(s) on the surfaces of the object.
-
-A projection with no taper is illustrated below:
 
 Note that an array of faces is returned as the projection might result in faces
 on the “front” and “back” of the object (or even more if there are intermediate

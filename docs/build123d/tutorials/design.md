@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/tutorial_design.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/tutorial_design.html), Copyright 2022 Gumyr, under the [Apache License 2.0](../LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../../NOTICE).
+
 # Designing a Part in build123d
 
 Designing a part with build123d involves a systematic approach that leverages the power

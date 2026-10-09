@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/tutorial_joints.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/tutorial_joints.html), Copyright 2022 Gumyr, under the [Apache License 2.0](../LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../../NOTICE).
+
 # Joint Tutorial
 
 This tutorial provides a step by step guide in using Joints as we create a box with a hinged lid to illustrate the use of three different Joint types.

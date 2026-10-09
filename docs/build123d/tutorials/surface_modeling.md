@@ -1,5 +1,7 @@
 <!-- Source: https://build123d.readthedocs.io/en/latest/tutorial_surface_modeling.html -->
 
+> Adapted from the [build123d documentation](https://build123d.readthedocs.io/en/latest/tutorial_surface_modeling.html), Copyright 2022 Gumyr, under the [Apache License 2.0](../LICENSE). Converted to Markdown and edited for CADmark by BFJ Concerns; see [NOTICE](../../../NOTICE).
+
 # Surface Modeling
 
 Surface modelling refers to the direct creation and manipulation of the skin of a 3D object—its bounding faces—rather than starting from volumetric primitives or solid operations.
@@ -27,5 +29,5 @@ Methods on `Face` for creating non-planar surfaces:
 
 For hands-on tutorials, see:
 
-- tutorial_surface_heart_token.rst
-- tutorial_spitfire_wing_gordon.rst
+- [Heart token](https://build123d.readthedocs.io/en/latest/tutorial_surface_heart_token.html)
+- [Spitfire wing with a Gordon surface](https://build123d.readthedocs.io/en/latest/tutorial_spitfire_wing_gordon.html)
