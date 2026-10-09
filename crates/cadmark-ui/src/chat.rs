@@ -511,10 +511,10 @@ impl ChatPane {
                 let send = ui.add_enabled(
                     can_send && can_submit,
                     egui::Button::new(
-                        egui::RichText::new(if sending_pending {
-                            format!("Send {} comments", pending.comments().len())
-                        } else {
-                            "Send".to_string()
+                        egui::RichText::new(match (sending_pending, pending.comments().len()) {
+                            (true, 1) => "Send 1 comment".to_string(),
+                            (true, count) => format!("Send {count} comments"),
+                            (false, _) => "Send".to_string(),
                         })
                         .color(theme::TEXT_STRONG),
                     )

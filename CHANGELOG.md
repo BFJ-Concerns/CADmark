@@ -42,6 +42,10 @@ All notable changes to this project will be documented in this file.
   later; the bundled build123d documentation keeps its Apache License 2.0
   and attribution notice
 
+### Fixed
+- The chat's send button read "Send 1 comments" with a single pending
+  comment; it now reads "Send 1 comment"
+
 ## [0.2.1] - 2026-09-24
 
 ### Added
