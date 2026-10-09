@@ -74,7 +74,7 @@ current source.
 
 The installed copy keeps a log at `~/.local/state/cadmark/cadmark.log` (or
 under `XDG_STATE_HOME` if you set it), with a line for each AI request as it
-starts and ends. It is trimmed automatically once it passes five megabytes.
+starts and ends. When it has grown past five megabytes, the launcher starts it afresh at the next launch.
 
 ## Connect an AI provider
 
