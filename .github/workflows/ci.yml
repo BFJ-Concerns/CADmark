@@ -67,7 +67,8 @@ jobs:
           cache-on-failure: true
 
       # uv is pinned so the installer fetches that release, not whatever is
-      # newest; uv then fetches the pinned CPython build, which keeps the
+      # newest. setup-uv's python-version only selects the interpreter; the
+      # bootstrap step installs the pinned CPython build, which keeps the
       # exact patch release part of the runtime contract.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
@@ -76,8 +77,8 @@ jobs:
 
       # The venv is keyed on everything that decides its contents, so a
       # bumped pin rebuilds it and nothing else does. Its bin/python is a
-      # symlink into uv's managed-interpreter directory, which setup-uv
-      # fills at the same path on every run.
+      # symlink into uv's managed-interpreter directory, which the
+      # bootstrap step fills at the same path on every run.
       - name: Restore the Python runtime
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -85,7 +86,9 @@ jobs:
           key: python-runtime-${{ env.PYTHON_VERSION }}-${{ hashFiles('requirements.txt', 'scripts/bootstrap-python-runtime') }}
 
       - name: Bootstrap the Python runtime
-        run: just bootstrap --python "$(uv python find --managed-python "${PYTHON_VERSION}")"
+        run: |
+          uv python install "${PYTHON_VERSION}"
+          just bootstrap --python "$(uv python find --managed-python "${PYTHON_VERSION}")"
 
       # The whole gate, in one command — the same one a dev box and the
       # development gate run. Steps live in the justfile, not here.
