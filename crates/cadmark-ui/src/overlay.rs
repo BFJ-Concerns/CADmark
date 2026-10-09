@@ -452,9 +452,7 @@ impl OverlayState {
                                 ui.horizontal(|ui| {
                                     theme::key_hint(ui, "Enter");
                                     ui.label(
-                                        egui::RichText::new("send")
-                                            .small()
-                                            .color(theme::TEXT_MUTED),
+                                        egui::RichText::new("add").small().color(theme::TEXT_MUTED),
                                     );
                                     theme::key_hint(ui, "Esc");
                                     ui.label(
@@ -469,7 +467,7 @@ impl OverlayState {
                                                 .add_enabled(
                                                     has_text,
                                                     egui::Button::new(
-                                                        egui::RichText::new("Send")
+                                                        egui::RichText::new("Add comment")
                                                             .color(theme::TEXT_STRONG),
                                                     )
                                                     .fill(theme::ACCENT.gamma_multiply(0.55)),
