@@ -65,7 +65,7 @@ Source: `crates/cadmark-app/Cargo.toml:6–8`, `crates/cadmark-kernel/Cargo.toml
 
 ## Test runner
 
-`just test` runs `cargo test --workspace`. With `CADMARK_TEST_RUNNER=nextest` it runs cargo-nextest's `ci` profile instead (two retries, no fail-fast, a 120 s slow-test timeout that terminates a hung test after three periods, and a junit report at `target/nextest/ci/junit.xml`), then the doctests under plain `cargo test --doc`, which nextest cannot run. Any other value is an error.
+`just test` runs `cargo test --workspace`. With `CADMARK_TEST_RUNNER=nextest` it runs cargo-nextest's `ci` profile instead (two retries, no fail-fast, a 120 s slow-test timeout that terminates a hung test after three periods), then the doctests under plain `cargo test --doc`, which nextest cannot run. Any other value is an error.
 
 The renderer's `picking_readback` integration test has its own `main` rather than libtest's, so it can point the GL loader at a software rasteriser before any driver opens. It answers the libtest command line both runners use: `--list --format terse` lists its checks, positional names select by substring (or by whole name with `--exact`), and `--nocapture` is accepted.
 
@@ -73,13 +73,9 @@ Source: `justfile`, `.config/nextest.toml`, `crates/cadmark-renderer/tests/picki
 
 ## Continuous integration
 
-Two workflows run the one gate, `just verify` with `CADMARK_TEST_RUNNER=nextest`; neither defines a check of its own, so they cannot drift from each other or from a development machine.
+`.github/workflows/ci.yml` runs the gate, `just verify` with `CADMARK_TEST_RUNNER=nextest`; it defines no check of its own, so it cannot drift from a development machine. It runs on pushes to `main` and on pull requests, on GitHub's hosted `ubuntu-24.04` runner, so the build and the test suite run on a stock Linux distribution. The job installs Mesa's Vulkan drivers for lavapipe, the stable Rust toolchain with rustfmt and clippy, just and cargo-nextest, and the pinned CPython 3.12 through uv, then runs `just bootstrap` and `just verify`. The `.venv` is cached on the interpreter pin, `requirements.txt`, and the bootstrap script. Every action is pinned to a commit. The workflow has read-only repository permissions.
 
-**Development gate** — `.forgejo/workflows/ci.yml` runs on every non-draft pull request whose head branch does not start with `structural/`, and on pushes to `main` and `structural/**`, in the `forge-ci/rust` image on the Forgejo Actions runner. The image carries the Rust toolchain, cargo-nextest, just, and Mesa's Vulkan drivers (lavapipe serves as the software adapter); it has no Python 3.12, so the job installs a pinned uv, fetches the pinned CPython 3.12 build, and runs `just bootstrap` against it, caching the interpreter and `.venv` on the pins and `requirements.txt`. A pull request whose head commit already has a verdict from the workflow is not re-run. A test that failed and then passed on retry marks the PR with the `Flaky Test` label.
-
-**Public gate** — `.github/workflows/ci.yml` runs on pushes to `main` and on pull requests at the GitHub repository, on GitHub's hosted `ubuntu-24.04` runner, so the build and the test suite run on a stock Linux distribution. The job installs Mesa's Vulkan drivers for lavapipe, the stable Rust toolchain with rustfmt and clippy, just and cargo-nextest, and the pinned CPython 3.12 through uv, then runs `just bootstrap` and `just verify`. The `.venv` is cached on the interpreter pin, `requirements.txt`, and the bootstrap script. Every action is pinned to a commit. The workflow has read-only repository permissions and applies no labels.
-
-Source: `.forgejo/workflows/ci.yml`, `.github/workflows/ci.yml`.
+Source: `.github/workflows/ci.yml`.
 
 ## Desktop installation
 
